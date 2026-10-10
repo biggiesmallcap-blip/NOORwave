@@ -10,18 +10,41 @@
 	let menuEl = $state<HTMLDivElement | null>(null);
 	let openSubmenu = $state<number | null>(null);
 
-	// Derived position keeps the menu inside the viewport.
+	// Native-menu placement: open below/right of the anchor, flip above/left
+	// when that side lacks room, and only clamp when neither side fits. The
+	// measured size is observed so an expanding submenu re-places the menu
+	// instead of running off the bottom of the window.
 	const MENU_W = 240;
 	const MENU_H_ESTIMATE = 480;
+	const EDGE = 8;
+
+	let menuSize = $state({ w: MENU_W, h: MENU_H_ESTIMATE });
+
+	$effect(() => {
+		const el = menuEl;
+		if (!el) return;
+		const observer = new ResizeObserver(() => {
+			menuSize = { w: el.offsetWidth, h: el.offsetHeight };
+		});
+		observer.observe(el);
+		return () => observer.disconnect();
+	});
+
+	function place(anchor: number, flipAnchor: number, size: number, viewport: number): number {
+		if (anchor + size + EDGE <= viewport) return anchor;
+		if (flipAnchor - size >= EDGE) return flipAnchor - size;
+		return Math.max(EDGE, viewport - size - EDGE);
+	}
 
 	let position = $derived.by(() => {
 		if (!$contextMenu.open) return { left: 0, top: 0 };
 		const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
 		const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
-		const menuHeight = menuEl?.offsetHeight ?? MENU_H_ESTIMATE;
-		const left = Math.min($contextMenu.x, vw - MENU_W - 8);
-		const top = Math.min($contextMenu.y, vh - menuHeight - 8);
-		return { left: Math.max(8, left), top: Math.max(8, top) };
+		const { x, y, flipY } = $contextMenu;
+		return {
+			left: place(x, x, menuSize.w, vw),
+			top: place(y, flipY ?? y, menuSize.h, vh)
+		};
 	});
 
 	$effect(() => {
@@ -283,7 +306,7 @@
 	}
 
 	.context-menu-label {
-		flex: 1;
+		flex: 1 1 auto;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -293,8 +316,17 @@
 	.context-menu-caret,
 	.context-menu-hint {
 		margin-left: 8px;
+		white-space: nowrap;
 		font-size: var(--font-size-xs);
 		color: var(--text-tertiary, rgba(255, 255, 255, 0.45));
+	}
+
+	/* The hint gives way first so the label is never ellipsized for it. */
+	.context-menu-hint {
+		flex-shrink: 100;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.context-menu-caret {

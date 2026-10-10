@@ -175,7 +175,6 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 	items.push({
 		label: 'Song radio',
 		icon: '◉',
-		hint: 'Start from this song',
 		onSelect: () => void startSongRadio(track.id)
 	});
 
@@ -281,7 +280,7 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 			label: 'Song radio',
 			icon: '◉',
 			disabled: !playable,
-			hint: playable ? 'Start from this song' : playableLabel,
+			hint: playable ? undefined : playableLabel,
 			onSelect: () => void startTidalSongRadio(track),
 		},
 		SEPARATOR,
