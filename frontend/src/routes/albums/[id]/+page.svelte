@@ -29,12 +29,8 @@
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
-	import {
-		firstArtworkUrl,
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
+	import { firstArtworkUrl } from '$lib/utils/artwork';
+	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 	import { formatTotalDuration, formatTrackDuration } from '$lib/utils/format';
 	import { groupWorks } from '$lib/album/album_works';
 	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
@@ -50,7 +46,10 @@
 	let savePending = $state(false);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	// Artwork URL per size, stepping down a size each time one fails to load.
+	const artwork = createArtworkFallback();
+	const artworkCandidate = artwork.candidate;
+	const markArtworkFailed = artwork.markFailed;
 	let loadSeq = 0;
 
 	let artistTracks = $state<Track[]>([]);
@@ -98,7 +97,7 @@
 
 	$effect(() => {
 		const id = albumId;
-		failedArtworkUrls = {};
+		artwork.reset();
 		tracks = [];
 		tidalOnlyTracks = [];
 		albumTidalId = null;
@@ -183,23 +182,6 @@
 			total_ms: totalMsLocal + totalMsTidal,
 		};
 	});
-
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
-	function markArtworkFailed(renderedUrl: string | null | undefined) {
-		if (!renderedUrl) return;
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
-	}
 
 	let otherAlbums = $derived.by(() => {
 		const map = new Map<

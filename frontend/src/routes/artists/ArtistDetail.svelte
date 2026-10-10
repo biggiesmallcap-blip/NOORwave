@@ -45,11 +45,6 @@
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { canPlayTrack } from '$lib/player/playable';
-	import {
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
 	import { libraryTrackToTidalPlayable, tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 	import { cleanArtistBio } from './artist_bio';
 	import { artistCurrentTrackMatchesArtist } from './artist_playback';
@@ -62,6 +57,7 @@
 		type PopularTrackItem,
 	} from './artist_discography';
 	import { watchUrl } from '$lib/video/section';
+	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 	import { failedPreviewReleaseLinks } from './artist_release_loading';
 
 	// One artist view, two data sources. A library artist is keyed by local id
@@ -123,7 +119,10 @@
 	let tidalAvailable = $state(false);
 	let tidalReleaseStatus = $state<ArtistReleaseFilterStatuses | undefined>(undefined);
 	let retryReleaseLinks = $derived(failedPreviewReleaseLinks(tidalReleaseStatus));
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	// Artwork URL per size, stepping down a size each time one fails to load.
+	const artwork = createArtworkFallback();
+	const artworkCandidate = artwork.candidate;
+	const markArtworkFailed = artwork.markFailed;
 	let tidalLoadSeq = 0;
 
 	// Active TIDAL artist id used for "is this artist currently playing" checks
@@ -254,7 +253,7 @@
 		tidalBio = null;
 		tidalAvailable = false;
 		tidalReleaseStatus = undefined;
-		failedArtworkUrls = {};
+		artwork.reset();
 		bioExpanded = false;
 		if (source.kind === 'local') {
 			const id = source.artistId;
@@ -323,23 +322,6 @@
 	);
 	let heroPortraitSrc = $derived(artworkCandidate(heroPortraitUrl, 640));
 	let heroBackdropSrc = $derived(artworkCandidate(heroBackdropUrl, 1280));
-
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
-	function markArtworkFailed(renderedUrl: string | null | undefined) {
-		if (!renderedUrl) return;
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
-	}
 
 	// Artist biographies can arrive with TIDAL link and HTML markup.
 	// The helper keeps only readable text.

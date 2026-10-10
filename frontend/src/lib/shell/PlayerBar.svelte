@@ -7,12 +7,8 @@
 	import { playerArtworkStyle } from '$lib/stores/playerArtwork';
 	import { bottomQualityDisplay, sideQualityDisplay } from '$lib/stores/playerInformation';
 	import type { StreamDisplayInfo, Track } from '$lib/api/client';
-	import {
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
 	import { getQualityClass } from '$lib/utils/format';
+	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 
 	type PlayerBarError = {
 		message: string;
@@ -93,26 +89,12 @@
 		onDismissPlayerError: () => void;
 	} = $props();
 
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	// Artwork URL per size, stepping down a size each time one fails to load.
+	const artwork = createArtworkFallback();
+	const artworkCandidate = artwork.candidate;
+	const markArtworkFailed = artwork.markFailed;
 
 	let nowPlayingArtwork = $derived(artworkCandidate(track?.artwork_url, 640));
-
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
-	function markArtworkFailed(renderedUrl: string | null | undefined) {
-		if (!renderedUrl) return;
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
-	}
 
 	// One quality statement for the whole panel. The live stream wins over the
 	// track's catalogue tier; the exact bit-depth / kHz rides along in

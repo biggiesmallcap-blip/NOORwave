@@ -29,14 +29,13 @@
 	import NowPlayingMetadata from '$lib/components/now-playing/NowPlayingMetadata.svelte';
 	import NowPlayingProgress from '$lib/components/now-playing/NowPlayingProgress.svelte';
 	import NowPlayingTransport from '$lib/components/now-playing/NowPlayingTransport.svelte';
-	import {
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
+	import { upscaleTidalArtwork } from '$lib/utils/artwork';
+	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 
 	let favoritePending = $state(false);
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	// Artwork URL per size, stepping down a size each time one fails to load.
+	const artwork = createArtworkFallback();
+	const artworkCandidate = artwork.candidate;
 
 	const shortcut = $derived(getCmdOrCtrlLabel());
 
@@ -72,23 +71,11 @@
 		return null;
 	});
 
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
 	function markArtworkFailed(renderedUrl: string | null | undefined) {
 		if (!renderedUrl) return;
 		if (upgradedArt?.url === renderedUrl) upgradedArt = null;
 		upgradeFailedUrls = { ...upgradeFailedUrls, [renderedUrl]: true };
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
+		artwork.markFailed(renderedUrl);
 	}
 
 	// `load` only means the bytes arrived; decode() is what guarantees the bitmap is

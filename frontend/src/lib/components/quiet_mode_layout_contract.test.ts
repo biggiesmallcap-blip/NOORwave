@@ -17,7 +17,7 @@ function cssBlock(selector: string): string {
 
 describe('quiet mode layout contracts', () => {
 	test('routes current-track artwork through TIDAL fallback sizes', () => {
-		expect(source).toContain('tidalArtworkFallbackSizes');
+		expect(source).toContain('createArtworkFallback()');
 		expect(source).toContain(
 			'let quietArtworkBase = $derived(\n\t\tartworkCandidate($currentTrack?.artwork_url, QUIET_ART_BASE_SIZE)\n\t);'
 		);

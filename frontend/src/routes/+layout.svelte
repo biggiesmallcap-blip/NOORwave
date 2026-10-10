@@ -54,11 +54,6 @@
 	import { queueAnnouncement } from '$lib/stores/queue_announcer';
 	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
 	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
-	import {
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
 	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
 	import { getApiBase } from '$lib/api/client';
 	import { remoteApi, RemoteRequestError } from '$lib/api/remote';
@@ -133,6 +128,7 @@
 	} from '$lib/stores/video_session';
 	import { isVideoSectionPath } from '$lib/video/section';
 	import VideoDock from '$lib/components/video/VideoDock.svelte';
+	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 
 	let { children } = $props();
 
@@ -1154,24 +1150,10 @@
 		await restoreQueueItems(restorable);
 	}
 
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
-
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
-	function markArtworkFailed(renderedUrl: string | null | undefined) {
-		if (!renderedUrl) return;
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
-	}
+	// Artwork URL per size, stepping down a size each time one fails to load.
+	const artwork = createArtworkFallback();
+	const artworkCandidate = artwork.candidate;
+	const markArtworkFailed = artwork.markFailed;
 
 	let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));
 	let mobileMiniArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 320));

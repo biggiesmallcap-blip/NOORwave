@@ -64,7 +64,7 @@ describe('album page layout contracts', () => {
 	});
 
 	test('routes album artwork through TIDAL fallback sizes', () => {
-		expect(source).toContain('tidalArtworkFallbackSizes');
+		expect(source).toContain('createArtworkFallback()');
 		expect(source).toContain('<DetailHero');
 		expect(source).toContain('artwork={h.artwork_url}');
 		expect(source).toContain('backdrop={h.artwork_url}');
