@@ -1289,10 +1289,49 @@ pub fn discovery_training_worker_threads_for_available(
 }
 
 pub fn discovery_training_worker_threads(profile: DiscoveryTrainingSafetyProfile) -> usize {
-    let available_threads = std::thread::available_parallelism()
+    discovery_training_worker_threads_for_available(profile, available_threads())
+}
+
+fn available_threads() -> usize {
+    std::thread::available_parallelism()
         .map(|value| value.get())
-        .unwrap_or(1);
-    discovery_training_worker_threads_for_available(profile, available_threads)
+        .unwrap_or(1)
+}
+
+/// Put the calling thread in Windows background mode: lowest CPU priority and
+/// low disk priority, so the scheduler only runs it when nothing else wants
+/// the machine. Used for the unattended upgrade retrain. No-op elsewhere.
+#[cfg(windows)]
+fn lower_current_thread_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+    };
+    // SAFETY: GetCurrentThread returns a pseudo-handle for the calling thread
+    // that needs no closing; SetThreadPriority only changes its scheduling.
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+
+#[cfg(not(windows))]
+fn lower_current_thread_priority() {}
+
+/// Where thread priority cannot be lowered, a background run uses a quarter
+/// of the threads or fewer, so it gets this
+/// many times the normal safety timeout instead of timing out mid-run.
+const BACKGROUND_TRAINING_TIMEOUT_FACTOR: u32 = 4;
+
+pub fn background_training_safety_timeout(intensity: DiscoveryIntensity) -> Duration {
+    discovery_training_safety_timeout(intensity) * BACKGROUND_TRAINING_TIMEOUT_FACTOR
+}
+
+/// Most worker threads an unattended run (the upgrade retrain) may use.
+const BACKGROUND_TRAINING_MAX_WORKERS: usize = 2;
+
+/// Threads for a run nobody asked for, where priority cannot be lowered: a
+/// quarter of the cores, at most two, so the machine stays responsive.
+pub fn background_training_worker_threads_for_available(available_threads: usize) -> usize {
+    (available_threads / 4).clamp(1, BACKGROUND_TRAINING_MAX_WORKERS)
 }
 
 fn load_external_provider_last_refresh(db: &Database) -> Result<Option<chrono::NaiveDateTime>> {
@@ -1331,11 +1370,14 @@ async fn wait_for_cancel(cancel: &AtomicBool) {
     }
 }
 
+/// `background` marks an unattended run (the upgrade retrain): it uses a
+/// small, fixed thread budget instead of the user's safety profile.
 pub async fn start_training(
     db: Database,
     event_tx: Sender<AppEvent>,
     full_mode: bool,
     rebuild_audio: bool,
+    background: bool,
     cancel: Arc<AtomicBool>,
     external_refresh_clients: ExternalProviderRefreshClients,
 ) -> Result<()> {
@@ -1346,8 +1388,20 @@ pub async fn start_training(
     let intensity = load_discovery_intensity(&db);
     let intensity_params = intensity.params();
     let safety_profile = load_discovery_training_safety_profile(&db);
-    let safety_timeout = discovery_training_safety_timeout(intensity);
-    let worker_threads = discovery_training_worker_threads(safety_profile);
+    let safety_timeout = if background && !cfg!(windows) {
+        background_training_safety_timeout(intensity)
+    } else {
+        discovery_training_safety_timeout(intensity)
+    };
+    // An unattended run on Windows keeps the profile's threads but runs them
+    // at background priority (see `lower_current_thread_priority`): full
+    // speed when the machine is idle, out of the way when it is not. Where
+    // priority cannot be lowered it falls back to a small thread budget.
+    let worker_threads = if background && !cfg!(windows) {
+        background_training_worker_threads_for_available(available_threads())
+    } else {
+        discovery_training_worker_threads(safety_profile)
+    };
     let (model, run) = db.with_conn(|conn| {
         let run = queries::create_training_run(conn, None, "corpus", "running")?;
         let model_key = format!("{MODEL_FAMILY}:{}", run.id);
@@ -1623,9 +1677,13 @@ pub async fn start_training(
         watchdog_cancel.store(true, Ordering::Relaxed);
     });
     let output_join = tokio::task::spawn_blocking(move || -> Result<_> {
-        let pool = rayon::ThreadPoolBuilder::new()
+        let mut builder = rayon::ThreadPoolBuilder::new()
             .num_threads(worker_threads)
-            .thread_name(|idx| format!("discovery-v2-{idx}"))
+            .thread_name(|idx| format!("discovery-v2-{idx}"));
+        if background {
+            builder = builder.start_handler(|_| lower_current_thread_priority());
+        }
+        let pool = builder
             .build()
             .context("create discovery trainer worker pool")?;
         Ok(pool.install(|| {
@@ -3254,6 +3312,18 @@ mod tests {
     }
 
     #[test]
+    fn background_training_stays_on_a_small_thread_budget() {
+        assert_eq!(background_training_worker_threads_for_available(1), 1);
+        assert_eq!(background_training_worker_threads_for_available(4), 1);
+        assert_eq!(background_training_worker_threads_for_available(8), 2);
+        assert_eq!(background_training_worker_threads_for_available(32), 2);
+        assert_eq!(
+            background_training_safety_timeout(DiscoveryIntensity::Medium),
+            discovery_training_safety_timeout(DiscoveryIntensity::Medium) * 4
+        );
+    }
+
+    #[test]
     fn training_safety_profile_defaults_to_balanced_and_round_trips() {
         let db = Database::open_in_memory().expect("in-memory db");
         db.run_migrations().expect("migrations");
@@ -3282,6 +3352,7 @@ mod tests {
         let err = start_training(
             db.clone(),
             event_tx,
+            false,
             false,
             false,
             Arc::new(AtomicBool::new(false)),
@@ -3320,6 +3391,7 @@ mod tests {
         let err = start_training(
             db.clone(),
             event_tx,
+            false,
             false,
             false,
             Arc::new(AtomicBool::new(false)),

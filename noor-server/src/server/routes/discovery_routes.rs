@@ -539,6 +539,7 @@ pub async fn spawn_discovery_training(
     state: SharedState,
     full_mode: bool,
     rebuild_audio: bool,
+    background: bool,
 ) -> TrainingSpawn {
     use std::sync::atomic::Ordering;
 
@@ -596,6 +597,7 @@ pub async fn spawn_discovery_training(
             event_tx,
             full_mode,
             rebuild_audio,
+            background,
             cancel,
             external_refresh_clients,
         )
@@ -618,7 +620,7 @@ pub(super) async fn start_discovery_training(
     let (mode, full_mode) = parse_discovery_training_mode(payload.mode.as_deref())?;
     let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
     Ok(Json(
-        match spawn_discovery_training(state, full_mode, rebuild_audio).await {
+        match spawn_discovery_training(state, full_mode, rebuild_audio, false).await {
             TrainingSpawn::AlreadyRunning => json!({
                 "status": "already_running",
                 "mode": mode

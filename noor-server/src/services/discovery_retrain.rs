@@ -4,10 +4,12 @@
 //! pair-keyed behavior hash and the word-matching metadata proxy, so their
 //! neighbors are wrong, not just old. Installs cannot be repaired by hand, so
 //! the hourly maintenance sweep retrains them once, in the background, while
-//! the app is idle. It stops once a current-version run completes (activated or
-//! held back by the gate) or after MAX_ATTEMPTS started runs, so an install
-//! whose training keeps failing does not retrain forever. Never-trained
-//! installs are left alone: first training stays the user's choice.
+//! the app is idle, at low CPU priority. It stops once a current-version run
+//! completes (activated or held back by the gate) or after MAX_ATTEMPTS runs
+//! that ended badly, so an install whose training keeps failing does not
+//! retrain forever. A run cut short by closing the app does not count; it
+//! resumes on a later launch. Never-trained installs are left alone: first
+//! training stays the user's choice.
 
 use crate::SharedState;
 use crate::db::queries;
@@ -17,8 +19,6 @@ use rusqlite::{Connection, OptionalExtension};
 use std::sync::atomic::Ordering;
 use tracing::{info, warn};
 
-/// `server_config` key holding "<trainer version>:<started attempts>".
-const ATTEMPTS_KEY: &str = "discovery_upgrade_retrain_attempts";
 const MAX_ATTEMPTS: i64 = 3;
 
 /// The latest training run as the decision needs it.
@@ -53,33 +53,21 @@ fn should_retrain(active_version: Option<i64>, latest: Option<&LatestRun>, attem
     attempts < MAX_ATTEMPTS
 }
 
-/// Started attempts at the current trainer version; another version's count
-/// reads as 0, so a later bump starts over.
-fn read_attempts(conn: &Connection) -> rusqlite::Result<i64> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM server_config WHERE key = ?1",
-            [ATTEMPTS_KEY],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(raw
-        .and_then(|value| {
-            let (version, attempts) = value.split_once(':')?;
-            if version.parse::<i64>().ok()? != TRAINER_CONFIG_VERSION {
-                return None;
-            }
-            attempts.parse::<i64>().ok()
-        })
-        .unwrap_or(0))
-}
-
-fn record_attempts(conn: &Connection, attempts: i64) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
-        rusqlite::params![ATTEMPTS_KEY, format!("{TRAINER_CONFIG_VERSION}:{attempts}")],
-    )?;
-    Ok(())
+/// Tries at the current trainer version that ran to an end (completed,
+/// failed, timed out or cancelled). A run cut short because the app closed is
+/// marked "interrupted by server restart" at the next launch and does not
+/// count, so an install that is rarely open long enough simply resumes later.
+fn finished_attempts(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM training_runs r
+         JOIN embedding_models m ON m.id = r.model_id
+         WHERE r.status != 'running'
+           AND COALESCE(json_extract(m.config_json, '$.trainer_config_version'), 1) >= ?1
+           AND COALESCE(r.error_text, '') != 'interrupted by server restart'",
+        [TRAINER_CONFIG_VERSION],
+        |row| row.get(0),
+    )
 }
 
 fn load_latest_run(conn: &Connection) -> anyhow::Result<Option<LatestRun>> {
@@ -123,7 +111,7 @@ pub async fn run_if_outdated(state: SharedState) {
         let active_version = queries::get_selected_discovery_embedding_model(conn)?
             .map(|model| trainer_config_version_from_json(model.config_json.as_deref()));
         let latest = load_latest_run(conn)?;
-        let attempts = read_attempts(conn)?;
+        let attempts = finished_attempts(conn)?;
         Ok((
             should_retrain(active_version, latest.as_ref(), attempts),
             attempts,
@@ -139,10 +127,9 @@ pub async fn run_if_outdated(state: SharedState) {
     if !retrain {
         return;
     }
-    if let TrainingSpawn::Started = spawn_discovery_training(state, true, true).await {
-        if let Err(error) = db.with_conn(|conn| Ok(record_attempts(conn, attempts + 1)?)) {
-            warn!(target: "noor.discovery.training", %error, "could not record upgrade retrain attempt");
-        }
+    // Background: low priority (a small thread budget where that is not
+    // possible), since nobody asked for this run.
+    if let TrainingSpawn::Started = spawn_discovery_training(state, true, true, true).await {
         info!(
             target: "noor.discovery.training",
             attempt = attempts + 1,
@@ -203,18 +190,32 @@ mod tests {
     }
 
     #[test]
-    fn attempts_are_counted_per_trainer_version() {
+    fn interrupted_runs_do_not_count_as_attempts() {
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         db.with_conn(|conn| {
-            assert_eq!(read_attempts(conn)?, 0);
-            record_attempts(conn, 2)?;
-            assert_eq!(read_attempts(conn)?, 2);
-            conn.execute(
-                "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
-                rusqlite::params![ATTEMPTS_KEY, format!("{OLD}:5")],
-            )?;
-            assert_eq!(read_attempts(conn)?, 0);
+            let config = format!(r#"{{"trainer_config_version":{TRAINER_CONFIG_VERSION}}}"#);
+            for (status, error) in [
+                ("failed", Some("interrupted by server restart")),
+                ("failed", Some("discovery training timed out")),
+                ("running", None),
+            ] {
+                let model = queries::create_embedding_model(
+                    conn,
+                    &format!("discovery-fusion-v2:{status}-{}", error.unwrap_or("none")),
+                    "discovery-fusion-v2",
+                    8,
+                    "failed",
+                    Some(&config),
+                )?;
+                let run = queries::create_training_run(conn, Some(model.id), "corpus", status)?;
+                conn.execute(
+                    "UPDATE training_runs SET error_text = ?1 WHERE id = ?2",
+                    rusqlite::params![error, run.id],
+                )?;
+            }
+            // Only the timed-out run counts: interrupted and running do not.
+            assert_eq!(finished_attempts(conn)?, 1);
             Ok(())
         })
         .unwrap();
