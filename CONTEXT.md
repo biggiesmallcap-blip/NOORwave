@@ -45,7 +45,7 @@ _Avoid_: playback session (collides with **listen session**), player (ambiguous 
 The listening-history record for one stretch of a track being heard, closed with an end reason (replaced, queue ended, ...). The **Transport** writes listen sessions; it is not one.
 
 **Playback generation**:
-A monotonically increasing counter bumped by every user transport command. Work that started under an older generation (a slow stream resolve, a pending-row lookup) must not apply its result. Owned by the **Transport**; nothing else reads or bumps it.
+A monotonically increasing counter bumped by every user transport command. Work that started under an older generation (a slow stream resolve, a pending-row lookup) must not apply its result. Owned by the **Transport**: only it bumps the counter; other code (DJ preparation) may read it through `transport::generation::current` to discard stale work.
 
 **Queue edit**:
 Adding, appending, play-next, moving, removing or clearing queue rows. Not part of the **Transport**; a queue edit that changes the current item asks the **Transport** to act.

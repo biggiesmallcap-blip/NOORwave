@@ -1,18 +1,11 @@
 use super::transport::command as transport_command;
 use super::transport::events::{
     describe_tidal_playback_error, handle_near_end, report_playback_failure,
-    switch_runtime_to_snapshot_current,
 };
-use super::transport::generation::{
-    bump as bump_playback_generation, current as current_playback_generation,
-};
-use super::transport::listen::{
-    flush_active_listen_session_locked, record_transition_if_changed, sync_session_after_snapshot,
-};
-use super::transport::pending::{
-    resolve_or_skip_pending_current, resolve_pending_row, spawn_pending_queue_resolver,
-};
-use super::transport::runtime::{RuntimeUnavailable, current as current_playback_runtime};
+use super::transport::generation::current as current_playback_generation;
+use super::transport::listen::{flush_active_listen_session_locked, record_transition_if_changed};
+use super::transport::pending::{resolve_pending_row, spawn_pending_queue_resolver};
+use super::transport::runtime::RuntimeUnavailable;
 use super::transport::settings::{
     reissue_current_track_at_new_quality, runtime_output_settings_from_audio_settings,
 };
@@ -5568,27 +5561,7 @@ async fn remove_queue_track(
     let include_playback_state = outcome.removed_current;
     let mut snapshot = outcome.snapshot;
     if outcome.removed_current && outcome.was_playing {
-        let playback_generation = bump_playback_generation(&state).await;
-        snapshot = resolve_or_skip_pending_current(
-            &state,
-            snapshot,
-            playback_generation,
-            "remove_queue_track",
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let end_reason = if snapshot.state.current_track.is_some() {
-            Some(player::ListenSessionEndReason::Replaced)
-        } else {
-            Some(player::ListenSessionEndReason::QueueEnded)
-        };
-        sync_session_after_snapshot(&state, &snapshot, end_reason).await;
-        if snapshot.state.current_track.is_none()
-            && let Some(runtime_handle) = current_playback_runtime(&state).await
-        {
-            let _ = runtime_handle.stop();
-        }
-        switch_runtime_to_snapshot_current(&state, &snapshot, playback_generation)
+        snapshot = transport_command::continue_after_current_removed(&state, snapshot)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     } else if outcome.removed_current {

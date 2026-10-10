@@ -493,6 +493,32 @@ async fn report_play_started(
     });
 }
 
+/// A queue edit removed the row that was playing: continue on whatever the
+/// queue now anchors (resolving or skipping a pending row), or stop when the
+/// queue ran out.
+pub(crate) async fn continue_after_current_removed(
+    state: &SharedState,
+    snapshot: player::PlaybackSnapshot,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    let playback_generation = generation::bump(state).await;
+    let snapshot =
+        resolve_or_skip_pending_current(state, snapshot, playback_generation, "remove_queue_track")
+            .await?;
+    let end_reason = if snapshot.state.current_track.is_some() {
+        Some(player::ListenSessionEndReason::Replaced)
+    } else {
+        Some(player::ListenSessionEndReason::QueueEnded)
+    };
+    sync_session_after_snapshot(state, &snapshot, end_reason).await;
+    if snapshot.state.current_track.is_none()
+        && let Some(runtime_handle) = current_runtime(state).await
+    {
+        let _ = runtime_handle.stop();
+    }
+    switch_runtime_to_snapshot_current(state, &snapshot, playback_generation).await?;
+    Ok(snapshot)
+}
+
 /// Restart whatever is audibly playing from the top via a segment-aware
 /// runtime seek: no stream re-resolve, no engine cold start. Works for
 /// persisted queue playback and preserves pause state. While paused the audio

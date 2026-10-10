@@ -4752,7 +4752,7 @@ async fn manual_previous_skips_unresolved_pending_rows_to_prior_library_track() 
         .unwrap();
 
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
-    let playback_generation = bump_playback_generation(&state).await;
+    let playback_generation = crate::server::transport::generation::bump(&state).await;
     let saved_anchor = save_playback_anchor(&state)
         .await
         .expect("saved playback anchor");
@@ -4809,7 +4809,7 @@ async fn manual_previous_restores_anchor_when_pending_rows_cannot_move_back() {
         .unwrap();
 
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
-    let playback_generation = bump_playback_generation(&state).await;
+    let playback_generation = crate::server::transport::generation::bump(&state).await;
     let saved_anchor = save_playback_anchor(&state)
         .await
         .expect("saved playback anchor");
