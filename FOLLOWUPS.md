@@ -10,6 +10,22 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### deps: migrate symphonia 0.5 -> 0.6
+
+symphonia 0.6 reshapes the decode API: SampleBuffer, DecoderOptions, the probe
+module and the Decoder trait moved, and Packet's fields went private. Port the
+noor-server and noor-mix decode paths, then let Dependabot propose the bump
+again (closed PR #337 shows the 13 compile errors).
+Spawned by: Dependabot PR #337
+
+### deps: migrate SvelteKit 2 -> 3
+
+Kit 3 (with adapter-static 4, adapter-auto 8) drops `base` from $app/paths
+(used in frontend/src/lib/cache/prewarm.ts) and the production build fails
+during config load. No user-facing gain for a static Tauri SPA; pick it up
+once 3.x has settled or a Kit 2 fix stops landing.
+Spawned by: Dependabot PR #333
+
 ### radio: TIDAL track-mix lane
 
 TIDAL's per-track mix ("Track Radio") already fills song and artist radio when
