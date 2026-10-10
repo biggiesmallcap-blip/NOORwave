@@ -439,6 +439,15 @@ impl TidalClient {
         self
     }
 
+    pub(crate) fn for_session(
+        session: crate::services::tidal::session::TidalSession,
+        country_code: &str,
+    ) -> Self {
+        let token = session.access_token_for_request().unwrap_or_default();
+        Self::with_http(session.api_http(), token, country_code.to_string())
+            .with_api_base(session.api_base().to_string())
+    }
+
     /// Convenience constructor that builds a fresh HTTP client. Prefer
     /// `with_http` when an `AppState`-level client is available — building a
     /// client per call pays the TLS-pool setup repeatedly.

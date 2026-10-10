@@ -9,5 +9,6 @@ pub mod import;
 pub mod mutations;
 pub mod play_reporter;
 pub mod repair;
+pub mod session;
 pub mod singleflight;
 pub mod stream;
