@@ -3,6 +3,7 @@ use super::transport::generation::{
     is_current as playback_generation_is_current,
 };
 use super::transport::runtime::{RuntimeUnavailable, current as current_playback_runtime};
+use super::transport::start::{Dispatch, StartError, StartRequest, start_track};
 use super::transport::stream::{
     TidalPlaybackError, resolve_tidal_playback_stream, runtime_stream_resolver,
 };
@@ -4587,6 +4588,67 @@ async fn play_track(
     })))
 }
 
+/// HTTP response for a failed start. `stream_context` is the message used for
+/// stream failures; `runtime_message`, when set, replaces every runtime
+/// acquisition error with a 502 carrying that message (the behaviour callers
+/// had when they wrapped runtime errors themselves).
+fn start_error_response(
+    state: &SharedState,
+    error: StartError,
+    track_id: i64,
+    stream_context: &str,
+    runtime_message: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    match error {
+        StartError::LocalUnsupported => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "status": "local_playback_not_supported",
+                "message": "Local-library playback is not wired into the host audio runtime yet.",
+                "track_id": track_id,
+            })),
+        ),
+        StartError::Stream(error) => tidal_playback_error_response(track_id, error, stream_context),
+        StartError::Runtime(error) => match runtime_message {
+            Some(message) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "status": "playback_runtime_unavailable",
+                    "message": message,
+                    "track_id": track_id,
+                })),
+            ),
+            None => runtime_unavailable_response(error, track_id),
+        },
+        StartError::Dispatch { dispatch, error } => {
+            let verb = match dispatch {
+                Dispatch::Play => "start",
+                Dispatch::Switch => "switch",
+            };
+            let message = format!("Failed to {verb} host audio playback: {error}");
+            report_playback_failure(state, &message);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "playback_runtime_failed",
+                    "message": message,
+                    "track_id": track_id,
+                })),
+            )
+        }
+        // Callers return the current snapshot on Superseded before mapping;
+        // this arm only keeps the match exhaustive.
+        StartError::Superseded => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "status": "playback_superseded",
+                "message": "A newer playback command took over.",
+                "track_id": track_id,
+            })),
+        ),
+    }
+}
+
 fn tidal_playback_error_response(
     track_id: i64,
     error: TidalPlaybackError,
@@ -6194,21 +6256,21 @@ async fn next_track(
     let play_track = snapshot.state.current_track.as_ref();
 
     if let Some(track) = play_track {
-        let user_quality = current_user_audio_quality(&state).await;
-        let stream_request = player::build_tidal_stream_request(track, user_quality.clone()).ok_or_else(|| {
-            (
-                StatusCode::NOT_IMPLEMENTED,
-                Json(json!({
-                    "status": "local_playback_not_supported",
-                    "message": "Local-library playback is not wired into the host audio runtime yet.",
-                    "track_id": track.id,
-                })),
-            )
-        })?;
-        let stream_info = match resolve_tidal_playback_stream(&state, track, &stream_request).await
+        let crossfade_ms = effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await;
+        match start_track(
+            &state,
+            StartRequest {
+                track,
+                generation: playback_generation,
+                dispatch: Dispatch::Switch,
+                crossfade_ms,
+            },
+        )
+        .await
         {
-            Ok(info) => info,
-            Err(error) if error.is_track_unplayable() => {
+            Ok(_) => {}
+            Err(StartError::Superseded) => return current_playback_snapshot_json(&state).await,
+            Err(StartError::Stream(error)) if error.is_track_unplayable() => {
                 // Dead asset: hand off to the skip-aware runtime switch, which
                 // advances past this row (and any further dead ones) and starts
                 // the next playable track. Return the state it settles on.
@@ -6229,56 +6291,14 @@ async fn next_track(
                 return current_playback_snapshot_json(&state).await;
             }
             Err(error) => {
-                return Err(tidal_playback_error_response(
-                    track.id,
+                return Err(start_error_response(
+                    &state,
                     error,
+                    track.id,
                     "TIDAL stream could not be resolved while advancing playback.",
+                    Some("Playback runtime was not available for advancing playback."),
                 ));
             }
-        };
-        if !playback_generation_is_current(&state, playback_generation).await {
-            return current_playback_snapshot_json(&state).await;
-        }
-        let runtime_handle = ensure_playback_runtime_for_track(&state, track)
-            .await
-            .map_err(|_| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({
-                        "status": "playback_runtime_unavailable",
-                        "message": "Playback runtime was not available for advancing playback.",
-                        "track_id": track.id,
-                    })),
-                )
-            })?;
-        let job = player::build_playback_preparation(
-            track,
-            Some(&stream_info),
-            effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await,
-            user_quality,
-        )
-        .with_generation(playback_generation)
-        .with_start_paused(!transport_intent_is_playing(&state).await);
-        runtime_handle.switch_to(job).map_err(|error| {
-            let message = format!("Failed to switch host audio playback: {error}");
-            report_playback_failure(&state, &message);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "playback_runtime_failed",
-                    "message": message,
-                    "track_id": track.id,
-                })),
-            )
-        })?;
-        {
-            let mut state_guard = state.write().await;
-            state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
-                audio_quality: stream_info.audio_quality.clone(),
-                sample_rate: stream_info.sample_rate,
-                bit_depth: stream_info.bit_depth,
-            });
-            state_guard.pending_stream_display = None;
         }
     } else if let Some(runtime_handle) = current_playback_runtime(&state).await {
         let _ = runtime_handle.stop();
