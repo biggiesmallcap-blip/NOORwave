@@ -135,9 +135,7 @@ pub fn fill_in_background(path: &str) {
         }
     }
     tokio::spawn(async move {
-        if let Ok(_permit) = FILL_SLOTS.acquire().await
-            && let Ok(bytes) = fetch(&path).await
-        {
+        if let Some(bytes) = fill_one(&FILL_SLOTS, enabled, async || fetch(&path).await).await {
             store(&file_for(&path), &bytes).await;
         }
         FILLING
@@ -145,6 +143,20 @@ pub fn fill_in_background(path: &str) {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&path);
     });
+}
+
+/// One background save: waits for a download slot, then skips the download
+/// if the cache was turned off while it waited.
+async fn fill_one(
+    slots: &Semaphore,
+    enabled: impl Fn() -> bool,
+    download: impl AsyncFnOnce() -> Result<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let _permit = slots.acquire().await.ok()?;
+    if !enabled() {
+        return None;
+    }
+    download().await.ok()
 }
 
 async fn fetch(path: &str) -> Result<Vec<u8>> {
@@ -353,6 +365,42 @@ pub fn spawn(state: SharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn queued_fill_skips_the_download_once_the_cache_is_off() {
+        let slots = Semaphore::new(1);
+        let on = AtomicBool::new(true);
+        let downloads = AtomicUsize::new(0);
+        let held = slots.acquire().await.expect("slot");
+
+        // The job queues behind the held slot; the cache is turned off before
+        // the slot frees up.
+        let (saved, ()) = tokio::join!(
+            fill_one(
+                &slots,
+                || on.load(Ordering::Relaxed),
+                async || {
+                    downloads.fetch_add(1, Ordering::Relaxed);
+                    Ok(vec![1])
+                },
+            ),
+            async {
+                on.store(false, Ordering::Relaxed);
+                drop(held);
+            },
+        );
+
+        assert_eq!(saved, None);
+        assert_eq!(downloads.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn fill_downloads_while_the_cache_is_on() {
+        let slots = Semaphore::new(1);
+        let saved = fill_one(&slots, || true, async || Ok(vec![7])).await;
+        assert_eq!(saved, Some(vec![7]));
+    }
 
     const URL: &str =
         "https://resources.tidal.com/images/ab12cd34/ef56/7890/abcd/0123456789ab/1280x1280.jpg";
