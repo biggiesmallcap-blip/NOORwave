@@ -99,6 +99,16 @@ export function getQualityClass(quality: string | null): 'hires' | 'lossless' | 
 	return 'lossy';
 }
 
+/** TIDAL audio-quality tier as a badge label ("HiRes Lossless"); empty for none. */
+export function formatQualityTier(quality: string | null): string {
+	if (!quality) return '';
+	if (quality === 'HI_RES_LOSSLESS') return 'HiRes Lossless';
+	if (quality === 'LOSSLESS') return 'Lossless';
+	if (quality === 'HIGH') return 'High';
+	if (quality === 'LOW') return 'Low';
+	return quality.replaceAll('_', ' ');
+}
+
 // ─── Percent / delta ─────────────────────────────────────────────────────────
 
 /** Ratio 0..1 → "74%". null → "--". `decimals` is required at every call site (no default). */

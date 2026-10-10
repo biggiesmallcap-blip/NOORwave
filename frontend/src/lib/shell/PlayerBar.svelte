@@ -7,7 +7,7 @@
 	import { playerArtworkStyle } from '$lib/stores/playerArtwork';
 	import { bottomQualityDisplay, sideQualityDisplay } from '$lib/stores/playerInformation';
 	import type { StreamDisplayInfo, Track } from '$lib/api/client';
-	import { getQualityClass } from '$lib/utils/format';
+	import { getQualityClass, formatQualityTier } from '$lib/utils/format';
 	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 
 	type PlayerBarError = {
@@ -100,18 +100,9 @@
 	// track's catalogue tier; the exact bit-depth / kHz rides along in
 	// streamDetail, so the artwork carries no badges of its own.
 	let qualityTier = $derived(streamDisplay?.audio_quality ?? track?.best_quality ?? null);
-	let qualityLabel = $derived(formatQuality(qualityTier));
+	let qualityLabel = $derived(formatQualityTier(qualityTier));
 	let qualityClass = $derived(qualityTier ? getQualityClass(qualityTier) : '');
 	let qualityDisplay = $derived(layout === 'bottom' ? $bottomQualityDisplay : $sideQualityDisplay);
-
-	function formatQuality(q: string | null) {
-		if (!q) return '';
-		if (q === 'HI_RES_LOSSLESS') return 'HiRes Lossless';
-		if (q === 'LOSSLESS') return 'Lossless';
-		if (q === 'HIGH') return 'High';
-		if (q === 'LOW') return 'Low';
-		return q.replaceAll('_', ' ');
-	}
 
 	function handleVolumeInput(event: Event) {
 		const nextVolume = Number((event.currentTarget as HTMLInputElement).value);
