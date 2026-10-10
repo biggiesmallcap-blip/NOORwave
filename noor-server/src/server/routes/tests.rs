@@ -8203,6 +8203,90 @@ async fn audio_analysis_local_scan_of_unusable_path_does_not_stay_running() {
 }
 
 #[tokio::test]
+async fn audio_analysis_duplicate_start_leaves_the_running_scan_alone() {
+    let library = std::env::temp_dir().join(format!(
+        "noor-analysis-dup-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&library).unwrap();
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = fresh_test_state(fresh_migrated_db());
+    state.analysis_tx = Some(tx);
+    let running = state.audio_analysis_running.clone();
+    let cancel = state.audio_analysis_cancel.clone();
+    let mut events = state.event_tx.subscribe();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(state)));
+    let start = || {
+        let body = serde_json::json!({ "mode": "local", "local_path": library }).to_string();
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/analyze/audio-features")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+    let next_completion = |events: &mut tokio::sync::broadcast::Receiver<crate::AppEvent>,
+                           wait: std::time::Duration| {
+        let events = events.resubscribe();
+        async move {
+            let mut events = events;
+            tokio::time::timeout(wait, async {
+                loop {
+                    match events.recv().await {
+                        Ok(crate::AppEvent::AudioAnalysisComplete { .. }) => return,
+                        Ok(_) => continue,
+                        Err(e) => panic!("event channel closed: {e}"),
+                    }
+                }
+            })
+            .await
+            .is_ok()
+        }
+    };
+
+    // Control: with nothing running, a start spawns a worker whose scan of the
+    // empty folder completes (observable as AudioAnalysisComplete).
+    let completed = next_completion(&mut events, std::time::Duration::from_secs(5));
+    assert_eq!(start().await.unwrap().status(), StatusCode::OK);
+    assert!(completed.await, "control start never ran a scan");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while audio_analysis_status_running(&app).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "control scan stayed running"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // A scan is in flight: the flag is held by that run's worker.
+    running.store(true, std::sync::atomic::Ordering::SeqCst);
+    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let duplicate_completed = next_completion(&mut events, std::time::Duration::from_millis(750));
+    let resp = start().await.unwrap();
+    let duplicate_status = resp.status();
+    assert_eq!(duplicate_status, StatusCode::CONFLICT);
+
+    assert!(
+        !duplicate_completed.await,
+        "duplicate start ({duplicate_status}) spawned a second scan worker"
+    );
+    assert!(
+        audio_analysis_status_running(&app).await,
+        "duplicate start ({duplicate_status}) cleared the in-flight run's running flag"
+    );
+
+    let _ = std::fs::remove_dir_all(&library);
+}
+
+#[tokio::test]
 async fn lastfm_enrichment_rejects_unknown_mode_before_credentials() {
     let app = build_test_app().await;
 

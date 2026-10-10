@@ -55,9 +55,20 @@ pub(super) async fn start_audio_analysis(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    // Reset cancel flag and mark as running before spawning
+    // Claim the run before touching shared flags: a duplicate start must not
+    // spawn a second worker or reset the running scan's cancel flag.
+    if running
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-    running.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mode_for_spawn = mode.clone();
     tokio::spawn(async move {
