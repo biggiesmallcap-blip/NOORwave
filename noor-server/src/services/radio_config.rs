@@ -278,7 +278,7 @@ impl RadioDiagnosticsRow {
     pub fn count_source(&mut self, source: RadioSource) {
         match source {
             RadioSource::Library => self.actual_library_count += 1,
-            RadioSource::Lastfm => self.actual_lastfm_count += 1,
+            RadioSource::Lastfm | RadioSource::Tidal => self.actual_lastfm_count += 1,
             RadioSource::Engine => self.actual_engine_count += 1,
         }
     }

@@ -27,7 +27,10 @@ use std::collections::{HashMap, HashSet};
 // v3: audio-proxy tokens are IDF-weighted (compute_token_idf), so common tokens
 // like broad genres no longer dominate the projection. The bump invalidates v2
 // caches so incremental refreshes recompute rather than mixing weighting schemes.
-pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v5";
+// v6: a track whose only token is its own artist gets no proxy vector. Its
+// hashed artist token matched other sparse tracks by hash collision, which made
+// one unrelated cluster the "metadata" neighbors of every cold track.
+pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v6";
 
 // ── Progress update struct ────────────────────────────────────────────────────
 
@@ -732,6 +735,12 @@ fn add_support_bucket(
 // Parallel + cancel-aware. Each track's audio-proxy vector is independent, so
 // rayon parallelism is a free win that also makes the cancel check land
 // quickly (workers stop accepting new tracks the moment the flag flips).
+/// True when the proxy tokens hold something besides the artist (genre or
+/// DSP buckets), the only tokens that can relate two different artists.
+fn has_cross_artist_evidence(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| !token.starts_with("artist:"))
+}
+
 fn build_audio_proxy_features(
     tracks: &[EmbeddingTrackRow],
     dim: usize,
@@ -756,7 +765,6 @@ fn build_audio_proxy_features(
                 (duration - clip_duration).max(0) / 2
             };
             let tokens = metadata_tokens(track);
-            let vec = hashed_projection_weighted(&tokens, dim, idf);
             let completed = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if completed.is_multiple_of(512)
                 && total > 0
@@ -773,6 +781,12 @@ fn build_audio_proxy_features(
                     tracks_total: total as u32,
                 });
             }
+            // Same-artist pairs are scored directly (artist_affinity); an
+            // artist token alone says nothing about any other artist.
+            if !has_cross_artist_evidence(&tokens) {
+                return None;
+            }
+            let vec = hashed_projection_weighted(&tokens, dim, idf);
             Some((
                 track.track_id,
                 TrainerAudioFeature {
@@ -1752,8 +1766,19 @@ pub fn run_discovery_training(
     metrics.extend(evaluate_discovery_lift(&neighbors));
     let reason_hit_rates = compute_reason_hit_rates(&neighbors, &input.heldout_pairs);
 
-    let playable = tracks.len() as f64;
+    // Coverage counts tracks that have any evidence (listening, genres, DSP).
+    // A track with none gets no embedding on purpose, so it is not a gap.
+    let playable = tracks
+        .iter()
+        .filter(|track| {
+            behavioral.contains_key(&track.track_id) || audio.contains_key(&track.track_id)
+        })
+        .count() as f64;
     let embedded = fusion.len() as f64;
+    metrics.insert(
+        "evidence_free_tracks".to_string(),
+        tracks.len() as f64 - playable,
+    );
     metrics.insert(
         "coverage_ratio".to_string(),
         if playable > 0.0 {
@@ -2892,6 +2917,43 @@ mod tests {
         };
         assert!(tags(0, 1).iter().any(|t| t == "genre_branch"));
         assert!(!tags(0, 2).iter().any(|t| t == "genre_branch"));
+    }
+
+    #[test]
+    fn artist_only_tracks_get_no_proxy_vector() {
+        let row = |track_id: i64, artist: &str, genres: Vec<String>| EmbeddingTrackRow {
+            track_id,
+            title: format!("Track {track_id}"),
+            artist_name: Some(artist.to_string()),
+            album_title: None,
+            duration_ms: Some(200_000),
+            best_quality: None,
+            source: "tidal".to_string(),
+            play_count: 0,
+            is_favorite: false,
+            playlist_memberships: 0,
+            genre_paths: genres,
+            bpm: None,
+            energy: None,
+            camelot_key: None,
+            danceability: None,
+            beat_strength: None,
+            loudness_lufs: None,
+        };
+        let tracks = vec![
+            row(1, "Steve Bicknell", Vec::new()),
+            row(2, "Gunna", Vec::new()),
+            row(3, "Surgeon", vec!["Electronic > Techno".to_string()]),
+        ];
+        let idf = compute_token_idf(&tracks);
+        let features = build_audio_proxy_features(&tracks, 64, &idf, None, None);
+        // A lone artist token relates to no other artist; it only produced
+        // hash-collision neighbors.
+        assert!(!features.contains_key(&1));
+        assert!(!features.contains_key(&2));
+        assert!(features.contains_key(&3));
+        let fusion = fuse_embeddings(&tracks, &HashMap::new(), &features);
+        assert_eq!(fusion.keys().copied().collect::<Vec<_>>(), vec![3]);
     }
 
     #[test]

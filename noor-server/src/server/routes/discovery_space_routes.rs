@@ -1478,6 +1478,7 @@ pub(super) async fn get_discovery_space(
                         crate::services::radio::RadioSource::Library => "library".to_string(),
                         crate::services::radio::RadioSource::Lastfm => "lastfm".to_string(),
                         crate::services::radio::RadioSource::Engine => "engine".to_string(),
+                        crate::services::radio::RadioSource::Tidal => "tidal".to_string(),
                     }),
                     radio_reason: Some(c.reason),
                     confidence: c

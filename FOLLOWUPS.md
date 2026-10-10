@@ -12,11 +12,11 @@ back to the PR or commit that flagged it.
 
 ### radio: TIDAL track-mix lane
 
-TIDAL's per-track mix ("Track Radio") would be a strong fourth candidate lane
-for song radio. Needs the TRACK_MIX id parsed from track payloads
-(services/tidal/client.rs has get_mix_tracks but no track-mix lookup), a lane
-weight per blend in services/radio.rs::RadioBlend::weights, and a live check
-against the TIDAL API; it was left out of the offline recommendation pass.
+TIDAL's per-track mix ("Track Radio") already fills song and artist radio when
+a seed has under 10 picks of its own (server/routes.rs::add_tidal_mix_fallback,
+services/radio.rs::tidal_mix_candidates). Still open: blend it as a regular
+fourth lane for every seed, with a weight per blend in
+services/radio.rs::RadioBlend::weights, checked live against the TIDAL API.
 Spawned by: recommendation audit phase 5
 
 ### discovery: Last.fm tags for external candidates
