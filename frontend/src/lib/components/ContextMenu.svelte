@@ -6,19 +6,21 @@
 		menuIconForDisplay,
 		type MenuItem
 	} from '$lib/stores/context_menu';
+	import { placeAxis } from './context_menu_placement';
 
 	let menuEl = $state<HTMLDivElement | null>(null);
 	let openSubmenu = $state<number | null>(null);
 
-	// Native-menu placement: open below/right of the anchor, flip above/left
-	// when that side lacks room, and only clamp when neither side fits. The
-	// measured size is observed so an expanding submenu re-places the menu
-	// instead of running off the bottom of the window.
+	// Native-menu placement (see context_menu_placement.ts). The measured size
+	// is observed so an expanding submenu re-places the menu instead of
+	// running off the bottom of the window.
 	const MENU_W = 240;
 	const MENU_H_ESTIMATE = 480;
-	const EDGE = 8;
 
 	let menuSize = $state({ w: MENU_W, h: MENU_H_ESTIMATE });
+	// Side chosen when a submenu was toggled, keyed by the open menu's items so
+	// a fresh menu places itself from scratch.
+	let placementLock = $state.raw<{ items: MenuItem[]; below: boolean; right: boolean } | null>(null);
 
 	$effect(() => {
 		const el = menuEl;
@@ -30,21 +32,15 @@
 		return () => observer.disconnect();
 	});
 
-	function place(anchor: number, flipAnchor: number, size: number, viewport: number): number {
-		if (anchor + size + EDGE <= viewport) return anchor;
-		if (flipAnchor - size >= EDGE) return flipAnchor - size;
-		return Math.max(EDGE, viewport - size - EDGE);
-	}
-
 	let position = $derived.by(() => {
-		if (!$contextMenu.open) return { left: 0, top: 0 };
+		if (!$contextMenu.open) return { left: 0, top: 0, below: true, right: true };
 		const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
 		const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
-		const { x, y, flipY } = $contextMenu;
-		return {
-			left: place(x, x, menuSize.w, vw),
-			top: place(y, flipY ?? y, menuSize.h, vh)
-		};
+		const { x, y, flipY, items } = $contextMenu;
+		const lock = placementLock?.items === items ? placementLock : null;
+		const horizontal = placeAxis(x, x, menuSize.w, vw, lock?.right);
+		const vertical = placeAxis(y, flipY ?? y, menuSize.h, vh, lock?.below);
+		return { left: horizontal.pos, top: vertical.pos, below: vertical.after, right: horizontal.after };
 	});
 
 	$effect(() => {
@@ -93,6 +89,7 @@
 	async function activate(item: MenuItem, index: number) {
 		if (item.disabled) return;
 		if (item.submenu && item.submenu.length > 0) {
+			placementLock = { items: $contextMenu.items, below: position.below, right: position.right };
 			openSubmenu = openSubmenu === index ? null : index;
 			return;
 		}
