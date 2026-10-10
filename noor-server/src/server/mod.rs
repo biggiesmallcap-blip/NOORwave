@@ -567,6 +567,8 @@ mod tests {
             )
             .unwrap();
         }
+        // These fixtures exercise the shared PIN from LAN peers.
+        crate::db::remote::set_pin_access(&db, true, None).unwrap();
         let remote = remote::RemoteService::new(db.clone(), pin.to_string()).unwrap();
         let mut app_state = routes::tests::fresh_test_state(db);
         app_state.server_token = pin.to_string();

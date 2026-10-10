@@ -74,4 +74,15 @@ describe('Phone Remote panel accessibility contract', () => {
 		expect(source).toContain('class:online={device.connected}');
 		expect(source).toContain('Connected now');
 	});
+
+	it('keeps PIN sign-in opt-in, rotatable, and swaps this window onto a new PIN', () => {
+		expect(source).toContain('label="PIN sign-in"');
+		expect(source).toContain('remoteApi.setPinAccess(enabled)');
+		expect(source).toContain('remoteApi.rotatePin()');
+		expect(source).toContain('{#if pinAccess && status.pin_access}');
+		const swap = source.slice(source.indexOf('async function swapPin'), source.indexOf('async function rotatePin'));
+		expect(swap).toContain('disconnectWebSocket()');
+		expect(swap).toContain('setStoredToken(result.token)');
+		expect(swap).toContain('connectWebSocket()');
+	});
 });

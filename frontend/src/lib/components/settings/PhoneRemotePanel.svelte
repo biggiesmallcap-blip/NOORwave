@@ -28,6 +28,8 @@
 	let expiresIn = $state(0);
 	let pendingHost = $state<boolean | null>(null);
 	let confirmReset = $state(false);
+	let confirmRotate = $state(false);
+	let pendingPinAccess = $state<boolean | null>(null);
 	let confirmRevokeId = $state<string | null>(null);
 	let editingId = $state<string | null>(null);
 	let editName = $state('');
@@ -53,6 +55,7 @@
 	);
 	let needsLocalRecovery = $derived(nativeState?.phase === 'failed' && nativeState.configured_host_mode === false);
 	let hostChecked = $derived(pendingHost ?? nativeState?.configured_host_mode ?? status?.configured_host_mode ?? false);
+	let pinAccess = $derived(pendingPinAccess ?? status?.pin_access ?? false);
 	let ticketExpired = $derived(ticket !== null && expiresIn === 0);
 	let sortedDevices = $derived([...devices].sort((a, b) => Number(!!b.connected) - Number(!!a.connected) || b.paired_at.localeCompare(a.paired_at)));
 
@@ -285,6 +288,34 @@
 		catch (cause) { await reportError(cause, 'Could not disconnect this phone.'); }
 	}
 
+	// This window signs in with the PIN, so a PIN change closes its socket.
+	// Swap it ourselves rather than bouncing through the auth gate.
+	async function swapPin(operation: () => Promise<{ token?: string | null }>, done: string, failed: string): Promise<void> {
+		busy = true; error = ''; message = '';
+		disconnectWebSocket();
+		try {
+			const result = await operation();
+			if (result.token) { setStoredToken(result.token); serverToken = result.token; }
+			message = done;
+			await load();
+		} catch (cause) { await reportError(cause, failed); }
+		finally { pendingPinAccess = null; connectWebSocket(); busy = false; }
+	}
+
+	async function rotatePin(): Promise<void> {
+		confirmRotate = false;
+		await swapPin(() => remoteApi.rotatePin(), 'New PIN is active. Browsers using the old PIN were signed out; paired phones are unaffected.', 'The PIN could not be changed.');
+	}
+
+	async function changePinAccess(enabled: boolean): Promise<void> {
+		pendingPinAccess = enabled;
+		confirmRotate = false;
+		tokenVisible = enabled;
+		await swapPin(() => remoteApi.setPinAccess(enabled),
+			enabled ? 'PIN sign-in is on with a new PIN.' : 'PIN sign-in is off. Browsers using the PIN were signed out.',
+			'PIN sign-in could not be changed.');
+	}
+
 	async function resetAll(): Promise<void> {
 		confirmReset = false;
 		busy = true; error = '';
@@ -389,10 +420,35 @@
 			{/if}
 		</div>
 
-		<details class="manual" data-setting-id="access-pin">
-			<summary>Recovery: use the master PIN</summary>
-			<p>The PIN is an optional fallback for browsers that cannot pair. PIN sessions are shared and cannot be individually listed or revoked; prefer the QR or temporary code for normal use.</p>
-			<div class="pin-row"><code>{tokenVisible ? serverToken : '••••••'}</code><button class="btn btn-glass" type="button" onclick={() => tokenVisible = !tokenVisible}>{tokenVisible ? 'Hide PIN' : 'Show PIN'}</button><button class="btn btn-glass" type="button" onclick={() => void copyText(serverToken)}>Copy PIN</button></div>
+		<div class="pin-block" data-setting-id="access-pin">
+			<div class="setting-row">
+				<div>
+					<strong>PIN sign-in</strong>
+					<p>{pinAccess
+						? 'Any browser on your network can sign in with this 6-digit PIN. PIN sessions are shared and cannot be signed out one at a time.'
+						: 'Off. Phones pair with the QR or a one-time code. Turn on only for a browser that cannot pair; a new PIN is created.'}</p>
+				</div>
+				<Toggle checked={pinAccess} disabled={busy} label="PIN sign-in" onchange={(event) => void changePinAccess(event.currentTarget.checked)} />
+			</div>
+			{#if pinAccess && status.pin_access}
+				<div class="pin-row">
+					<code>{tokenVisible ? serverToken : '******'}</code>
+					<button class="btn btn-glass" type="button" onclick={() => tokenVisible = !tokenVisible}>{tokenVisible ? 'Hide PIN' : 'Show PIN'}</button>
+					<button class="btn btn-glass" type="button" onclick={() => void copyText(serverToken)}>Copy PIN</button>
+					{#if !confirmRotate}<button class="btn btn-glass" type="button" disabled={busy} onclick={() => confirmRotate = true}>New PIN</button>{/if}
+				</div>
+				{#if confirmRotate}
+					<div class="inline-confirm" role="group" aria-label="Confirm new PIN">
+						<p>Create a new PIN? Browsers signed in with the current one are signed out. Paired phones stay connected.</p>
+						<div class="actions"><button class="btn btn-primary" type="button" disabled={busy} onclick={() => void rotatePin()}>Create new PIN</button><button class="btn btn-glass" type="button" onclick={() => confirmRotate = false}>Cancel</button></div>
+					</div>
+				{/if}
+			{/if}
+		</div>
+
+		<details class="manual">
+			<summary>Reset all remote access</summary>
+			<p>Disconnects every paired phone, changes the PIN, and closes all open remote sessions. Use this if a phone was lost or you suspect someone else has access.</p>
 			{#if confirmReset}
 				<div class="inline-confirm danger" role="group" aria-label="Confirm reset">
 					<p>Disconnect {devices.length} paired device{devices.length === 1 ? '' : 's'}, change the PIN, and close every open remote session?</p>
@@ -510,7 +566,10 @@
 	.troubleshooting-list code { color: var(--accent-strong); font-family: var(--font-mono, monospace); }
 	.diagnostic-note { margin-top: 12px !important; padding: 9px 11px; border-left: 2px solid var(--accent-line); background: color-mix(in srgb, var(--accent-soft) 34%, transparent); }
 	summary { display: flex; align-items: center; cursor: pointer; }
-	.pin-row { margin: 12px 0; }
+	.pin-row { margin: 0 0 14px; }
+	.pin-block { border-top: 1px solid var(--border-subtle); }
+	.pin-block .setting-row { border-top: 0; }
+	.manual > .btn-danger { margin: 12px 0; }
 	.pin-row code { font-size: var(--font-size-xl); letter-spacing: .18em; }
 	.device-row small { display: block; margin-top: 4px; color: var(--text-tertiary); }
 	.btn-danger { color: var(--state-error); }

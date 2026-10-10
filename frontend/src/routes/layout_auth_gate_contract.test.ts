@@ -28,6 +28,8 @@ describe('layout auth gate contract', () => {
 		expect(source).toContain('remoteApi.redeem(ticket, currentDeviceName(), signal)');
 		expect(source).toContain('storePairedSession(paired)');
 		expect(source).toContain('Use master PIN instead');
+		expect(source).toContain('pinLoginAvailable = identity.pin_login === true');
+		expect(source).toContain("{#if pinLoginAvailable || connectMethod === 'pin'}");
 	});
 
 	test('revalidates a paired device before deleting its credential after a rejected request', () => {
