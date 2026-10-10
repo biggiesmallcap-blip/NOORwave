@@ -30,6 +30,9 @@ updates:
       - dependency-name: tauri
       - dependency-name: tauri-build
       - dependency-name: wry
+      # Exact-pinned; guarded by noor-app/tests/tauri_runtime_pins.rs.
+      - dependency-name: tauri-plugin-autostart
+      - dependency-name: tauri-plugin-single-instance
 
   - package-ecosystem: npm
     directory: /frontend
