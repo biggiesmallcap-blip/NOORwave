@@ -38,7 +38,7 @@ The latched state a **TIDAL session** enters when a refresh itself fails (no ref
 ### Playback
 
 **Transport**:
-The module that owns what is playing and how playback moves between queue items: play, next, previous, play-queue-item, pause, resume, seek, resolving or skipping pending rows, stream resolution, and reacting to audio runtime events (near end, finished, track error). It alone bumps and checks the **playback generation**. HTTP handlers, the phone remote and runtime events all go through it.
+The module that owns what is playing and how playback moves between queue items: play, next, previous, play-queue-item, pause, resume, seek, resolving or skipping pending rows, stream resolution, and reacting to audio runtime events (near end, finished, track error). It alone bumps and checks the **playback generation**. HTTP handlers, the phone remote and runtime events all go through it. Lives in `noor-server/src/server/transport/` (server layer: it coordinates the audio runtime, the TIDAL session, the DB and WS events).
 _Avoid_: playback session (collides with **listen session**), player (ambiguous with `playback/player.rs` queue state), controller.
 
 **Listen session**:
