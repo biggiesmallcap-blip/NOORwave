@@ -8286,6 +8286,144 @@ async fn audio_analysis_duplicate_start_leaves_the_running_scan_alone() {
     let _ = std::fs::remove_dir_all(&library);
 }
 
+fn write_test_wav(path: &std::path::Path) {
+    let sample_rate = 44_100u32;
+    let samples: Vec<i16> = (0..sample_rate / 2)
+        .map(|i| {
+            ((i as f32 * 440.0 * std::f32::consts::TAU / sample_rate as f32).sin() * 8_000.0) as i16
+        })
+        .collect();
+    let data_len = (samples.len() * 2) as u32;
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        wav.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, wav).unwrap();
+}
+
+// Workers block a runtime thread on the shared DB mutex, so this needs more
+// than the current-thread runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audio_analysis_restart_after_stop_never_revives_the_stopped_scan() {
+    let library = std::env::temp_dir().join(format!(
+        "noor-analysis-restart-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&library).unwrap();
+    write_test_wav(&library.join("a.wav"));
+    write_test_wav(&library.join("b.wav"));
+
+    let (tx, mut jobs) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = fresh_test_state(fresh_migrated_db());
+    state.analysis_tx = Some(tx);
+    let db = state.db.clone();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(state)));
+    let post = |uri: &'static str, body: String| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+    let start_body = serde_json::json!({ "mode": "local", "local_path": library }).to_string();
+
+    // Hold the DB connection: a scan worker that decodes a file then blocks on
+    // its track lookup, so the first scan is still alive when Stop arrives.
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        db.with_conn(|_| {
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    });
+    locked_rx.recv().unwrap();
+
+    let first = post("/api/library/analyze/audio-features", start_body.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    // Give the worker time to decode a.wav and park on the DB lookup. The
+    // assertions below hold whether or not it got that far.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let stop = post("/api/library/analyze/stop", String::new())
+        .await
+        .unwrap();
+    assert_eq!(stop.status(), StatusCode::OK);
+
+    // Stop only asks the scan to stop; it still owns the run until its worker
+    // exits, so a restart during the wind-down is refused like a duplicate.
+    let restart = post("/api/library/analyze/audio-features", start_body.clone())
+        .await
+        .unwrap();
+    assert_eq!(restart.status(), StatusCode::CONFLICT);
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while audio_analysis_status_running(&app).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "analysis stayed running after the stopped worker should have exited"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut job_count = 0;
+    while jobs.try_recv().is_ok() {
+        job_count += 1;
+    }
+    // The stopped scan may finish the file it was already on, never b.wav.
+    assert!(
+        job_count <= 1,
+        "the stopped scan kept going: {job_count} analysis jobs"
+    );
+
+    // Once the stopped scan has exited, a new scan starts normally.
+    let after = post("/api/library/analyze/audio-features", start_body)
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while audio_analysis_status_running(&app).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the new scan never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mut new_jobs = 0;
+    while jobs.try_recv().is_ok() {
+        new_jobs += 1;
+    }
+    assert_eq!(new_jobs, 2, "the new scan should analyze both files");
+
+    let _ = std::fs::remove_dir_all(&library);
+}
+
 #[tokio::test]
 async fn lastfm_enrichment_rejects_unknown_mode_before_credentials() {
     let app = build_test_app().await;

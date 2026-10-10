@@ -113,11 +113,12 @@ impl Drop for AudioAnalysisRunningGuard {
 pub(super) async fn stop_audio_analysis(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
+    // Only ask the scan to stop. The worker keeps owning the run (and the
+    // running flag, via its guard) until it actually exits, so status stays
+    // truthful and a restart cannot reset the cancel flag it is still reading.
     let s = state.read().await;
     s.audio_analysis_cancel
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    s.audio_analysis_running
-        .store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(Json(json!({ "status": "stopped" })))
 }
 
