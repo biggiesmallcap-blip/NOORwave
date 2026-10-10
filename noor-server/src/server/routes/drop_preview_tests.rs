@@ -1,4 +1,6 @@
 use super::*;
+#[allow(unused_imports)]
+use crate::server::transport::{events::*, listen::*, pending::*, settings::*, snapshot::*};
 
 fn preview_fixture() -> (
     crate::AppState,
@@ -23,7 +25,7 @@ fn preview_fixture() -> (
         access_token: "test".into(),
         handle: handle.clone(),
     });
-    state.playback_runtime_info = Some(PlaybackRuntimeInfo {
+    state.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
         device_name: "Test DAC".into(),
         sample_rate: 48000,
         channels: 2,

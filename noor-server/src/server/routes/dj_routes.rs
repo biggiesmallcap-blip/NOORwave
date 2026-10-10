@@ -1488,7 +1488,7 @@ fn clear_dj_profile_rebuild_failure(key: &str) {
     }
 }
 
-pub(super) fn record_unavailable_tidal_source(tidal_id: i64) {
+pub(crate) fn record_unavailable_tidal_source(tidal_id: i64) {
     record_dj_profile_rebuild_failure(
         &format!("tidal_track:{tidal_id}"),
         "source_unavailable",

@@ -58,7 +58,7 @@ pub(crate) async fn start_track(
         dispatch,
         crossfade_ms,
     } = request;
-    let user_quality = crate::server::routes::current_user_audio_quality(state).await;
+    let user_quality = super::settings::current_user_audio_quality(state).await;
     let Some(stream_request) = player::build_tidal_stream_request(track, user_quality.clone())
     else {
         return Err(StartError::LocalUnsupported);
@@ -76,7 +76,7 @@ pub(crate) async fn start_track(
     let job =
         player::build_playback_preparation(track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(start_generation)
-            .with_start_paused(!crate::server::routes::transport_intent_is_playing(state).await);
+            .with_start_paused(!super::settings::transport_intent_is_playing(state).await);
     let sent = match dispatch {
         Dispatch::Play => handle.play(job),
         Dispatch::Switch => handle.switch_to(job),

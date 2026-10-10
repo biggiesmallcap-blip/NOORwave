@@ -7,6 +7,8 @@ use crate::PlaybackRuntimeState;
 use crate::db::{Database, schema};
 use crate::metadata::lastfm::{LastFmChartAlbum, LastFmChartArtist, LastFmChartTrack};
 use crate::server::transport::stream::ensure_tidal_content_allowed;
+#[allow(unused_imports)]
+use crate::server::transport::{events::*, listen::*, pending::*, settings::*, snapshot::*};
 use crate::services::tidal::client::TidalAlbum;
 use axum::{body::Body, http::Request};
 use std::collections::HashMap;
@@ -281,7 +283,7 @@ async fn runtime_exit_discards_dead_handle_and_pauses_without_changing_queue() {
             access_token: "test-token".to_string(),
             handle: handle.clone(),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -370,7 +372,7 @@ async fn resume_rebuilds_current_track_when_runtime_has_no_loaded_engine() {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -3029,7 +3031,7 @@ async fn remove_current_queue_item_advances_and_switches_runtime() {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -4507,7 +4509,7 @@ async fn runtime_finish_skips_unresolved_pending_row_and_starts_next_library_tra
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -4643,7 +4645,7 @@ async fn runtime_finish_adopts_pending_row_resolved_by_background_resolver() {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -4863,7 +4865,7 @@ async fn prepared_runtime_track_error_keeps_current_playback_running() {
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
     {
         let mut guard = state.write().await;
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -4926,7 +4928,7 @@ async fn unavailable_prepared_next_is_skipped_without_interrupting_current_track
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
     {
         let mut guard = state.write().await;
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -4991,7 +4993,7 @@ fn delayed_unavailable_next_failure_cannot_remove_changed_queue_or_source() {
             Ok(())
         }).expect("queue");
         let mut state = fresh_test_state(db.clone());
-        state.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        state.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -5071,7 +5073,7 @@ async fn stale_runtime_prepared_error_does_not_change_active_queue() {
             access_token: "new".into(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(new_tx),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -5119,7 +5121,7 @@ async fn delayed_prepared_asset_failure_does_not_remove_new_generation_or_healed
                 access_token: "same-runtime".into(),
                 handle: handle.clone(),
             });
-            guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+            guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
                 device_name: "Test DAC".to_string(),
                 sample_rate: 48_000,
                 channels: 2,
@@ -5183,7 +5185,7 @@ async fn pause_and_resume_snapshots_preserve_runtime_position_after_seek() {
             access_token: "test-token".to_string(),
             handle: handle.clone(),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -5275,7 +5277,7 @@ async fn early_pair_preparation_uses_playback_generation_before_near_end() {
             access_token: "test".into(),
             handle: handle.clone(),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".into(),
             sample_rate: 48000,
             channels: 2,
@@ -5326,7 +5328,7 @@ async fn runtime_ready_after_device_swap_keeps_audible_track_active() {
             access_token: "test-token".to_string(),
             handle: handle.clone(),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Old DAC".to_string(),
             sample_rate: 44_100,
             channels: 2,
@@ -5444,7 +5446,7 @@ async fn repeated_transient_runtime_error_pauses_without_advancing_queue() {
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
     {
         let mut guard = state.write().await;
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -5554,7 +5556,7 @@ async fn runtime_track_error_advances_to_next_library_track() {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
         });
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
             channels: 2,
@@ -5609,7 +5611,7 @@ async fn disabling_exclusive_clears_runtime_engaged_state() {
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
     {
         let mut guard = state.write().await;
-        guard.playback_runtime_info = Some(PlaybackRuntimeInfo {
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 96_000,
             channels: 2,
