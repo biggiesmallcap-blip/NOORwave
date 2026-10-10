@@ -18,7 +18,7 @@
 	import {
 		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
-		loadTracks, loadAlbums, requestedTracksLikedOnly,
+		loadTracks, loadAlbums, trackListRequestMatches, trackListError, retryTrackList, cancelTrackListRequests,
 		selectedTrackIds, selectedAlbumIds,
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
@@ -34,7 +34,8 @@
 	import Dropdown from '$lib/components/ui/Dropdown.svelte';
 	import FilterChip from '$lib/components/ui/FilterChip.svelte';
 	import { formatTrackDuration, formatDateShort, savedDateMillis, getQualityClass } from '$lib/utils/format';
-	import { api, type Album, type Artist, type AudioSearchResult, type Genre, type Playlist, type Track } from '$lib/api/client';
+	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
+	import { createLibrarySearch } from '$lib/stores/library_search';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
 	import { buildAddToPlaylistSubmenu as sharedAddToPlaylistSubmenu } from '$lib/player/playlist_menu';
@@ -52,6 +53,8 @@
 	} from '$lib/stores/player';
 	import SelectionBar from '$lib/components/ui/SelectionBar.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
+	import { describeError } from '$lib/utils/describe_error';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import LibraryHero from '$lib/components/LibraryHero.svelte';
 	import ArtistCarousel from '$lib/components/ArtistCarousel.svelte';
@@ -67,7 +70,7 @@
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { parseQuery } from '$lib/search/query_parser';
-	import { buildAudioParams, hasAnyFilter } from '$lib/search/audio_params';
+	import { buildAudioParams } from '$lib/search/audio_params';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import { goto } from '$app/navigation';
 	import { showToast } from '$lib/stores/toast';
@@ -215,15 +218,21 @@
 	const UNDO_WINDOW_MS = 8000;
 	let albumActionBusyId = $state<number | null>(null);
 	let activeTrackMenuId = $state<number | null>(null);
-	let searchBusy = $state(false);
-	let searchError = $state<string | null>(null);
-	let searchResults = $state<{ tracks: Track[]; albums: Album[]; artists: Artist[] }>({ tracks: [], albums: [], artists: [] });
+	// The search controller owns query identity, debounce, paging and errors;
+	// these names are read-only views of its state.
+	const librarySearch = createLibrarySearch({
+		search: (query, limit) => cachedApi.search(query, limit),
+		searchAudio: (params, signal) => api.searchAudio(params, signal),
+		onResults: clearSelection,
+	});
+	let searchBusy = $derived($librarySearch.status === 'pending');
+	let searchFailed = $derived($librarySearch.status === 'error');
+	let searchResults = $derived($librarySearch.results);
 	// Full matching-set size for filtered (audio) searches, so the capped
 	// display can say "top 50 of N" instead of looking like only 50 exist.
-	let searchTotal = $state<number | null>(null);
-	let searchUnmatchedGenres = $state<string[]>([]);
-	let searchLoadingMore = $state(false);
-	let searchTimer: ReturnType<typeof setTimeout> | null = null;
+	let searchTotal = $derived($librarySearch.total);
+	let searchUnmatchedGenres = $derived($librarySearch.unmatchedGenres);
+	let searchLoadingMore = $derived($librarySearch.loadingMore);
 	let infiniteSentinel = $state<HTMLDivElement | null>(null);
 	let infiniteObserver: IntersectionObserver | null = null;
 	let undoTimer: ReturnType<typeof setTimeout> | null = null;
@@ -401,7 +410,9 @@
 		});
 		return () => {
 			unsubscribeWs();
-			if (searchTimer) clearTimeout(searchTimer);
+			// Leaving the route invalidates its search and track-list work.
+			librarySearch.dispose();
+			cancelTrackListRequests();
 			infiniteObserver?.disconnect();
 			if (undoTimer) clearTimeout(undoTimer);
 		};
@@ -866,11 +877,7 @@
 		// delete below, so single and multi removal behave identically.
 		if (undoTimer) clearTimeout(undoTimer);
 		albums.update((list) => list.filter((a) => a.id !== album.id));
-		searchResults = {
-			tracks: searchResults.tracks,
-			albums: searchResults.albums.filter((a) => a.id !== album.id),
-			artists: searchResults.artists,
-		};
+		librarySearch.removeItems({ albumIds: new Set([album.id]) });
 		batchError = null;
 		try {
 			await api.batchDelete([], [album.id]);
@@ -985,11 +992,7 @@
 
 		tracks.update((list) => list.filter((track) => !removedTrackIds.has(track.id)));
 		albums.update((list) => list.filter((album) => !removedAlbumIds.has(album.id)));
-		searchResults = {
-			tracks: searchResults.tracks.filter((track) => !removedTrackIds.has(track.id)),
-			albums: searchResults.albums.filter((album) => !removedAlbumIds.has(album.id)),
-			artists: searchResults.artists
-		};
+		librarySearch.removeItems({ trackIds: removedTrackIds, albumIds: removedAlbumIds });
 
 		try {
 			const result = await api.batchDelete([...removedTrackIds], [...removedAlbumIds]);
@@ -1063,110 +1066,6 @@
 		event.stopPropagation();
 		closeMenus();
 		updateTrackSelection(trackId);
-	}
-
-	function adaptAudioTracks(rows: AudioSearchResult[]): Track[] {
-		return rows.map((r) => ({
-			id: r.id,
-			title: r.title,
-			artist_id: 0,
-			artist_name: r.artist_name,
-			album_id: null,
-			album_title: r.album_title,
-			disc_number: null,
-			track_number: null,
-			duration_ms: r.duration_ms,
-			isrc: null,
-			tidal_id: r.tidal_id,
-			best_quality: null,
-			best_source: null,
-			fidelity_score: 0,
-			is_favorite: r.is_favorite,
-			play_count: r.play_count,
-			last_played_at: null,
-			date_added: null,
-			source: r.source,
-			artwork_url: r.artwork_url,
-			bpm: r.bpm,
-			key_signature: r.key_signature,
-			camelot_key: r.camelot_key,
-			energy: r.energy,
-			danceability: r.danceability,
-		}));
-	}
-
-	async function runLibrarySearch(query: string) {
-		const trimmed = query.trim();
-		if (!trimmed) {
-			searchResults = { tracks: [], albums: [], artists: [] };
-			searchBusy = false;
-			searchError = null;
-			searchTotal = null;
-			searchUnmatchedGenres = [];
-			return;
-		}
-
-		searchBusy = true;
-		searchError = null;
-		try {
-			const parsed = parseQuery(trimmed);
-			if (hasAnyFilter(parsed)) {
-				// DSP/filter syntax (bpm:138, key:Am, energy:>0.7, genre:dnb, etc.) - route to audio search.
-				const params = buildAudioParams(parsed);
-				const audio = await api.searchAudio(params);
-				searchResults = { tracks: adaptAudioTracks(audio.tracks), albums: [], artists: [] };
-				searchTotal = audio.total ?? null;
-				searchUnmatchedGenres = audio.unmatched_genres ?? [];
-			} else {
-				// Plain text - server-side FTS. No more preloading the full library.
-				const r = await cachedApi.search(trimmed, 100);
-				searchResults = {
-					tracks: r.tracks,
-					albums: r.albums,
-					artists: r.artists,
-				};
-				searchTotal = null;
-				searchUnmatchedGenres = [];
-			}
-			clearSelection();
-		} catch (error) {
-			searchError = `Search failed: ${error}`;
-			searchResults = { tracks: [], albums: [], artists: [] };
-			searchTotal = null;
-			searchUnmatchedGenres = [];
-		} finally {
-			searchBusy = false;
-		}
-	}
-
-	// "Show more" for filtered searches: page past the 50-row display cap with
-	// the server-side offset, appending without disturbing already-loaded rows.
-	async function loadMoreSearchResults() {
-		const trimmed = $searchQuery.trim();
-		if (!trimmed || searchLoadingMore || searchBusy) return;
-		const parsed = parseQuery(trimmed);
-		if (!hasAnyFilter(parsed)) return;
-		if (searchTotal !== null && searchResults.tracks.length >= searchTotal) return;
-		searchLoadingMore = true;
-		try {
-			const audio = await api.searchAudio({
-				...buildAudioParams(parsed),
-				offset: searchResults.tracks.length,
-			});
-			const seen = new Set(searchResults.tracks.map((t) => t.id));
-			searchResults = {
-				...searchResults,
-				tracks: [
-					...searchResults.tracks,
-					...adaptAudioTracks(audio.tracks).filter((t) => !seen.has(t.id)),
-				],
-			};
-			searchTotal = audio.total ?? searchTotal;
-		} catch (error) {
-			searchError = `Search failed: ${error}`;
-		} finally {
-			searchLoadingMore = false;
-		}
 	}
 
 	async function loadMoreVisibleItems() {
@@ -1526,16 +1425,10 @@
 		}
 	}
 
+	// Every query change invalidates older search work at once; the controller
+	// debounces the request itself.
 	$effect(() => {
-		const nextQuery = $searchQuery;
-		if (searchTimer) clearTimeout(searchTimer);
-		searchTimer = setTimeout(() => {
-			void runLibrarySearch(nextQuery);
-		}, 220);
-
-		return () => {
-			if (searchTimer) clearTimeout(searchTimer);
-		};
+		librarySearch.setQuery($searchQuery);
 	});
 
 	$effect(() => {
@@ -1681,11 +1574,12 @@
 		if (activeTab !== 'albums') activeDecade = null;
 	})
 
-	// Songs reloads when its rows came from the other scope: the setting changed
-	// while away, or a back-nav restored Songs over rows loaded for All.
+	// Songs reloads when its rows came from another query: the scope setting
+	// changed while away, a back-nav restored Songs over rows loaded for All, or
+	// a sort picked during a search applies once the search clears.
 	$effect(() => {
 		if (activeTab !== 'tracks' || $searchQuery.trim()) return;
-		if (requestedTracksLikedOnly() === likedOnly) return;
+		if (trackListRequestMatches($sortBy, $sortDir, likedOnly)) return;
 		void loadTracks($sortBy, $sortDir, PAGE_SIZE, 0, likedOnly);
 	})
 
@@ -1740,7 +1634,7 @@
 					{:else if isSearchMode}
 						<span class="t-meta">{searchSummary}</span>
 						{#if searchTruncated && (activeTab === 'tracks' || activeTab === 'all')}
-							<button type="button" class="toolbar-link" disabled={searchLoadingMore} onclick={() => void loadMoreSearchResults()}>
+							<button type="button" class="toolbar-link" disabled={searchLoadingMore} onclick={() => void librarySearch.loadMore()}>
 								{searchLoadingMore ? 'Loading...' : 'Show more'}
 							</button>
 						{/if}
@@ -1777,8 +1671,11 @@
 	</CommandHeader>
 
 
-	{#if searchError}
-		<div class="batch-feedback error">{searchError}</div>
+	{#if isSearchMode && $librarySearch.moreError}
+		<div class="batch-feedback error">
+			<span>More matches did not load. {describeError($librarySearch.moreError).message}</span>
+			<button type="button" class="btn btn-glass" disabled={searchLoadingMore} onclick={() => void librarySearch.retry()}>Retry</button>
+		</div>
 	{/if}
 
 	{#if isSearchMode && searchUnmatchedGenres.length > 0}
@@ -1834,6 +1731,14 @@
 
 	{#if $isLoading}
 		<Skeleton rows={10} label="Loading library" />
+
+	{:else if isSearchMode && searchFailed}
+		<!-- A failed search is not an empty one: say so and offer a real retry. -->
+		<ErrorState title="Search failed" error={$librarySearch.error} onretry={() => void librarySearch.retry()} />
+
+	{:else if activeTab === 'tracks' && !isSearchMode && $trackListError && !$trackListError.append}
+		<!-- Rows still held belong to an older query (other scope or sort); do not pass them off as this one. -->
+		<ErrorState title="Couldn't load songs" error={$trackListError.error} onretry={() => void retryTrackList()} />
 
 	{:else if activeTab === 'all' && isSearchMode}
 		<div class="library-search-results">
@@ -2615,6 +2520,12 @@
 				>
 					{$isLoadingMore ? 'Loading…' : 'Load More'}
 				</button>
+			</div>
+		{/if}
+		{#if !isSearchMode && $trackListError?.append}
+			<div class="batch-feedback error">
+				<span>Some songs did not load. {describeError($trackListError.error).message}</span>
+				<button type="button" class="btn btn-glass" disabled={$isLoadingMore} onclick={() => void retryTrackList()}>Retry</button>
 			</div>
 		{/if}
 	{/if}
