@@ -5590,13 +5590,27 @@ fn promote_pending_row_emit(
     local_track_id: i64,
     score_stored: i32,
 ) -> bool {
-    let promoted = db
-        .with_conn(move |conn| pending::promote(conn, queue_item_id, local_track_id, score_stored))
-        .unwrap_or(false);
-    if promoted {
-        let _ = event_tx.send(AppEvent::QueueUpdated);
+    let outcome = db
+        .with_conn(move |conn| {
+            pending::promote_if_admitted(conn, queue_item_id, local_track_id, score_stored)
+        })
+        .unwrap_or(pending::Promotion::NotPending);
+    match outcome {
+        pending::Promotion::Promoted => {
+            let _ = event_tx.send(AppEvent::QueueUpdated);
+            true
+        }
+        pending::Promotion::Rejected => {
+            tracing::info!(
+                queue_item_id,
+                local_track_id,
+                "pending resolver: dropped a recommended row the gate rejected"
+            );
+            let _ = event_tx.send(AppEvent::QueueUpdated);
+            false
+        }
+        pending::Promotion::NotPending => false,
     }
-    promoted
 }
 
 /// Background-eager resolver for a single pending queue row.
@@ -5734,30 +5748,6 @@ async fn resolve_pending_row(
             )
             .await;
         });
-    }
-
-    // Recommended rows go through the shared gate again now that the real
-    // track is known; a rejected row is dropped instead of promoted.
-    let admitted = db
-        .with_conn(move |conn| pending::resolved_track_admitted(conn, queue_item_id, local_id))
-        .unwrap_or(true);
-    if !admitted {
-        let dropped = db
-            .with_conn(move |conn| pending::drop_rejected(conn, queue_item_id))
-            .unwrap_or(false);
-        if dropped {
-            let _ = event_tx.send(AppEvent::QueueUpdated);
-        } else {
-            release(&db, queue_item_id);
-        }
-        tracing::info!(
-            queue_item_id,
-            local_id,
-            artist = %pending_artist,
-            title = %pending_title,
-            "background resolver: dropped a recommended row the gate rejected"
-        );
-        return false;
     }
 
     let score_stored = (score * 1000.0) as i32;

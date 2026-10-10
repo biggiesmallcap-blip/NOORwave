@@ -3926,6 +3926,79 @@ async fn not_for_me_round_trips_and_rejects_unknown_kinds() {
 }
 
 #[tokio::test]
+async fn not_for_me_removes_a_track_from_discovery_space() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist'), (2, 'Blocked Artist');
+             INSERT INTO tracks (id, title, artist_id, duration_ms, source, is_library)
+             VALUES (1, 'Seed', 1, 200000, 'tidal', 1), (2, 'Candidate', 2, 200000, 'tidal', 1);",
+        )?;
+        let model = queries::create_embedding_model(
+            conn,
+            "discovery-fusion-v2:not-for-me",
+            queries::DISCOVERY_ENGINE_V2_FAMILY,
+            2,
+            "ready",
+            None,
+        )?;
+        queries::activate_embedding_model(conn, model.id)?;
+        conn.execute(
+            "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score,
+                                          behavioral_score, confidence, primary_reason)
+             VALUES (1, 2, ?1, 1, 0.9, 0.9, 1.0, 'behavioral')",
+            [model.id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let space_has_candidate = || {
+        let app = api_routes(state.clone());
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/discovery/space")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"seed_track_id":1,"mode":"radio","limit":20}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: Value = serde_json::from_slice(&body).unwrap();
+            json["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|track| track["track_id"] == 2)
+        }
+    };
+
+    assert!(space_has_candidate().await);
+    let marked = api_routes(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/recommendations/not-for-me")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"track","id":2}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(marked.status(), StatusCode::OK);
+    assert!(!space_has_candidate().await);
+}
+
+#[tokio::test]
 async fn discovery_rerank_suppresses_skipped_tracks_via_session_taste() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {

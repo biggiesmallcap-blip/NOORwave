@@ -83,14 +83,60 @@ pub(crate) fn base_title_key(artist: &str, title: &str) -> String {
     format!("{}|{}", words(artist).join(" "), words(&base).join(" "))
 }
 
+/// Global "Not for me" feedback: tracks and artists the listener never wants
+/// suggested. Part of the gate, and used alone where the rest of the gate does
+/// not apply (Discovery Space).
+#[derive(Debug, Default)]
+pub(crate) struct NotForMe {
+    track_ids: HashSet<i64>,
+    artist_ids: HashSet<i64>,
+    artist_names: HashSet<String>,
+}
+
+impl NotForMe {
+    pub(crate) fn load(conn: &Connection) -> Self {
+        let names = (|| -> rusqlite::Result<HashSet<String>> {
+            conn.prepare(
+                "SELECT a.name FROM recommendation_feedback f
+                 JOIN artists a ON a.id = f.entity_id
+                 WHERE f.kind = 'artist'",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect()
+        })()
+        .unwrap_or_default();
+        Self {
+            track_ids: id_set(
+                conn,
+                "SELECT entity_id FROM recommendation_feedback WHERE kind = 'track'",
+            ),
+            artist_ids: id_set(
+                conn,
+                "SELECT entity_id FROM recommendation_feedback WHERE kind = 'artist'",
+            ),
+            artist_names: names.iter().map(|name| words(name).join(" ")).collect(),
+        }
+    }
+
+    /// `track_id` is a local library id; artists match by id or by name.
+    pub(crate) fn blocks(
+        &self,
+        track_id: Option<i64>,
+        artist_id: Option<i64>,
+        artist_name: &str,
+    ) -> bool {
+        track_id.is_some_and(|id| self.track_ids.contains(&id))
+            || artist_id.is_some_and(|id| self.artist_ids.contains(&id))
+            || self.artist_names.contains(&words(artist_name).join(" "))
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct CandidateGate {
     hidden_tidal_ids: HashSet<i64>,
     recent_track_ids: HashSet<i64>,
     early_skipped_ids: HashSet<i64>,
-    not_for_me_tracks: HashSet<i64>,
-    not_for_me_artist_ids: HashSet<i64>,
-    not_for_me_artist_names: HashSet<String>,
+    not_for_me: NotForMe,
     seen_track_ids: HashSet<i64>,
     seen_tidal_ids: HashSet<i64>,
     seen_isrcs: HashSet<String>,
@@ -132,37 +178,25 @@ impl CandidateGate {
             early_skipped_ids: id_set(
                 conn,
                 &format!(
-                    "SELECT lh.track_id FROM listen_history lh
-                     LEFT JOIN tracks t ON t.id = lh.track_id
-                     WHERE julianday(lh.started_at) >= julianday('now', '-{EARLY_SKIP_DAYS} days')
-                       AND {early_skip}
-                     EXCEPT
-                     SELECT track_id FROM listen_history
-                     WHERE completed = 1
-                       AND julianday(started_at) >= julianday('now', '-{EARLY_SKIP_DAYS} days')"
+                    "SELECT skips.track_id FROM (
+                         SELECT lh.track_id, MAX(julianday(lh.started_at)) AS last_skip
+                         FROM listen_history lh
+                         LEFT JOIN tracks t ON t.id = lh.track_id
+                         WHERE julianday(lh.started_at) >= julianday('now', '-{EARLY_SKIP_DAYS} days')
+                           AND {early_skip}
+                         GROUP BY lh.track_id
+                     ) skips
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM listen_history done
+                         WHERE done.track_id = skips.track_id
+                           AND done.completed = 1
+                           AND julianday(done.started_at) > skips.last_skip
+                     )"
                 ),
             ),
-            not_for_me_tracks: id_set(
-                conn,
-                "SELECT entity_id FROM recommendation_feedback WHERE kind = 'track'",
-            ),
-            not_for_me_artist_ids: id_set(
-                conn,
-                "SELECT entity_id FROM recommendation_feedback WHERE kind = 'artist'",
-            ),
+            not_for_me: NotForMe::load(conn),
             ..Self::default()
         };
-        let names = (|| -> rusqlite::Result<HashSet<String>> {
-            conn.prepare(
-                "SELECT a.name FROM recommendation_feedback f
-                 JOIN artists a ON a.id = f.entity_id
-                 WHERE f.kind = 'artist'",
-            )?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect()
-        })()
-        .unwrap_or_default();
-        gate.not_for_me_artist_names = names.iter().map(|name| words(name).join(" ")).collect();
         for item in queue_items {
             if Some(item.id) == skip_queue_item_id {
                 continue;
@@ -208,16 +242,11 @@ impl CandidateGate {
         if let Some(id) = track_id
             && (self.recent_track_ids.contains(&id)
                 || self.early_skipped_ids.contains(&id)
-                || self.not_for_me_tracks.contains(&id)
                 || self.seen_track_ids.contains(&id))
         {
             return false;
         }
-        if artist_id.is_some_and(|id| self.not_for_me_artist_ids.contains(&id))
-            || self
-                .not_for_me_artist_names
-                .contains(&words(artist_name).join(" "))
-        {
+        if self.not_for_me.blocks(track_id, artist_id, artist_name) {
             return false;
         }
         if tidal_id.is_some_and(|id| self.seen_tidal_ids.contains(&id)) {
@@ -334,12 +363,15 @@ mod tests {
              INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES
                 (1, 'Recent', 1, 200000), (2, 'Skipped', 1, 200000),
                 (3, 'Skipped Then Loved', 1, 200000), (4, 'Fresh', 1, 200000),
-                (5, 'Disliked', 1, 200000), (6, 'Any', 2, 200000);
+                (5, 'Disliked', 1, 200000), (6, 'Any', 2, 200000),
+                (7, 'Loved Then Skipped', 1, 200000);
              INSERT INTO listen_history (track_id, started_at, duration_listened_ms, completed) VALUES
                 (1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-1 hours'), 200000, 1),
                 (2, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-3 days'), 9000, 0),
                 (3, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-4 days'), 9000, 0),
-                (3, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-2 days'), 200000, 1);
+                (3, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-2 days'), 200000, 1),
+                (7, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-4 days'), 200000, 1),
+                (7, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-2 days'), 5000, 0);
              INSERT INTO recommendation_feedback (kind, entity_id) VALUES ('track', 5), ('artist', 2);",
         )
         .expect("seed");
@@ -353,6 +385,8 @@ mod tests {
         assert!(!gate.allows_track(&track(1, 1, "Liked", "Recent")));
         assert!(!gate.allows_track(&track(2, 1, "Liked", "Skipped")));
         assert!(gate.allows_track(&track(3, 1, "Liked", "Skipped Then Loved")));
+        // Only a completion after the latest early skip clears it.
+        assert!(!gate.allows_track(&track(7, 1, "Liked", "Loved Then Skipped")));
         assert!(gate.allows_track(&track(4, 1, "Liked", "Fresh")));
         assert!(!gate.allows_track(&track(5, 1, "Liked", "Disliked")));
         assert!(!gate.allows_track(&track(6, 2, "Not For Me", "Any")));

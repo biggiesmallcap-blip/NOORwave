@@ -67,7 +67,7 @@ fn rank_relevance(ordinal: usize) -> f64 {
     1.0 / (1.0 + RANK_RELEVANCE_DECAY * ordinal as f64)
 }
 
-fn dj_fit_multiplier(fit: f64) -> f64 {
+pub(crate) fn dj_fit_multiplier(fit: f64) -> f64 {
     fit.max(0.0)
         .powf(DJ_FIT_EXPONENT)
         .clamp(DJ_FIT_MIN, DJ_FIT_MAX)

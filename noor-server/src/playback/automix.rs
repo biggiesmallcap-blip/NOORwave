@@ -21,8 +21,8 @@ use crate::db::{
 };
 use crate::playback::candidate_gate::CandidateGate;
 use crate::playback::dj_queue_ranker::{
-    GeneratedCandidate, GeneratedCandidatePolicy, append_dj_reason, mixing_active,
-    rank_generated_candidates, rank_generated_candidates_chain,
+    GeneratedCandidate, GeneratedCandidatePolicy, append_dj_reason, dj_fit_multiplier,
+    mixing_active, rank_generated_candidates, rank_generated_candidates_chain,
 };
 use crate::playback::player::{
     PlaybackSnapshot, build_session_taste_profile, load_snapshot, load_state, normalize_genre_key,
@@ -827,6 +827,8 @@ pub(crate) fn build_automix_extension_with_reasons(
         }
     }
 
+    // Key and tempo fit only shapes the order while transitions are mixed.
+    let mixing = mixing_active(conn);
     let ordered = order_automix_candidates(
         mode,
         candidates,
@@ -838,6 +840,7 @@ pub(crate) fn build_automix_extension_with_reasons(
         seed_features.as_ref(),
         &candidate_features,
         &artist_hub,
+        mixing,
     );
     let ordered = decluster_by_album(ordered);
     let ordered = cap_per_artist(
@@ -861,6 +864,7 @@ pub(crate) fn build_automix_extension_with_reasons(
                 &seed,
                 seed_features.as_ref(),
                 candidate_features.get(&track.id),
+                mixing,
             );
             // Same hub discount the ordering used, reflected in the score and its
             // "Why" so a hub that got buried can't still claim a clean reason.
@@ -1311,6 +1315,7 @@ fn order_automix_candidates(
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: &HashMap<i64, AudioDspFeatures>,
     artist_hub: &HashMap<i64, f64>,
+    mixing: bool,
 ) -> Vec<Track> {
     let mut scored = candidates
         .into_iter()
@@ -1325,6 +1330,7 @@ fn order_automix_candidates(
                 seed,
                 seed_features,
                 candidate_features.get(&track.id),
+                mixing,
             )
             .value;
             // Discount hub artists so they sink below non-hub matches at the 0.05
@@ -1569,6 +1575,7 @@ pub(crate) fn automix_score(
         seed,
         seed_features,
         candidate_features,
+        true,
     )
 }
 
@@ -1590,9 +1597,9 @@ const AUTOMIX_GENRE_WEIGHT: f64 = 2.5;
 
 /// Relevance first, penalties last: genre overlap (weighted Jaccard, so extra
 /// tags dilute instead of stacking) and taste affinities build relevance;
-/// familiarity boosts scale it; the tamed harmonic fit nudges it; skip, recency
-/// and energy-whiplash penalties multiply the result so a shared genre can no
-/// longer cancel a skip.
+/// familiarity boosts scale it; the tamed harmonic fit nudges it while
+/// transitions are mixed; skip, recency and energy-whiplash penalties multiply
+/// the result so a shared genre can no longer cancel a skip.
 fn automix_score_with_genre_confidence(
     track: &Track,
     genres: &[queue::TrackGenreEvidence],
@@ -1600,6 +1607,7 @@ fn automix_score_with_genre_confidence(
     seed: &SeedContext,
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: Option<&AudioDspFeatures>,
+    mixing: bool,
 ) -> AutomixScore {
     let mut signals = Vec::new();
 
@@ -1702,26 +1710,28 @@ fn automix_score_with_genre_confidence(
     }
 
     // -- Harmonic fit, tamed -------------------------------------------------
-    // Only when BOTH tracks have features; unanalyzed tracks are never
-    // penalised. The raw multiplier swings x0.39..x3.96, so it is tamed the way
-    // discovery_ranking tames it.
+    // Only while mixing, and only when BOTH tracks have features; unanalyzed
+    // tracks are never penalised. The raw multiplier swings x0.39..x3.96, so it
+    // is tamed with the shared DJ ranker's bounds.
     let mut whiplash = false;
     if let (Some(seed), Some(cand)) = (seed_features, candidate_features) {
-        score *= compute_harmonic_multiplier(
-            seed.camelot_key.as_deref(),
-            cand.camelot_key.as_deref(),
-            seed.bpm,
-            cand.bpm,
-        )
-        .powf(0.35)
-        .clamp(0.7, 1.4);
+        if mixing {
+            score *= dj_fit_multiplier(compute_harmonic_multiplier(
+                seed.camelot_key.as_deref(),
+                cand.camelot_key.as_deref(),
+                seed.bpm,
+                cand.bpm,
+            ));
+        }
 
         // The multiplier folds Camelot *and* BPM together, so it can read >1.0
         // even on a key clash that happens to share a tempo. Derive the
         // harmonic signal from the Camelot relationship directly - via the same
         // `camelot_relation` the multiplier uses - so the "Why" never claims a
         // fit the keys don't have, and the two can't drift apart.
-        if let (Some(a), Some(b)) = (seed.camelot_key.as_deref(), cand.camelot_key.as_deref()) {
+        if mixing
+            && let (Some(a), Some(b)) = (seed.camelot_key.as_deref(), cand.camelot_key.as_deref())
+        {
             signals.push(match camelot_relation(a, b) {
                 CamelotRelation::Compatible => AutomixSignal::boost("harmonic match"),
                 CamelotRelation::Adjacent => AutomixSignal::boost("adjacent key"),
@@ -2068,6 +2078,42 @@ mod tests {
     }
 
     #[test]
+    fn fallback_order_ignores_key_and_tempo_while_mixing_is_off() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO artists (id, name) VALUES (1, 'Seed'), (2, 'Two'), (3, 'Three');
+                 INSERT INTO tracks (id, title, artist_id, duration_ms, source, is_library, is_favorite)
+                 VALUES (1, 'Seed', 1, 200000, 'tidal', 1, 0),
+                        (2, 'Preferred', 2, 200000, 'tidal', 1, 1),
+                        (3, 'Other', 3, 200000, 'tidal', 1, 0);
+                 UPDATE playback_state SET crossfade_ms = 0 WHERE id = 1;
+                 INSERT INTO queue (id, track_id, position, source) VALUES (1, 1, 0, 'user');
+                 INSERT INTO track_similarity (track_a, track_b, similarity_score)
+                 VALUES (1, 2, 0.9), (1, 3, 0.8);
+                 INSERT INTO audio_dsp_features (track_id, bpm, camelot_key)
+                 VALUES (1, 124.0, '8A'), (2, 145.0, '3B'), (3, 124.0, '8A');",
+            )?;
+            assert!(!mixing_active(conn));
+            let current = queue::get_track_by_id(conn, 1)?.unwrap();
+            let items = queue::load_queue(conn)?;
+            let ranked = build_automix_extension_with_reasons(
+                conn,
+                &current,
+                &items,
+                ShuffleMode::Off,
+                None,
+                1,
+                false,
+            )?;
+            assert_eq!(ranked[0].track.id, 2, "key and tempo reordered automix with mixing off");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn scorer_keeps_harmonic_swing_within_bounds() {
         use crate::smart::taste_vector::{SeedContext, TasteVector};
         let taste = TasteVector::default();
@@ -2093,8 +2139,8 @@ mod tests {
             Some(&dsp(160.0, "2B")),
         )
         .value;
-        assert!(fit <= neutral * 1.4 + 1e-9, "{fit} vs {neutral}");
-        assert!(clash >= neutral * 0.7 - 1e-9, "{clash} vs {neutral}");
+        assert!(fit <= neutral * 1.25 + 1e-9, "{fit} vs {neutral}");
+        assert!(clash >= neutral * 0.8 - 1e-9, "{clash} vs {neutral}");
         assert!(fit > neutral && clash < neutral);
     }
 
@@ -2121,19 +2167,40 @@ mod tests {
             AffinitySignal { pos: 2.2, neg: 0.0 },
         );
 
-        let strong =
-            automix_score_with_genre_confidence(&track, &strong_genre, &taste, &seed, None, None)
-                .value;
-        let weak_candidate =
-            automix_score_with_genre_confidence(&track, &weak_genre, &taste, &seed, None, None)
-                .value;
+        let strong = automix_score_with_genre_confidence(
+            &track,
+            &strong_genre,
+            &taste,
+            &seed,
+            None,
+            None,
+            false,
+        )
+        .value;
+        let weak_candidate = automix_score_with_genre_confidence(
+            &track,
+            &weak_genre,
+            &taste,
+            &seed,
+            None,
+            None,
+            false,
+        )
+        .value;
         assert!(strong > weak_candidate);
 
         seed.genre_confidence
             .insert("genres > electronic > house".to_string(), 0.1);
-        let weak_seed =
-            automix_score_with_genre_confidence(&track, &strong_genre, &taste, &seed, None, None)
-                .value;
+        let weak_seed = automix_score_with_genre_confidence(
+            &track,
+            &strong_genre,
+            &taste,
+            &seed,
+            None,
+            None,
+            false,
+        )
+        .value;
         assert!((weak_seed - weak_candidate).abs() < 1e-9);
     }
 
