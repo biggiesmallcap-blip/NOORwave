@@ -1552,3 +1552,79 @@ async fn promote_pending_row_emit_marks_external_candidate_resolved() {
         .unwrap();
     assert_eq!(resolved, Some(1));
 }
+
+/// A two-row TIDAL queue playing row 1, with a fake runtime and a scripted
+/// stream source that answers once with a playable stream.
+fn command_fixture() -> (
+    crate::SharedState,
+    std::sync::mpsc::Receiver<playback_runtime::PlaybackRuntimeCommand>,
+) {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute("INSERT INTO artists (id, name) VALUES (9300, 'Command Artist')", [])?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms, tidal_id, best_source, source)
+             VALUES (9301, 'One', 9300, 180000, 99301, 'tidal', 'tidal'),
+                    (9302, 'Two', 9300, 180000, 99302, 'tidal', 'tidal')",
+            [],
+        )?;
+        conn.execute("INSERT INTO queue (track_id, position, source) VALUES (9301, 0, 'test')", [])?;
+        let first = conn.last_insert_rowid();
+        conn.execute("INSERT INTO queue (track_id, position, source) VALUES (9302, 1, 'test')", [])?;
+        conn.execute(
+            "UPDATE playback_state SET current_track_id = 9301, current_queue_item_id = ?1, is_playing = 1 WHERE id = 1",
+            rusqlite::params![first],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let mut app = fresh_test_state(db);
+    app.stream_source =
+        super::stream::ScriptedStreamSource::new(vec![Ok(super::stream::test_stream_info(99302))]);
+    app.tidal.set_tokens_for_test(Some(tidal_auth::TidalTokens {
+        access_token: "test-token".to_string(),
+        refresh_token: "refresh-token".to_string(),
+        token_type: "Bearer".to_string(),
+        expires_in: 3600,
+        user_id: "test-user".to_string(),
+        country_code: "US".to_string(),
+        auth_flow: Some("pkce".to_string()),
+    }));
+    let (command_tx, commands) = std::sync::mpsc::channel();
+    app.playback_runtime = Some(PlaybackRuntimeState {
+        access_token: "test-token".to_string(),
+        handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+    });
+    (Arc::new(tokio::sync::RwLock::new(app)), commands)
+}
+
+#[tokio::test]
+async fn next_command_advances_and_switches_the_runtime() {
+    let (state, commands) = command_fixture();
+    let outcome = super::command::next(&state).await.unwrap();
+    match outcome {
+        super::command::Outcome::Settled(snapshot) => {
+            assert_eq!(snapshot.state.current_track.map(|t| t.id), Some(9302));
+        }
+        other => panic!("expected Settled, got {other:?}"),
+    }
+    let mut saw_switch = false;
+    while let Ok(command) = commands.try_recv() {
+        if let playback_runtime::PlaybackRuntimeCommand::Switch(job) = command {
+            assert_eq!(job.track.id, 9302);
+            saw_switch = true;
+        }
+    }
+    assert!(saw_switch, "runtime was switched to the next row");
+}
+
+#[tokio::test]
+async fn play_command_rejects_non_library_ids_without_touching_playback() {
+    let (state, commands) = command_fixture();
+    let err = super::command::play(&state, 0).await.unwrap_err();
+    assert!(matches!(
+        err,
+        super::command::CommandError::InvalidTrackId(0)
+    ));
+    assert!(commands.try_recv().is_err());
+}
