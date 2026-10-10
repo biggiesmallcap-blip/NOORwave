@@ -11237,50 +11237,34 @@ async fn reissue_current_track_at_new_quality(state: &SharedState) -> anyhow::Re
         return Ok(());
     };
 
-    let user_quality = current_user_audio_quality(state).await;
-    let Some(stream_request) = player::build_tidal_stream_request(&track, user_quality.clone())
-    else {
-        // Local-library tracks don't have a TIDAL stream to re-resolve.
+    // Re-issue only into a runtime that already exists; never spawn one for a
+    // settings change.
+    if current_playback_runtime(state).await.is_none() {
         return Ok(());
-    };
-
-    let stream_info = match resolve_tidal_playback_stream(state, &track, &stream_request).await {
-        Ok(info) => info,
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "stream resolve failed: {}",
-                describe_tidal_playback_error(&e)
-            ));
-        }
-    };
-
-    let runtime_handle = {
-        let guard = state.read().await;
-        guard.playback_runtime.as_ref().map(|r| r.handle.clone())
-    };
-    let Some(handle) = runtime_handle else {
-        return Ok(());
-    };
-
+    }
     let crossfade_ms = current_crossfade_ms(state).await;
     let generation = bump_playback_generation(state).await;
-    let job =
-        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
-            .with_generation(generation);
-
-    handle.switch_to(job)?;
-
+    match start_track(
+        state,
+        StartRequest {
+            track: &track,
+            generation,
+            dispatch: Dispatch::Switch,
+            crossfade_ms,
+        },
+    )
+    .await
     {
-        let mut state_guard = state.write().await;
-        state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
-            audio_quality: stream_info.audio_quality.clone(),
-            sample_rate: stream_info.sample_rate,
-            bit_depth: stream_info.bit_depth,
-        });
-        state_guard.pending_stream_display = None;
+        Ok(_) | Err(StartError::LocalUnsupported) | Err(StartError::Superseded) => Ok(()),
+        Err(StartError::Stream(error)) => Err(anyhow::anyhow!(
+            "stream resolve failed: {}",
+            describe_tidal_playback_error(&error)
+        )),
+        Err(StartError::Runtime(error)) => {
+            Err(anyhow::anyhow!("playback runtime unavailable: {error:?}"))
+        }
+        Err(StartError::Dispatch { error, .. }) => Err(error),
     }
-
-    Ok(())
 }
 
 /// True when the user manually cleared the queue within the last 60 seconds.
