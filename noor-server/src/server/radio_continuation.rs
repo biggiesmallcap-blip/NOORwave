@@ -255,15 +255,16 @@ async fn top_up_inner(state: &SharedState) -> anyhow::Result<usize> {
         )
         .await;
     }
-    let appended = db.with_conn(move |conn| {
+    let (appended, pending_item_ids) = db.with_conn(move |conn| {
         let before = queued_row_count(conn);
-        crate::server::radio_pipeline::append_radio_queue_from_candidates(conn, tracks)?;
+        let build =
+            crate::server::radio_pipeline::append_radio_queue_from_candidates(conn, tracks)?;
         let added = queued_row_count(conn).saturating_sub(before);
         if added == 0 {
             // Nothing new left for this station: automix takes over.
             forget_seed(conn);
         }
-        Ok(added)
+        Ok((added, build.pending_item_ids))
     })?;
     tracing::info!(
         target: "noor.radio",
@@ -275,6 +276,13 @@ async fn top_up_inner(state: &SharedState) -> anyhow::Result<usize> {
     if appended > 0 {
         let _ = event_tx.send(AppEvent::QueueUpdated);
     }
+    crate::server::routes::spawn_pending_resolvers_for_queue_items(
+        state,
+        &db,
+        pending_item_ids,
+        "radio_top_up_pending_resolved",
+    )
+    .await;
     Ok(appended)
 }
 
