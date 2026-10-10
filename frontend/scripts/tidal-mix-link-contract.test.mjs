@@ -8,9 +8,16 @@ function tidalMixRouteSource() {
 	return source.slice(start, end);
 }
 
+// The API surface spans the client and its wire types.
+function readApiSurface() {
+	return ['client.ts', 'types.ts']
+		.map((f) => readFileSync(`src/lib/api/${f}`, 'utf8'))
+		.join('\n');
+}
+
 describe('TIDAL mix link contracts', () => {
 	test('TIDAL mix playback preserves album and artist ids for links', () => {
-		const client = readFileSync('src/lib/api/client.ts', 'utf8');
+		const client = readApiSurface();
 		const player = readFileSync('src/lib/stores/player.ts', 'utf8');
 		const trackUtils = readFileSync('src/lib/utils/track.ts', 'utf8');
 
@@ -31,7 +38,7 @@ describe('TIDAL mix link contracts', () => {
 	});
 
 	test('TIDAL mix playback preserves local liked state when available', () => {
-		const client = readFileSync('src/lib/api/client.ts', 'utf8');
+		const client = readApiSurface();
 		const player = readFileSync('src/lib/stores/player.ts', 'utf8');
 		const routes = readFileSync('../noor-server/src/server/routes/tidal_catalog_routes.rs', 'utf8');
 		const mixRoute = tidalMixRouteSource();

@@ -16,7 +16,10 @@ const source = readFileSync(join(here, 'HomeRecommendationsShelf.svelte'), 'utf8
 const recommendationMenu = readFileSync(join(here, 'recommendation_menu.ts'), 'utf8');
 const recommendationNavigation = readFileSync(join(here, 'recommendation_navigation.ts'), 'utf8');
 const homePage = readFileSync(join(here, '../../../routes/+page.svelte'), 'utf8');
-const client = readFileSync(join(here, '../../api/client.ts'), 'utf8');
+// The API surface spans the client and its wire types.
+const client = ['client.ts', 'types.ts']
+	.map((f) => readFileSync(join(here, '../../api', f), 'utf8'))
+	.join('\n');
 const playTrending = readFileSync(join(here, '../../player/play_trending.ts'), 'utf8');
 const serverRoutes = readFileSync(join(here, '../../../../../noor-server/src/server/routes.rs'), 'utf8');
 const homeRoutes = readFileSync(join(here, '../../../../../noor-server/src/server/routes/home_routes.rs'), 'utf8');
