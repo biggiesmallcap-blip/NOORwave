@@ -16,7 +16,10 @@ function countOccurrences(source: string, needle: string): number {
 
 describe('library home hero contract', () => {
 	test('top_artist_hero_uses_a_full_top_20_mural', () => {
-		expect(libraryPage).toContain('played.slice(0, 20)');
+		// Ranked server-side by plays summed per artist (see
+		// get_library_top_artists), not from the shared tracks store.
+		expect(libraryPage).toContain('cachedApi.getLibraryTopArtists(20)');
+		expect(libraryPage).toContain('return topArtists.map((artist) => ({');
 		expect(libraryHero).toContain('YOUR TOP 20 ARTISTS');
 		expect(libraryHero).toContain('hero-bg-mural');
 		expect(libraryHero).toContain('function selectMuralArtist');
@@ -90,9 +93,10 @@ describe('library home hero contract', () => {
 		// instead of being dropped, and neither waits for the library store.
 		expect(murals).toContain('cachedApi.homeShufflePicksQuery(HOME_MURAL_ITEM_LIMIT)');
 		expect(murals).toContain('cachedApi.homeSuggestionsQuery(50)');
-		expect(murals).toContain('shuffleQuery.subscribe((state) => {');
-		expect(murals).toContain('suggestionsQuery.subscribe((state) => {');
-		expect(murals).toContain('MURAL_RETRY_DELAYS_MS');
+		// Empty and failed samples refresh while mounted (behavior covered in
+		// mural_query_watch.test.ts).
+		expect(murals).toContain('watchMuralQuery(shuffleQuery, {');
+		expect(murals).toContain('watchMuralQuery(suggestionsQuery, {');
 		expect(murals).not.toContain('cachedApi.getHomeShufflePicks');
 		expect(murals).not.toContain('cachedApi.getHomeSuggestions');
 		expect(murals).not.toContain('homePanelRefreshBucket');

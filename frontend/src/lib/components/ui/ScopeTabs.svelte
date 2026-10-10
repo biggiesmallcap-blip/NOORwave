@@ -5,7 +5,9 @@
 	// are a tablist with one tab stop and onselect. Arrow keys, Home and End
 	// move between tabs either way; in a tablist they also select.
 
-	type ScopeTab = { id: string; label: string; href?: string; count?: number | string | null };
+	// countPending reserves a count's width while it loads, so a centered row
+	// does not reflow when the count lands.
+	type ScopeTab = { id: string; label: string; href?: string; count?: number | string | null; countPending?: boolean };
 
 	let {
 		tabs,
@@ -55,7 +57,7 @@
 				data-sveltekit-replacestate={replaceState || undefined}
 				aria-current={current === tab.id ? 'page' : undefined}
 				onkeydown={onKeydown}
-			>{tab.label}{#if tab.count != null}<span class="count">{tab.count}</span>{/if}</a>
+			>{tab.label}{#if tab.count != null}<span class="count">{tab.count}</span>{:else if tab.countPending}<span class="count count-pending" aria-hidden="true">0.0k</span>{/if}</a>
 		{/each}
 	</nav>
 {:else}
@@ -70,7 +72,7 @@
 				tabindex={current === tab.id || (current === null && index === 0) ? 0 : -1}
 				onclick={() => onselect?.(tab.id)}
 				onkeydown={onKeydown}
-			>{tab.label}{#if tab.count != null}<span class="count">{tab.count}</span>{/if}</button>
+			>{tab.label}{#if tab.count != null}<span class="count">{tab.count}</span>{:else if tab.countPending}<span class="count count-pending" aria-hidden="true">0.0k</span>{/if}</button>
 		{/each}
 	</div>
 {/if}
@@ -141,6 +143,11 @@
 		/* A count that lands after first paint (no cached value yet) fades in
 		   rather than popping. */
 		animation: scope-count-in var(--motion-base) both;
+	}
+
+	.count-pending {
+		visibility: hidden;
+		animation: none;
 	}
 
 	@keyframes scope-count-in {

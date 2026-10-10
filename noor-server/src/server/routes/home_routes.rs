@@ -171,6 +171,33 @@ pub(super) async fn get_home_shuffle_picks(
     Ok(Json(json!({ "tracks": tracks, "albums": albums })))
 }
 
+const LIBRARY_TOP_ARTISTS_DEFAULT_LIMIT: i64 = 20;
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct LibraryTopArtistsQuery {
+    limit: Option<i64>,
+}
+
+/// GET /api/library/top-artists - the Library hero, ranked by total plays per
+/// artist across the whole library.
+pub(super) async fn get_library_top_artists(
+    State(state): State<SharedState>,
+    axum::extract::Query(query): axum::extract::Query<LibraryTopArtistsQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let limit = query
+        .limit
+        .unwrap_or(LIBRARY_TOP_ARTISTS_DEFAULT_LIMIT)
+        .clamp(1, 50);
+    let db = {
+        let s = state.read().await;
+        s.db.clone()
+    };
+    let artists = db
+        .with_conn(move |conn| queries::get_library_top_artists(conn, limit))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "artists": artists })))
+}
+
 /// Home's provider shelves, served from cache and never blocking on the
 /// upstream fan-out.
 ///

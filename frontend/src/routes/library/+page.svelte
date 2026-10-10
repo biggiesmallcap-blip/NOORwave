@@ -1,12 +1,12 @@
 <script lang="ts" module>
-	import type { Track as CachedTrack } from '$lib/api/client';
+	import type { LibraryTopArtist, Track as CachedTrack } from '$lib/api/client';
 
-	// Recent and most-played tracks, kept across visits so the landing paints at
+	// Recent tracks and top artists, kept across visits so the landing paints at
 	// once and refreshes quietly. The suggestion murals read their own cache
 	// queries in LibraryMurals.svelte.
 	const homePanelCandidateCache = {
 		recentTracks: [] as CachedTrack[],
-		topPlayedTracks: [] as CachedTrack[],
+		topArtists: [] as LibraryTopArtist[],
 	};
 </script>
 
@@ -162,6 +162,9 @@
 	// known counts paint first so the pill row never reflows on open; a failed
 	// query keeps the previous count instead of blanking it.
 	let libraryCounts = $state(cachedTabCounts(get(librarySongsScope) === 'liked'));
+	// First visit with nothing remembered: the pills reserve the count's width
+	// until the queries settle.
+	let libraryCountsPending = $state(true);
 
 	async function loadLibraryCounts() {
 		const scopeLiked = likedOnly;
@@ -177,6 +180,7 @@
 			albums: albumsRes.status === 'fulfilled' ? albumsRes.value.total : previous.albums,
 		};
 		rememberTabCounts(scopeLiked, next);
+		libraryCountsPending = false;
 		if (next.tracks !== libraryCounts.tracks || next.albums !== libraryCounts.albums) libraryCounts = next;
 	}
 
@@ -184,6 +188,7 @@
 		LIBRARY_TABS.map((tab) => ({
 			...tab,
 			count: tab.id === 'tracks' ? tabCountLabel(libraryCounts.tracks) : tab.id === 'albums' ? tabCountLabel(libraryCounts.albums) : tab.id === 'artists' ? tabCountLabel(artistLetters?.total) : null,
+			countPending: libraryCountsPending && (tab.id === 'tracks' || tab.id === 'albums'),
 		})),
 	);
 	let viewCount = $derived(
@@ -229,11 +234,11 @@
 	// us we've hit the end. `artistsExhausted` then stops further fetches.
 	let artistsExhausted = $state(false);
 	let recentTracks = $state<Track[]>(homePanelCandidateCache.recentTracks);
-	// The hero's own sample, independent of the shared `tracks` store: that store
-	// holds whatever the Songs tab last loaded (liked only, sorted by title, ...),
-	// so deriving the hero from it blanked the panel until a hard reload.
-	let topPlayedTracks = $state<Track[]>(homePanelCandidateCache.topPlayedTracks);
-	let topPlayedLoading = $state(homePanelCandidateCache.topPlayedTracks.length === 0);
+	// The hero's own ranking, independent of the shared `tracks` store (which
+	// holds whatever the Songs tab last loaded). The server sums plays per artist
+	// across the whole library before taking the top 20.
+	let topArtists = $state<LibraryTopArtist[]>(homePanelCandidateCache.topArtists);
+	let topArtistsLoading = $state(homePanelCandidateCache.topArtists.length === 0);
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -381,14 +386,14 @@
 		void loadCatalogueStatus();
 		void loadBatchMeta();
 		void loadRecentTracks();
-		void loadTopPlayedTracks();
+		void loadTopArtists();
 		void loadDecadeChips();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
 			if (latest.type === 'library_synced') {
 				void loadCatalogueStatus();
-				void loadTopPlayedTracks();
+				void loadTopArtists();
 			}
 			if (latest.type === 'listen_history_updated') {
 				void loadRecentTracks();
@@ -404,22 +409,22 @@
 
 	// A failed first load (server still starting) retries a few times rather
 	// than leaving the hero blank until a hard reload.
-	const TOP_PLAYED_RETRY_DELAYS_MS = [2000, 5000, 15000];
+	const TOP_ARTISTS_RETRY_DELAYS_MS = [2000, 5000, 15000];
 
-	async function loadTopPlayedTracks(attempt = 0) {
+	async function loadTopArtists(attempt = 0) {
 		try {
-			const data = await cachedApi.getTracks('play_count', 'desc', PAGE_SIZE, 0, true, false);
-			topPlayedTracks = data.tracks;
-			homePanelCandidateCache.topPlayedTracks = topPlayedTracks;
-			topPlayedLoading = false;
+			const data = await cachedApi.getLibraryTopArtists(20);
+			topArtists = data.artists ?? [];
+			homePanelCandidateCache.topArtists = topArtists;
+			topArtistsLoading = false;
 		} catch (error) {
-			console.error('Failed to load most played tracks:', error);
-			const delay = TOP_PLAYED_RETRY_DELAYS_MS[attempt];
+			console.error('Failed to load top artists:', error);
+			const delay = TOP_ARTISTS_RETRY_DELAYS_MS[attempt];
 			if (delay === undefined) {
-				topPlayedLoading = false;
+				topArtistsLoading = false;
 				return;
 			}
-			setTimeout(() => void loadTopPlayedTracks(attempt + 1), delay);
+			setTimeout(() => void loadTopArtists(attempt + 1), delay);
 		}
 	}
 
@@ -1367,44 +1372,16 @@
 
 	let heroArtists = $derived.by<HeroArtist[]>(() => {
 		const artistMap = new Map($artistsStore.map((a: Artist) => [a.id, a]));
-		const countMap = new Map<number, HomeArtist>();
-		const albumsByArtist = new Map<number, Set<number>>();
-
-		for (const track of topPlayedTracks) {
-			if (!track.artist_id) continue;
-			const storeArtist = artistMap.get(track.artist_id);
-			const info = countMap.get(track.artist_id);
-			if (info) {
-				info.playCount += track.play_count ?? 0;
-				info.trackCount++;
-				if (!info.fallback_art_url && track.artwork_url) {
-					info.fallback_art_url = track.artwork_url;
-				}
-			} else {
-				countMap.set(track.artist_id, {
-					id: track.artist_id,
-					name: track.artist_name ?? 'Unknown Artist',
-					photo_url: storeArtist?.photo_url ?? null,
-					fallback_art_url: track.artwork_url ?? null,
-					playCount: track.play_count ?? 0,
-					trackCount: 1,
-					albumCount: 0,
-				});
-			}
-			if (track.album_id) {
-				if (!albumsByArtist.has(track.artist_id)) albumsByArtist.set(track.artist_id, new Set());
-				albumsByArtist.get(track.artist_id)!.add(track.album_id);
-			}
-		}
-		for (const [id, data] of countMap) {
-			data.albumCount = albumsByArtist.get(id)?.size ?? 0;
-		}
-
-		const all = [...countMap.values()];
-		const played = all.filter(a => a.playCount > 0).sort((a, b) => b.playCount - a.playCount);
-		const top: HeroArtist[] = played.slice(0, 20).map(a => ({ ...a, kind: 'top' }));
-
-		return top;
+		return topArtists.map((artist) => ({
+			id: artist.id,
+			name: artist.name,
+			photo_url: artist.photo_url ?? artistMap.get(artist.id)?.photo_url ?? null,
+			fallback_art_url: artist.fallback_art_url,
+			playCount: artist.play_count,
+			trackCount: artist.track_count,
+			albumCount: artist.album_count,
+			kind: 'top',
+		}));
 	});
 
 	interface HomeArtistCard {
@@ -2059,7 +2036,7 @@
 					onContextMenu={handleHomeArtistContextMenu}
 					riseIndex={0}
 				/>
-			{:else if topPlayedLoading}
+			{:else if topArtistsLoading}
 				<div class="home-loading">Loading your library…</div>
 			{/if}
 
