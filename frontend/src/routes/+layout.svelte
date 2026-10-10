@@ -53,10 +53,10 @@
 	import { maybeShowRecsUpgradeNotice } from '$lib/stores/recs_upgrade_notice';
 	import { queueAnnouncement } from '$lib/stores/queue_announcer';
 	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
-	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
+	import { api, getStoredToken } from '$lib/api/client';
 	import { getApiBase } from '$lib/api/client';
-	import { remoteApi, RemoteRequestError } from '$lib/api/remote';
-	import { bootstrapRemoteConnection, BoundedRetry, clearRemoteSession, manualPinResponseError, storePairedSession } from '$lib/remote/connection';
+	import { remoteApi } from '$lib/api/remote';
+	import { bootstrapRemoteConnection, BoundedRetry } from '$lib/remote/connection';
 	import { currentDeviceName } from '$lib/remote/device_name';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
@@ -89,6 +89,7 @@
 	import PatchInfoDialog from '$lib/shell/PatchInfoDialog.svelte';
 	import QueueEmpty from '$lib/shell/QueueEmpty.svelte';
 	import MobileNowPlayingSheet from '$lib/shell/MobileNowPlayingSheet.svelte';
+	import ConnectGate from '$lib/shell/ConnectGate.svelte';
 	import QueueRow from '$lib/shell/QueueRow.svelte';
 	import VideoQueuePanel from '$lib/shell/VideoQueuePanel.svelte';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
@@ -107,6 +108,7 @@
 	} from '$lib/tidal/login';
 	import { scheduleStartupPrewarm } from '$lib/cache/prewarm';
 	import { dataCache } from '$lib/cache/query';
+	import { clearSessionToken, setSessionToken } from '$lib/remote/session_token';
 	import {
 		clearLocalOnboardingComplete,
 		hasLocalOnboardingComplete,
@@ -139,40 +141,17 @@
 	let isOnboardingRoute = $derived(page.url.pathname.startsWith('/onboarding'));
 	let isRemoteRoute = $derived(page.url.pathname.startsWith('/remote'));
 	let showConnect = $state(false);
-	let connectTokenInput = $state('');
-	let connectMethod = $state<'pairing' | 'pin'>('pairing');
-	// The server refuses the shared PIN from other devices unless the listener
-	// turned PIN sign-in on, so only offer it when it can work.
-	let pinLoginAvailable = $state(false);
-	$effect(() => {
-		if (!showConnect) return;
-		remoteApi.identity().then((identity) => {
-			pinLoginAvailable = identity.pin_login === true;
-			if (!pinLoginAvailable && connectMethod === 'pin') { connectMethod = 'pairing'; connectTokenInput = ''; }
-		}).catch(() => {});
-	});
 	let connectError = $state('');
 	let connectBusy = $state(false);
 	let networkUnavailable = $state(false);
 	const bootstrapRetries = new BoundedRetry(3);
 	let bootstrapRunning = false;
-	let pinInputEl = $state<HTMLInputElement | null>(null);
 	let pkceReloginDismissedThisSession = $state(false);
 	let pkceReloginDismissedForever = $state(false);
 	let cancelStartupPrewarm: (() => void) | null = null;
 
 	function onboardingScope(): string | null {
 		return getStoredToken();
-	}
-
-	function setSessionToken(token: string): void {
-		if (getStoredToken() !== token) dataCache.clear();
-		setStoredToken(token);
-	}
-
-	function clearSessionToken(): void {
-		clearStoredToken();
-		dataCache.clear();
 	}
 
 	async function bootstrapAuthentication(): Promise<void> {
@@ -203,7 +182,6 @@
 			if (result.phase === 'needs-auth') await tryAutoSetup();
 			else {
 				showConnect = true;
-				setTimeout(focusPin, 50);
 			}
 		} finally {
 			connectBusy = false;
@@ -231,56 +209,6 @@
 				}
 			)
 	);
-
-	function handlePinInput(event: Event) {
-		const el = event.target as HTMLInputElement;
-		const code = el.value.replace(/\D/g, '').slice(0, 6);
-		connectTokenInput = code;
-		el.value = code;
-		connectError = '';
-	}
-
-	function focusPin() {
-		pinInputEl?.focus();
-	}
-
-	async function submitConnect() {
-		connectError = '';
-		const t = connectTokenInput.trim();
-		const valid = /^\d{6}$/.test(t);
-		if (!valid) { connectError = 'Enter all 6 digits.'; return; }
-		connectBusy = true;
-		try {
-			if (connectMethod === 'pairing') {
-				const paired = await remoteApi.redeem(t, currentDeviceName());
-				const remembered = storePairedSession(paired);
-				showConnect = false;
-				if (!remembered) showToast('Connected for this session, but this phone could not save the connection.', 'success', 8000);
-				onConnected();
-				return;
-			}
-			const resp = await fetch(`${getApiBase()}/api/status`, {
-				headers: { authorization: `Bearer ${t}` }
-			});
-			const responseError = manualPinResponseError(resp.status);
-			if (responseError) {
-				connectError = responseError;
-				if (resp.status === 401 || resp.status === 403) connectTokenInput = '';
-				setTimeout(focusPin, 0);
-				return;
-			}
-			setSessionToken(t);
-			showConnect = false;
-			onConnected();
-		} catch (error) {
-			clearSessionToken();
-			if (error instanceof RemoteRequestError && error.detail.error === 'PAIRING_INVALID') connectError = 'Temporary code expired or was already used. Create a new one on the computer.';
-			else if (error instanceof RemoteRequestError && error.status === 429) connectError = 'Too many attempts. Wait a moment and create a new code.';
-			else connectError = 'Connection failed. Is the server running?';
-		} finally {
-			connectBusy = false;
-		}
-	}
 
 	let isScrubbing = $state(false);
 	let scrubPosition = $state(0);
@@ -731,7 +659,6 @@
 			}
 		} catch {}
 		showConnect = true;
-		setTimeout(focusPin, 50);
 	}
 
 	// After a successful connect, boot the WS + playback state
@@ -1331,64 +1258,13 @@
 {/snippet}
 
 {#if showConnect}
-	<div class="connect-backdrop">
-		<div class="connect-panel glass-panel">
-			<div class="connect-brand">
-				<span class="connect-brand-mark">
-					<img src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
-				</span>
-				<span class="connect-brand-name">NOOR</span>
-			</div>
-			<h2 class="connect-title">Connect to NOORwave</h2>
-			<p class="connect-copy">
-				{connectMethod === 'pairing'
-					? 'Enter the temporary 6-digit code shown beside the QR.'
-					: 'Enter the master recovery PIN from the computer settings.'}
-			</p>
-
-			<button type="button" class="pin-pad" onclick={focusPin} aria-label="Pairing code or PIN input">
-				{#each [0,1,2,3,4,5] as i}
-					<span
-						class="pin-digit"
-						class:filled={i < connectTokenInput.length}
-						class:active={i === connectTokenInput.length && !connectBusy}
-					>
-						{connectTokenInput[i] ?? ''}
-					</span>
-				{/each}
-			</button>
-
-			<input
-				bind:this={pinInputEl}
-				class="pin-hidden-input"
-				inputmode="numeric"
-				pattern="[0-9]*"
-				maxlength="6"
-				autocomplete="one-time-code"
-				value={connectTokenInput}
-				oninput={handlePinInput}
-				onkeydown={(e) => e.key === 'Enter' && void submitConnect()}
-				disabled={connectBusy}
-				aria-label={connectMethod === 'pairing' ? '6-digit temporary pairing code' : '6-digit master recovery PIN'}
-			/>
-			<button class="btn btn-primary" type="button" disabled={connectBusy || !/^\d{6}$/.test(connectTokenInput)} onclick={() => void submitConnect()}>Connect</button>
-			{#if pinLoginAvailable || connectMethod === 'pin'}
-				<button class="btn btn-glass" type="button" disabled={connectBusy} onclick={() => { connectMethod = connectMethod === 'pairing' ? 'pin' : 'pairing'; connectTokenInput = ''; connectError = ''; setTimeout(focusPin, 0); }}>
-					{connectMethod === 'pairing' ? 'Use master PIN instead' : 'Use temporary code instead'}
-				</button>
-			{/if}
-
-			{#if connectError}
-				<p class="connect-error" role="alert" aria-live="assertive">{connectError}</p>
-			{/if}
-			{#if networkUnavailable}
-				<button class="btn btn-primary" type="button" disabled={connectBusy} onclick={retryBootstrapConnection}>Retry connection</button>
-			{/if}
-			{#if connectBusy}
-				<p class="connect-copy">Connecting…</p>
-			{/if}
-		</div>
-	</div>
+	<ConnectGate
+		bind:error={connectError}
+		bootstrapBusy={connectBusy}
+		{networkUnavailable}
+		onretry={retryBootstrapConnection}
+		onconnected={() => { showConnect = false; onConnected(); }}
+	/>
 {/if}
 
 <!-- Skipped on the phone remote: the fixed shader layer shows through and
@@ -3196,127 +3072,5 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 10px;
-	}
-
-	.connect-backdrop {
-		position: fixed;
-		inset: 0;
-		z-index: var(--z-tooltip);
-		background: var(--bg-base, #0d0d12);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 24px;
-	}
-
-	.connect-panel {
-		width: 100%;
-		max-width: 400px;
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-		padding: 32px;
-		border-radius: var(--radius-lg, 16px);
-	}
-
-	.connect-brand {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		margin-bottom: 4px;
-	}
-
-	.connect-brand-mark {
-		width: 36px;
-		height: 36px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.connect-brand-mark img {
-		width: 100%;
-		height: 100%;
-		object-fit: contain;
-	}
-
-	.connect-brand-name {
-		font-size: var(--font-size-lg);
-		font-weight: 800;
-		letter-spacing: 0.12em;
-		color: var(--text-primary);
-	}
-
-	.connect-title {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		color: var(--text-primary);
-	}
-
-	.connect-copy {
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
-		line-height: var(--line-height-normal);
-	}
-
-	.pin-pad {
-		display: flex;
-		gap: 10px;
-		justify-content: center;
-		margin: 8px 0 4px;
-		background: none;
-		border: none;
-		padding: 0;
-		cursor: text;
-	}
-
-	.pin-digit {
-		flex: 0 0 auto;
-		width: 44px;
-		height: 56px;
-		border-radius: var(--radius-sm, 8px);
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-family: var(--font-mono, monospace);
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-primary);
-		transition: border-color var(--motion-fast), background var(--motion-fast);
-	}
-
-	.pin-digit.filled {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-	}
-
-	.pin-digit.active {
-		border-color: var(--accent);
-		box-shadow: 0 0 0 3px var(--accent-soft);
-	}
-
-	.pin-hidden-input {
-		position: absolute;
-		opacity: 0;
-		pointer-events: none;
-		width: 1px;
-		height: 1px;
-	}
-
-	.connect-error {
-		font-size: var(--font-size-sm);
-		color: #ffb0b0;
-		text-align: center;
-	}
-
-	@media (max-width: 420px) {
-		.pin-digit {
-			width: 40px;
-			height: 52px;
-			font-size: var(--font-size-xl);
-		}
-		.pin-pad { gap: 8px; }
 	}
 </style>
