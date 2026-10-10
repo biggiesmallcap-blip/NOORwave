@@ -25,6 +25,10 @@ use std::time::Duration;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
+/// Stage shown while a finished run writes its results. Reported after the
+/// trainer's own stages so progress never moves backwards.
+pub const SAVING_STAGE: &str = "saving";
+
 const MODEL_FAMILY: &str = queries::DISCOVERY_ENGINE_V2_FAMILY;
 /// Bump when a trainer change makes existing models wrong, not just older.
 /// Installs whose active model predates it retrain once in the background
@@ -1846,7 +1850,8 @@ pub async fn start_training(
         return Ok(());
     }
     fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "audio", "running", 0.55, None, 0)
+        // The trainer already reported up to 96%; saving only moves forward.
+        queries::update_training_run_progress(conn, run.id, SAVING_STAGE, "running", 0.965, None, 0)
     }));
 
     let audio_features = output
@@ -1870,7 +1875,7 @@ pub async fn start_training(
         db.with_conn(|conn| queries::replace_track_audio_features(conn, &audio_features))
     );
     fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "fusion", "running", 0.72, None, 0)
+        queries::update_training_run_progress(conn, run.id, SAVING_STAGE, "running", 0.975, None, 0)
     }));
 
     let embeddings = output
@@ -1931,7 +1936,15 @@ pub async fn start_training(
         return Ok(());
     }
     fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "neighbors", "running", 0.88, None, 0)?;
+        queries::update_training_run_progress(
+            conn,
+            run.id,
+            SAVING_STAGE,
+            "running",
+            0.985,
+            None,
+            0,
+        )?;
         queries::replace_track_neighbors(conn, model.id, &neighbors)?;
         persist_external_neighbors(conn, model.id, &output.external_neighbors)
     }));
@@ -1978,7 +1991,15 @@ pub async fn start_training(
         return Ok(());
     }
     fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "evaluate", "running", 0.96, None, 0)?;
+        queries::update_training_run_progress(
+            conn,
+            run.id,
+            SAVING_STAGE,
+            "running",
+            0.99,
+            None,
+            0,
+        )?;
         queries::update_embedding_model_metrics(conn, model.id, "ready", Some(&metrics_json))?;
         if should_activate {
             queries::activate_embedding_model(conn, model.id)?;

@@ -6,15 +6,33 @@ export type NotForMeKind = 'track' | 'artist';
 
 /**
  * "Not for me": keeps a track or artist out of every recommendation (automix,
- * radio, external picks) from now on.
+ * radio, Discovery Space, external picks) from now on. Offered once, on queue
+ * rows, where suggestions show up; with a known artist it opens a submenu
+ * (this song, or anything by the artist).
  */
-export function notForMeMenuItem(kind: NotForMeKind, id: number, label: string): MenuItem {
-	return {
-		label,
+export function notForMeMenuItem(track: {
+	id: number;
+	artist_id?: number | null;
+	artist_name?: string | null;
+}): MenuItem {
+	const base = {
+		label: 'Not for me',
 		// Circled slash, written as an escape to keep the source ASCII.
 		icon: '\u2298',
-		hint: 'Never suggest again',
-		onSelect: () => void markNotForMe(kind, id),
+	};
+	if (track.artist_id == null || track.artist_id <= 0) {
+		return { ...base, hint: 'Never suggest again', onSelect: () => void markNotForMe('track', track.id) };
+	}
+	const artistId = track.artist_id;
+	return {
+		...base,
+		submenu: [
+			{ label: 'This song', onSelect: () => void markNotForMe('track', track.id) },
+			{
+				label: `Anything by ${track.artist_name || 'this artist'}`,
+				onSelect: () => void markNotForMe('artist', artistId),
+			},
+		],
 	};
 }
 

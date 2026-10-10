@@ -87,12 +87,14 @@ export function discoveryModelHeldBack(status: DiscoveryStatus | null): boolean 
 }
 
 const STAGE_LABELS: Record<string, string> = {
+	corpus: 'Reading your library',
 	behavioral: 'Learning listening patterns',
 	audio: 'Processing audio features',
 	fusion: 'Blending features',
 	neighbors: 'Computing neighbors',
 	in_degree: 'Ranking connections',
 	evaluate: 'Evaluating',
+	saving: 'Saving results',
 };
 
 export function discoveryStageLabel(stage: string | undefined): string {
@@ -135,15 +137,14 @@ export function describeDiscoveryUpgrade(upgrade: DiscoveryUpgrade | null): stri
 		: 'Waiting for idle time (Full retrain runs it now)';
 }
 
-/** "Model 21 (trainer v3)" rather than the internal model key. */
-export function discoveryModelLabel(model: DiscoveryStatus['active_model']): string {
-	if (!model) return 'Fallback only';
-	let version: number | null = null;
-	try {
-		const parsed = model.config_json ? JSON.parse(model.config_json) : null;
-		if (typeof parsed?.trainer_config_version === 'number') version = parsed.trainer_config_version;
-	} catch {
-		// Older models may carry no or malformed config; the id still identifies them.
-	}
-	return version === null ? `Model ${model.id}` : `Model ${model.id} (trainer v${version})`;
+/**
+ * "Model 21" rather than the internal model key, flagged when an update has
+ * made it outdated (the upgrade retrain is replacing it).
+ */
+export function discoveryModelLabel(
+	model: DiscoveryStatus['active_model'],
+	upgrade: DiscoveryUpgrade | null = null
+): string {
+	if (!model) return 'None yet';
+	return upgrade?.pending ? `Model ${model.id} (outdated)` : `Model ${model.id}`;
 }
