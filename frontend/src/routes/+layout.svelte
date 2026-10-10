@@ -49,6 +49,7 @@
 	import { createDragReorder } from '$lib/actions/drag_reorder';
 	import type { QueueItem, TidalPlayable, Track } from '$lib/api/client';
 	import { showToast } from '$lib/stores/toast';
+	import { maybeShowRecsUpgradeNotice } from '$lib/stores/recs_upgrade_notice';
 	import { queueAnnouncement } from '$lib/stores/queue_announcer';
 	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
 	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
@@ -506,6 +507,11 @@
 		// Pair fragments and public identity are processed before setup or any
 		// authenticated request. The bootstrap function is deliberately exclusive.
 		void bootstrapAuthentication();
+		// Once per trainer version, explain an upgrade retrain. Delayed so the
+		// shell and auth settle first; the phone remote does not show it.
+		if (!window.location.pathname.startsWith('/remote')) {
+			setTimeout(() => void maybeShowRecsUpgradeNotice(), 8000);
+		}
 
 		// Listen for 401 responses from any API call. On loopback the backend
 		// will hand us a fresh token via /api/setup/token, so retry auto-setup

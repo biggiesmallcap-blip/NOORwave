@@ -945,6 +945,10 @@ pub fn api_routes(state: SharedState) -> Router {
             post(discovery_routes::record_discovery_feedback),
         )
         .route(
+            "/api/discovery/upgrade",
+            get(discovery_routes::get_discovery_upgrade),
+        )
+        .route(
             "/api/discovery/feedback/summary",
             get(discovery_routes::discovery_feedback_summary),
         )

@@ -3394,6 +3394,13 @@ export const api = {
 		});
 	},
 
+	/** Whether the one-time recommendations upgrade retrain is due or running. */
+	getDiscoveryUpgrade() {
+		return fetchApi<{ pending: boolean; running: boolean; trainer_version: number }>(
+			'/api/discovery/upgrade'
+		);
+	},
+
 	/** Mark (or unmark) a track or artist "Not for me" for every recommendation. */
 	setNotForMe(kind: 'track' | 'artist', id: number, notForMe: boolean) {
 		return fetchApi<{ kind: string; id: number; not_for_me: boolean }>(

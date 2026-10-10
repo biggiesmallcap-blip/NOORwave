@@ -470,6 +470,18 @@ pub(super) async fn get_discovery_status(
     Ok(Json(json!({ "status": status })))
 }
 
+/// Whether the one-time upgrade retrain is due or running, so the app can
+/// tell the listener what is happening (once per trainer version).
+pub(super) async fn get_discovery_upgrade(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let db = state.read().await.db.clone();
+    let status = db
+        .with_conn(crate::services::discovery_retrain::upgrade_status)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!(status)))
+}
+
 pub(super) async fn get_discovery_training_status(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {

@@ -91,6 +91,31 @@ fn load_latest_run(conn: &Connection) -> anyhow::Result<Option<LatestRun>> {
     }))
 }
 
+/// What the app tells the listener about the upgrade retrain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct UpgradeStatus {
+    /// The active model predates the current trainer and a retrain is due
+    /// or running.
+    pub pending: bool,
+    /// A training run is in progress.
+    pub running: bool,
+    pub trainer_version: i64,
+}
+
+pub fn upgrade_status(conn: &Connection) -> anyhow::Result<UpgradeStatus> {
+    let active_version = queries::get_selected_discovery_embedding_model(conn)?
+        .map(|model| trainer_config_version_from_json(model.config_json.as_deref()));
+    let latest = load_latest_run(conn)?;
+    let running = latest.as_ref().is_some_and(|run| run.status == "running");
+    let outdated = active_version.is_some_and(|version| version < TRAINER_CONFIG_VERSION);
+    let due = should_retrain(active_version, latest.as_ref(), finished_attempts(conn)?);
+    Ok(UpgradeStatus {
+        pending: due || (running && outdated),
+        running,
+        trainer_version: TRAINER_CONFIG_VERSION,
+    })
+}
+
 /// Start the upgrade retrain if the active model predates the current trainer
 /// and the app is idle. Returns immediately; called from the hourly sweep.
 pub async fn run_if_outdated(state: SharedState) {
@@ -187,6 +212,42 @@ mod tests {
             1
         ));
         assert!(!should_retrain(Some(OLD), None, MAX_ATTEMPTS));
+    }
+
+    #[test]
+    fn upgrade_status_reports_an_outdated_model_until_a_current_one_is_active() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        db.with_conn(|conn| {
+            assert!(
+                !upgrade_status(conn)?.pending,
+                "never trained: nothing to announce"
+            );
+            let old = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:old",
+                queries::DISCOVERY_ENGINE_V2_FAMILY,
+                8,
+                "ready",
+                Some(r#"{"trainer_config_version":2}"#),
+            )?;
+            queries::activate_embedding_model(conn, old.id)?;
+            let status = upgrade_status(conn)?;
+            assert!(status.pending && !status.running);
+            let config = format!(r#"{{"trainer_config_version":{TRAINER_CONFIG_VERSION}}}"#);
+            let new = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:new",
+                queries::DISCOVERY_ENGINE_V2_FAMILY,
+                8,
+                "ready",
+                Some(&config),
+            )?;
+            queries::activate_embedding_model(conn, new.id)?;
+            assert!(!upgrade_status(conn)?.pending);
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
