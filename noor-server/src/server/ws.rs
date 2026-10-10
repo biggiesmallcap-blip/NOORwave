@@ -95,9 +95,12 @@ async fn handle_socket(
     };
 
     // Send initial state
+    // heartbeat_ms lets the client hold this socket to the heartbeat
+    // deadline from the start, before the first heartbeat arrives.
     let init_msg = json!({
         "type": "connected",
-        "message": "Welcome to NOOR"
+        "message": "Welcome to NOOR",
+        "heartbeat_ms": HEARTBEAT_INTERVAL.as_millis() as u64,
     });
     if socket
         .send(Message::Text(init_msg.to_string().into()))

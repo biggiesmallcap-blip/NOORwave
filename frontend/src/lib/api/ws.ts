@@ -49,10 +49,11 @@ let queueRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAllowed = true;
 const reconnectScheduler = new ReconnectScheduler(() => connectWebSocket());
 
-// Liveness. The server sends {"type":"heartbeat"} every 15 s; a socket that
-// has proven it gets heartbeats and then goes quiet is dead (typically a
-// phone whose OS dropped it while suspended, which the browser still reports
-// as OPEN). Sockets from an older server never send one and are left alone.
+// Liveness. The server announces heartbeat_ms in its `connected` message and
+// then sends {"type":"heartbeat"} every 15 s; such a socket that goes quiet is
+// dead (typically a phone whose OS dropped it while suspended, which the
+// browser still reports as OPEN), even if it died before the first heartbeat.
+// Sockets from an older server announce nothing and are left alone.
 export const HEARTBEAT_STALE_MS = 40_000;
 const RESUME_STALE_MS = 20_000;
 let lastMessageAt = 0;
@@ -166,6 +167,7 @@ export function connectWebSocket() {
 				heartbeatSeen = true;
 				return;
 			}
+			if (data?.type === 'connected' && typeof data.heartbeat_ms === 'number') heartbeatSeen = true;
 			// High-rate visualiser frames bypass the message log and cache path
 			// entirely, straight into a dedicated store.
 			if (data?.type === 'audio_spectrum') {

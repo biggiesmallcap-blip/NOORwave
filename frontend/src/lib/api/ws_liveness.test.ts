@@ -29,6 +29,10 @@ describe('WebSocket liveness', () => {
 		expect(socketIsStale(10 * HEARTBEAT_STALE_MS, 0, false)).toBe(false);
 	});
 
+	it('trusts the heartbeat contract from the connected handshake, before the first heartbeat', () => {
+		expect(source).toContain("data?.type === 'connected' && typeof data.heartbeat_ms === 'number'");
+	});
+
 	it('reconnects immediately when a suspended page comes back', () => {
 		expect(source).toContain("document.addEventListener('visibilitychange', resume)");
 		expect(source).toContain("window.addEventListener('pageshow', resume)");
