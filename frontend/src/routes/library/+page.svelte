@@ -1,16 +1,17 @@
 <script lang="ts" module>
 	import type { Track as CachedTrack } from '$lib/api/client';
 
-	// Recent tracks, kept across visits so the landing paints at once and
-	// refreshes quietly. The suggestion murals keep their own cache in
-	// LibraryMurals.svelte.
+	// Recent and most-played tracks, kept across visits so the landing paints at
+	// once and refreshes quietly. The suggestion murals read their own cache
+	// queries in LibraryMurals.svelte.
 	const homePanelCandidateCache = {
 		recentTracks: [] as CachedTrack[],
+		topPlayedTracks: [] as CachedTrack[],
 	};
 </script>
 
 <script lang="ts">
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { get } from 'svelte/store';
 	import type { Snapshot } from './$types';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
@@ -25,7 +26,7 @@
 	import { initials } from '$lib/utils/text';
 	import { prefersReducedMotion } from '$lib/stores/motion';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
-	import { LIBRARY_TABS, restoreLibraryTab, tabCountLabel, viewCountLabel, type LibraryTab } from '$lib/components/library/library_tabs';
+	import { LIBRARY_TABS, cachedTabCounts, rememberTabCounts, restoreLibraryTab, tabCountLabel, viewCountLabel, type LibraryTab } from '$lib/components/library/library_tabs';
 	import { librarySongsScope } from '$lib/stores/library_songs';
 	import CommandHeader from '$lib/components/ui/CommandHeader.svelte';
 	import ScopeTabs from '$lib/components/ui/ScopeTabs.svelte';
@@ -157,18 +158,26 @@
 
 	// Tab counts come from the list endpoints' totals (there is no counts
 	// endpoint): one-row queries, refreshed when the Songs scope changes and
-	// after deletes. Artists have no total, so their tab shows none.
-	let libraryCounts = $state<{ tracks: number | null; albums: number | null }>({ tracks: null, albums: null });
+	// after deletes. Artists have no total, so their tab shows none. The last
+	// known counts paint first so the pill row never reflows on open; a failed
+	// query keeps the previous count instead of blanking it.
+	let libraryCounts = $state(cachedTabCounts(get(librarySongsScope) === 'liked'));
 
 	async function loadLibraryCounts() {
+		const scopeLiked = likedOnly;
+		const previous = cachedTabCounts(scopeLiked);
+		if (libraryCounts.tracks !== previous.tracks || libraryCounts.albums !== previous.albums) libraryCounts = previous;
 		const [songs, albumsRes] = await Promise.allSettled([
-			api.getTracks('date_added', 'desc', 1, 0, true, likedOnly),
+			api.getTracks('date_added', 'desc', 1, 0, true, scopeLiked),
 			api.getAlbums('title', 'asc', 1, 0, true, null),
 		]);
-		libraryCounts = {
-			tracks: songs.status === 'fulfilled' ? songs.value.total : null,
-			albums: albumsRes.status === 'fulfilled' ? albumsRes.value.total : null,
+		if (scopeLiked !== likedOnly) return;
+		const next = {
+			tracks: songs.status === 'fulfilled' ? songs.value.total : previous.tracks,
+			albums: albumsRes.status === 'fulfilled' ? albumsRes.value.total : previous.albums,
 		};
+		rememberTabCounts(scopeLiked, next);
+		if (next.tracks !== libraryCounts.tracks || next.albums !== libraryCounts.albums) libraryCounts = next;
 	}
 
 	let libraryTabs = $derived(
@@ -184,7 +193,7 @@
 	$effect(() => {
 		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
 		likedOnly;
-		void loadLibraryCounts();
+		untrack(() => void loadLibraryCounts());
 	});
 	let playlists = $state<Playlist[]>([]);
 	let genres = $state<Genre[]>([]);
@@ -220,6 +229,11 @@
 	// us we've hit the end. `artistsExhausted` then stops further fetches.
 	let artistsExhausted = $state(false);
 	let recentTracks = $state<Track[]>(homePanelCandidateCache.recentTracks);
+	// The hero's own sample, independent of the shared `tracks` store: that store
+	// holds whatever the Songs tab last loaded (liked only, sorted by title, ...),
+	// so deriving the hero from it blanked the panel until a hard reload.
+	let topPlayedTracks = $state<Track[]>(homePanelCandidateCache.topPlayedTracks);
+	let topPlayedLoading = $state(homePanelCandidateCache.topPlayedTracks.length === 0);
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -367,11 +381,15 @@
 		void loadCatalogueStatus();
 		void loadBatchMeta();
 		void loadRecentTracks();
+		void loadTopPlayedTracks();
 		void loadDecadeChips();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
 			const latest = messages.at(-1);
 			if (!latest) return;
-			if (latest.type === 'library_synced') void loadCatalogueStatus();
+			if (latest.type === 'library_synced') {
+				void loadCatalogueStatus();
+				void loadTopPlayedTracks();
+			}
 			if (latest.type === 'listen_history_updated') {
 				void loadRecentTracks();
 			}
@@ -383,6 +401,27 @@
 			if (undoTimer) clearTimeout(undoTimer);
 		};
 	});
+
+	// A failed first load (server still starting) retries a few times rather
+	// than leaving the hero blank until a hard reload.
+	const TOP_PLAYED_RETRY_DELAYS_MS = [2000, 5000, 15000];
+
+	async function loadTopPlayedTracks(attempt = 0) {
+		try {
+			const data = await cachedApi.getTracks('play_count', 'desc', PAGE_SIZE, 0, true, false);
+			topPlayedTracks = data.tracks;
+			homePanelCandidateCache.topPlayedTracks = topPlayedTracks;
+			topPlayedLoading = false;
+		} catch (error) {
+			console.error('Failed to load most played tracks:', error);
+			const delay = TOP_PLAYED_RETRY_DELAYS_MS[attempt];
+			if (delay === undefined) {
+				topPlayedLoading = false;
+				return;
+			}
+			setTimeout(() => void loadTopPlayedTracks(attempt + 1), delay);
+		}
+	}
 
 	async function loadRecentTracks() {
 		try {
@@ -1331,7 +1370,7 @@
 		const countMap = new Map<number, HomeArtist>();
 		const albumsByArtist = new Map<number, Set<number>>();
 
-		for (const track of $tracks) {
+		for (const track of topPlayedTracks) {
 			if (!track.artist_id) continue;
 			const storeArtist = artistMap.get(track.artist_id);
 			const info = countMap.get(track.artist_id);
@@ -2020,7 +2059,7 @@
 					onContextMenu={handleHomeArtistContextMenu}
 					riseIndex={0}
 				/>
-			{:else if $isLoading}
+			{:else if topPlayedLoading}
 				<div class="home-loading">Loading your library…</div>
 			{/if}
 

@@ -5,7 +5,6 @@ import type { Album, SuggestedAlbum, Track } from '$lib/api/client';
 // it can be unit-tested without a DOM or the API.
 
 export const HOME_MURAL_ITEM_LIMIT = 12;
-export const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000;
 
 // Max tracks one artist may contribute to a suggestion panel, so a single
 // prolific neighbour can't clone-fill it. Mirrors the server cap in
@@ -47,11 +46,6 @@ export interface HomeMuralSources {
 	suggestionAlbums: HomeAlbumCard[];
 	randomTracks: Track[];
 	randomAlbums: HomeAlbumCard[];
-}
-
-/** Five-minute bucket the server keys its samples to; also our request key. */
-export function homePanelRefreshBucket(now: number = Date.now()): number {
-	return Math.floor(now / HOME_PANEL_CACHE_REFRESH_MS);
 }
 
 function suggestionArtistKey(track: Track): number | string {

@@ -138,6 +138,19 @@
 		color: var(--text-tertiary);
 		font-weight: var(--font-weight-medium);
 		font-variant-numeric: tabular-nums;
+		/* A count that lands after first paint (no cached value yet) fades in
+		   rather than popping. */
+		animation: scope-count-in var(--motion-base) both;
+	}
+
+	@keyframes scope-count-in {
+		from { opacity: 0; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.count {
+			animation: none;
+		}
 	}
 
 	.scope-tab.active .count {
