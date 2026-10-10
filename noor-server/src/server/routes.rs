@@ -3098,10 +3098,23 @@ async fn start_current_queue_item_playback(
         .as_ref()
         .or(snapshot.state.current_track.as_ref())
     {
-        let user_quality = current_user_audio_quality(state).await;
-        let stream_request = match player::build_tidal_stream_request(track, user_quality.clone()) {
-            Some(request) => request,
-            None => {
+        let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
+        match start_track(
+            state,
+            StartRequest {
+                track,
+                generation: playback_generation,
+                dispatch: Dispatch::Play,
+                crossfade_ms,
+            },
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(StartError::Superseded) => {
+                return Ok(overlay_snapshot_with_external_track(state, snapshot).await);
+            }
+            Err(error) => {
                 let paused_snapshot = {
                     let state_guard = state.read().await;
                     state_guard.db.with_conn(player::pause).ok()
@@ -3109,7 +3122,9 @@ async fn start_current_queue_item_playback(
                 // sync_session_after_snapshot above already opened a session
                 // for this (local) track; flush+drop it so we don't bill a
                 // bogus multi-minute listen the next time the user plays.
-                if let Some(snap) = paused_snapshot {
+                if matches!(error, StartError::LocalUnsupported)
+                    && let Some(snap) = paused_snapshot
+                {
                     sync_session_after_snapshot(
                         state,
                         &snap,
@@ -3117,74 +3132,14 @@ async fn start_current_queue_item_playback(
                     )
                     .await;
                 }
-                return Err((
-                    StatusCode::NOT_IMPLEMENTED,
-                    Json(json!({
-                        "status": "local_playback_not_supported",
-                        "message": "Local-library playback is not wired into the host audio runtime yet.",
-                        "track_id": track.id,
-                    })),
-                ));
-            }
-        };
-        let stream_info = match resolve_tidal_playback_stream(state, track, &stream_request).await {
-            Ok(info) => info,
-            Err(error) => {
-                let state_guard = state.read().await;
-                let _ = state_guard.db.with_conn(player::pause);
-                return Err(tidal_playback_error_response(
-                    track.id,
+                return Err(start_error_response(
+                    state,
                     error,
+                    track.id,
                     "TIDAL stream could not be resolved while starting radio.",
+                    Some("Playback runtime was not available for starting radio."),
                 ));
             }
-        };
-        let runtime_handle = match ensure_playback_runtime_for_track(state, track).await {
-            Ok(handle) => handle,
-            Err(_) => {
-                let state_guard = state.read().await;
-                let _ = state_guard.db.with_conn(player::pause);
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({
-                        "status": "playback_runtime_unavailable",
-                        "message": "Playback runtime was not available for starting radio.",
-                        "track_id": track.id,
-                    })),
-                ));
-            }
-        };
-        let job = player::build_playback_preparation(
-            track,
-            Some(&stream_info),
-            effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
-            user_quality,
-        )
-        .with_generation(playback_generation)
-        .with_start_paused(!transport_intent_is_playing(state).await);
-        runtime_handle.play(job).map_err(|error| {
-            let message = format!("Failed to start host audio playback: {error}");
-            report_playback_failure(state, &message);
-            if let Ok(state_guard) = state.try_read() {
-                let _ = state_guard.db.with_conn(player::pause);
-            }
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "playback_runtime_failed",
-                    "message": message,
-                    "track_id": track.id,
-                })),
-            )
-        })?;
-        {
-            let mut state_guard = state.write().await;
-            state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
-                audio_quality: stream_info.audio_quality.clone(),
-                sample_rate: stream_info.sample_rate,
-                bit_depth: stream_info.bit_depth,
-            });
-            state_guard.pending_stream_display = None;
         }
     } else if let Some(runtime_handle) = current_playback_runtime(state).await {
         let _ = runtime_handle.stop();
