@@ -188,9 +188,17 @@ pub fn is_auth_failure(err: &anyhow::Error) -> bool {
 }
 
 #[derive(Clone)]
+enum ClientAuth {
+    /// A fixed token: tests and the refresher's validation call only.
+    Fixed(String),
+    /// Reads the live token from the TIDAL session and recovers on auth failure.
+    Session(crate::services::tidal::session::TidalSession),
+}
+
+#[derive(Clone)]
 pub struct TidalClient {
     http: reqwest::Client,
-    access_token: String,
+    auth: ClientAuth,
     country_code: String,
     api_base: String,
     request_priority: TidalRequestPriority,
@@ -415,7 +423,7 @@ impl TidalClient {
     pub fn with_http(http: reqwest::Client, access_token: String, country_code: String) -> Self {
         Self {
             http,
-            access_token,
+            auth: ClientAuth::Fixed(access_token),
             country_code,
             api_base: TIDAL_API_URL.to_string(),
             request_priority: TidalRequestPriority::Interactive,
@@ -443,9 +451,35 @@ impl TidalClient {
         session: crate::services::tidal::session::TidalSession,
         country_code: &str,
     ) -> Self {
-        let token = session.access_token_for_request().unwrap_or_default();
-        Self::with_http(session.api_http(), token, country_code.to_string())
-            .with_api_base(session.api_base().to_string())
+        Self {
+            http: session.api_http(),
+            api_base: session.api_base().to_string(),
+            country_code: country_code.to_string(),
+            auth: ClientAuth::Session(session),
+            request_priority: TidalRequestPriority::Interactive,
+            metadata_store: None,
+        }
+    }
+
+    fn access_token(&self) -> Result<String> {
+        match &self.auth {
+            ClientAuth::Fixed(token) => Ok(token.clone()),
+            ClientAuth::Session(session) => session.access_token_for_request(),
+        }
+    }
+
+    /// After an auth failure on `used_token`: refresh through the session and
+    /// return the token to retry with. Fixed-token clients cannot recover.
+    async fn recover_after_auth_failure(&self, used_token: &str) -> Option<Result<String>> {
+        match &self.auth {
+            ClientAuth::Fixed(_) => None,
+            ClientAuth::Session(session) => Some(
+                session
+                    .refresh_stale(used_token)
+                    .await
+                    .map(|tokens| tokens.access_token),
+            ),
+        }
     }
 
     /// Convenience constructor that builds a fresh HTTP client. Prefer
@@ -456,17 +490,13 @@ impl TidalClient {
         Self::with_http(Self::build_http_client(), access_token, country_code)
     }
 
-    fn auth_header(&self) -> String {
-        format!("Bearer {}", self.access_token)
-    }
-
     /// Remove a favorite using this client's authenticated transport. Keeping
     /// the credentials inside `TidalClient` lets recovery callers retry a
     /// mutation without unpacking or rebuilding the refreshed session.
     pub async fn remove_favorite_track(&self, user_id: &str, track_id: i64) -> Result<()> {
         super::mutations::remove_favorite_track(
             &self.http,
-            &self.access_token,
+            &self.access_token()?,
             user_id,
             track_id,
             &self.country_code,
@@ -475,7 +505,27 @@ impl TidalClient {
     }
 
     /// Make an authenticated GET request and deserialize the response.
+    /// Authenticated GET; on an auth failure a session-bound client refreshes
+    /// once and retries once. A second failure is returned as-is.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        let token = self.access_token()?;
+        match self.get_json_with_token::<T>(url, &token).await {
+            Err(error) if is_auth_failure(&error) => {
+                match self.recover_after_auth_failure(&token).await {
+                    None => Err(error),
+                    Some(Err(refresh_error)) => Err(refresh_error),
+                    Some(Ok(fresh)) => self.get_json_with_token(url, &fresh).await,
+                }
+            }
+            other => other,
+        }
+    }
+
+    async fn get_json_with_token<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<T> {
         crate::services::tidal::backoff::global().check()?;
 
         let _permits = request_limiter().acquire(self.request_priority).await?;
@@ -488,7 +538,7 @@ impl TidalClient {
         let resp = self
             .http
             .get(url)
-            .header("Authorization", self.auth_header())
+            .header("Authorization", format!("Bearer {token}"))
             .header("Accept-Language", "en-US")
             .send()
             .await

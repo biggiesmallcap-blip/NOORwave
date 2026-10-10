@@ -604,4 +604,119 @@ mod tests {
         );
         assert_eq!(session.tokens().unwrap().access_token, "persisted");
     }
+
+    type SeenAuth = Arc<Mutex<Vec<String>>>;
+
+    /// Local fake TIDAL API: answers each request with the next scripted
+    /// (status, body) and records the Authorization header it saw.
+    async fn fake_tidal(script: Vec<(u16, &'static str)>) -> (String, SeenAuth) {
+        let seen: SeenAuth = Arc::new(Mutex::new(Vec::new()));
+        let script = Arc::new(Mutex::new(VecDeque::from(script)));
+        let app = axum::Router::new().fallback({
+            let seen = seen.clone();
+            move |headers: axum::http::HeaderMap| {
+                let seen = seen.clone();
+                let script = script.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    seen.lock().unwrap().push(auth);
+                    let (status, body) = script.lock().unwrap().pop_front().unwrap_or((500, "{}"));
+                    (axum::http::StatusCode::from_u16(status).unwrap(), body)
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), seen)
+    }
+
+    const TRACK_JSON: &str =
+        r#"{"id":1,"title":"Song","duration":200,"artist":{"id":2,"name":"Artist"}}"#;
+
+    fn session_at(
+        base: String,
+        initial: TidalTokens,
+        refresher: Arc<ScriptedRefresher>,
+    ) -> TidalSession {
+        TidalSession::new(
+            TidalSessionConfig {
+                api_http: reqwest::Client::new(),
+                api_base: base,
+                refresher,
+                store: None,
+                events: None,
+            },
+            Some(initial),
+        )
+    }
+
+    #[tokio::test]
+    async fn client_refreshes_and_retries_once_on_auth_failure() {
+        let (base, seen) = fake_tidal(vec![
+            (401, r#"{"status":401,"subStatus":11003}"#),
+            (200, TRACK_JSON),
+        ])
+        .await;
+        let refresher = ScriptedRefresher::new(vec![Outcome::Ok(tokens("new"))]);
+        let session = session_at(base, tokens("old"), refresher.clone());
+        let track = session.client().unwrap().get_track(1).await.unwrap();
+        assert_eq!(track.title, "Song");
+        assert_eq!(refresher.call_count(), 1);
+        assert_eq!(*seen.lock().unwrap(), vec!["Bearer old", "Bearer new"]);
+    }
+
+    #[tokio::test]
+    async fn asset_not_ready_401_does_not_refresh() {
+        let (base, seen) = fake_tidal(vec![(401, r#"{"status":401,"subStatus":4005}"#)]).await;
+        let refresher = ScriptedRefresher::new(vec![Outcome::Ok(tokens("new"))]);
+        let session = session_at(base, tokens("old"), refresher.clone());
+        assert!(session.client().unwrap().get_track(1).await.is_err());
+        assert_eq!(refresher.call_count(), 0);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn second_auth_failure_after_refresh_is_returned_not_looped() {
+        let (base, seen) =
+            fake_tidal(vec![(401, r#"{"status":401}"#), (401, r#"{"status":401}"#)]).await;
+        let refresher = ScriptedRefresher::new(vec![Outcome::Ok(tokens("new"))]);
+        let session = session_at(base, tokens("old"), refresher.clone());
+        let err = session.client().unwrap().get_track(1).await.unwrap_err();
+        assert!(crate::services::tidal::client::is_auth_failure(&err));
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(refresher.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn latched_session_fails_fast_without_http() {
+        let (base, seen) = fake_tidal(vec![(401, r#"{"status":401}"#)]).await;
+        let session = session_at(
+            base,
+            tokens("old"),
+            ScriptedRefresher::new(vec![Outcome::Rejected]),
+        );
+        let client = session.client().unwrap();
+        assert!(is_session_expired(&client.get_track(1).await.unwrap_err()));
+        assert!(is_session_expired(&client.get_track(1).await.unwrap_err()));
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "second call never reached TIDAL"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_picks_up_token_refreshed_by_another_caller() {
+        let (base, seen) = fake_tidal(vec![(200, TRACK_JSON)]).await;
+        let session = session_at(base, tokens("old"), ScriptedRefresher::new(vec![]));
+        let client = session.client().unwrap();
+        session.set_tokens_for_test(Some(tokens("fresh")));
+        client.get_track(1).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec!["Bearer fresh"]);
+    }
 }
