@@ -3,4 +3,5 @@
 //! generation; HTTP handlers, the phone remote and runtime events go through it.
 
 pub(crate) mod generation;
+pub(crate) mod runtime;
 pub(crate) mod stream;

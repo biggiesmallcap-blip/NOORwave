@@ -19,7 +19,7 @@ fn preview_fixture() -> (
         .store(71, std::sync::atomic::Ordering::Relaxed);
     let (tx, _rx) = std::sync::mpsc::channel();
     let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(tx);
-    state.playback_runtime = Some(PlaybackRuntimeState {
+    state.playback_runtime = Some(crate::PlaybackRuntimeState {
         access_token: "test".into(),
         handle: handle.clone(),
     });

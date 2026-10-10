@@ -2,6 +2,7 @@ use super::transport::generation::{
     bump as bump_playback_generation, current as current_playback_generation,
     is_current as playback_generation_is_current,
 };
+use super::transport::runtime::{RuntimeUnavailable, current as current_playback_runtime};
 use super::transport::stream::{
     TidalPlaybackError, resolve_tidal_playback_stream, runtime_stream_resolver,
 };
@@ -18,7 +19,7 @@ use crate::services::tidal::{
     import as tidal_import, stream as tidal_stream,
 };
 use crate::smart::external_discovery as external_discovery_engine;
-use crate::{AppEvent, PlaybackRuntimeInfo, PlaybackRuntimeState, SharedState};
+use crate::{AppEvent, PlaybackRuntimeInfo, SharedState};
 use anyhow::Context;
 use axum::{
     Router,
@@ -8997,17 +8998,6 @@ async fn tidal_artist_core(
     Ok(Json(payload))
 }
 
-async fn current_playback_runtime(
-    state: &SharedState,
-) -> Option<playback_runtime::PlaybackRuntimeHandle> {
-    let state = state.read().await;
-    state
-        .playback_runtime
-        .as_ref()
-        .map(|runtime| runtime.handle.clone())
-        .filter(playback_runtime::PlaybackRuntimeHandle::is_healthy)
-}
-
 async fn current_playback_snapshot_json(
     state: &SharedState,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -9038,109 +9028,41 @@ async fn ensure_playback_runtime_for_track(
     state: &SharedState,
     track: &crate::db::models::Track,
 ) -> Result<playback_runtime::PlaybackRuntimeHandle, (StatusCode, Json<Value>)> {
-    let access_token = {
-        let state = state.read().await;
-        state.tidal.tokens().map(|tokens| tokens.access_token)
-    }
-    .ok_or_else(|| {
-        (
+    super::transport::runtime::ensure_for_track(state)
+        .await
+        .map_err(|error| runtime_unavailable_response(error, track.id))
+}
+
+fn runtime_unavailable_response(
+    error: RuntimeUnavailable,
+    track_id: i64,
+) -> (StatusCode, Json<Value>) {
+    match error {
+        RuntimeUnavailable::NotConnected => (
             StatusCode::UNAUTHORIZED,
             Json(json!({
                 "status": "not_connected",
                 "message": "Connect TIDAL in Settings before playing.",
-                "track_id": track.id,
+                "track_id": track_id,
             })),
-        )
-    })?;
-
-    let mut state_guard = state.write().await;
-    let needs_respawn = state_guard
-        .playback_runtime
-        .as_ref()
-        .map(|runtime| runtime.access_token != access_token || !runtime.handle.is_healthy())
-        .unwrap_or(true);
-    let mut spawned_handle = None;
-
-    if needs_respawn {
-        if let Some(runtime) = state_guard.playback_runtime.take() {
-            let _ = runtime.handle.shutdown();
-        }
-        // A replacement runtime has not started audio yet. In particular, do
-        // not let an old Started/Ready state survive until its first event.
-        state_guard
-            .audio_active
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        state_guard.playback_runtime_info = None;
-
-        let dj_engine_enabled = state_guard
-            .db
-            .with_conn(queries::is_dj_engine_enabled)
-            .unwrap_or(false);
-        let config = playback_runtime::PlaybackRuntimeConfig::new(
-            state_guard.http_client.clone(),
-            access_token.clone(),
-            state_guard.analysis_tx.clone(),
-        )
-        .with_stream_resolver(runtime_stream_resolver(state.clone()))
-        .with_dj_analysis(dj_engine_enabled, state_guard.dj_analysis_tx.clone());
-        let handle = playback_runtime::spawn_runtime(config).map_err(|error| {
-            let message = format!("Failed to start host audio runtime: {error}");
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "status": "playback_runtime_unavailable",
-                    "message": message,
-                    "track_id": track.id,
-                })),
-            )
-        })?;
-
-        // Restore persisted volume to the new runtime.
-        let persisted_volume = state_guard
-            .db
-            .with_conn(|conn| {
-                let vol: f64 = conn.query_row(
-                    "SELECT volume FROM playback_state WHERE id = 1",
-                    [],
-                    |row| row.get(0),
-                )?;
-                Ok(vol)
-            })
-            .unwrap_or(1.0);
-        handle.set_volume(persisted_volume as f32);
-
-        state_guard.playback_runtime = Some(PlaybackRuntimeState {
-            access_token,
-            handle: handle.clone(),
-        });
-        spawned_handle = Some(handle.clone());
+        ),
+        RuntimeUnavailable::SpawnFailed(message) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "playback_runtime_unavailable",
+                "message": message,
+                "track_id": track_id,
+            })),
+        ),
+        RuntimeUnavailable::Missing => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "playback_runtime_unavailable",
+                "message": "Playback runtime was not available after initialization.",
+                "track_id": track_id,
+            })),
+        ),
     }
-
-    let handle = state_guard
-        .playback_runtime
-        .as_ref()
-        .map(|runtime| runtime.handle.clone())
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "playback_runtime_unavailable",
-                    "message": "Playback runtime was not available after initialization.",
-                    "track_id": track.id,
-                })),
-            )
-        })?;
-    drop(state_guard);
-
-    if let Some(listener_handle) = spawned_handle.clone() {
-        spawn_playback_runtime_listener(state.clone(), listener_handle);
-    }
-
-    if let Some(runtime_handle) = spawned_handle.as_ref() {
-        apply_persisted_runtime_output_settings(state, runtime_handle).await;
-    }
-
-    Ok(handle)
 }
 
 async fn apply_runtime_ready(
@@ -9185,7 +9107,7 @@ async fn apply_runtime_ready(
     true
 }
 
-fn spawn_playback_runtime_listener(
+pub(crate) fn spawn_playback_runtime_listener(
     state: SharedState,
     handle: playback_runtime::PlaybackRuntimeHandle,
 ) {
@@ -11210,7 +11132,7 @@ fn runtime_output_settings_from_audio_settings(
     }
 }
 
-async fn apply_persisted_runtime_output_settings(
+pub(crate) async fn apply_persisted_runtime_output_settings(
     state: &SharedState,
     handle: &playback_runtime::PlaybackRuntimeHandle,
 ) {
