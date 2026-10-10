@@ -192,6 +192,7 @@ pub struct TidalClient {
     http: reqwest::Client,
     access_token: String,
     country_code: String,
+    api_base: String,
     request_priority: TidalRequestPriority,
     metadata_store: Option<crate::db::Database>,
 }
@@ -416,6 +417,7 @@ impl TidalClient {
             http,
             access_token,
             country_code,
+            api_base: TIDAL_API_URL.to_string(),
             request_priority: TidalRequestPriority::Interactive,
             metadata_store: None,
         }
@@ -429,6 +431,11 @@ impl TidalClient {
 
     pub(crate) fn with_metadata_store(mut self, db: crate::db::Database) -> Self {
         self.metadata_store = Some(db);
+        self
+    }
+
+    pub(crate) fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
+        self.api_base = api_base.into();
         self
     }
 
@@ -530,7 +537,7 @@ impl TidalClient {
     fn favorite_url(&self, user_id: &str, kind: &str, limit: i32, offset: i32) -> String {
         format!(
             "{}/users/{}/favorites/{}?countryCode={}&limit={}&offset={}&order=DATE&orderDirection=DESC",
-            TIDAL_API_URL, user_id, kind, self.country_code, limit, offset
+            self.api_base, user_id, kind, self.country_code, limit, offset
         )
     }
 
@@ -586,7 +593,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalPlaylist>> {
         let url = format!(
             "{}/users/{}/playlists?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, user_id, self.country_code, limit, offset
+            self.api_base, user_id, self.country_code, limit, offset
         );
         self.get_json(&url).await
     }
@@ -599,7 +606,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalTrack>> {
         let url = format!(
             "{}/playlists/{}/tracks?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, playlist_uuid, self.country_code, limit, offset
+            self.api_base, playlist_uuid, self.country_code, limit, offset
         );
         self.get_json(&url).await
     }
@@ -612,7 +619,7 @@ impl TidalClient {
     ) -> Result<Vec<TidalPlaylist>> {
         let url = format!(
             "{}/search?query={}&countryCode={}&limit={}&offset={}&types=PLAYLISTS",
-            TIDAL_API_URL,
+            self.api_base,
             urlencoding::encode(query),
             self.country_code,
             limit,
@@ -638,7 +645,7 @@ impl TidalClient {
         let offset = offset.max(0);
         format!(
             "{}/albums/{}/tracks?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, album_id, self.country_code, limit, offset
+            self.api_base, album_id, self.country_code, limit, offset
         )
     }
 
@@ -646,7 +653,7 @@ impl TidalClient {
     pub async fn get_album(&self, album_id: i64) -> Result<TidalAlbum> {
         let url = format!(
             "{}/albums/{}?countryCode={}",
-            TIDAL_API_URL, album_id, self.country_code
+            self.api_base, album_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -700,7 +707,7 @@ impl TidalClient {
     pub async fn get_track(&self, track_id: i64) -> Result<TidalTrack> {
         let url = format!(
             "{}/tracks/{}?countryCode={}",
-            TIDAL_API_URL, track_id, self.country_code
+            self.api_base, track_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -715,7 +722,7 @@ impl TidalClient {
         let filter_param = filter.map(|f| format!("&filter={f}")).unwrap_or_default();
         let url = format!(
             "{}/artists/{}/albums?countryCode={}&limit={}&offset={}{}",
-            TIDAL_API_URL, artist_id, self.country_code, limit, offset, filter_param
+            self.api_base, artist_id, self.country_code, limit, offset, filter_param
         );
         self.get_json(&url).await
     }
@@ -726,7 +733,7 @@ impl TidalClient {
     pub async fn get_artist(&self, artist_id: i64) -> Result<TidalArtist> {
         let url = format!(
             "{}/artists/{}?countryCode={}",
-            TIDAL_API_URL, artist_id, self.country_code
+            self.api_base, artist_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -739,7 +746,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalTrack>> {
         let url = format!(
             "{}/artists/{}/toptracks?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+            self.api_base, artist_id, self.country_code, limit, offset
         );
         self.get_json(&url).await
     }
@@ -762,7 +769,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalArtistVideo>> {
         let url = format!(
             "{}/artists/{}/videos?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+            self.api_base, artist_id, self.country_code, limit, offset
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_artist_videos_page(artist_id, &payload))
@@ -813,7 +820,7 @@ impl TidalClient {
     pub async fn get_artist_bio(&self, artist_id: i64) -> Result<TidalArtistBio> {
         let url = format!(
             "{}/artists/{}/bio?countryCode={}",
-            TIDAL_API_URL, artist_id, self.country_code
+            self.api_base, artist_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -827,7 +834,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalArtist>> {
         let url = format!(
             "{}/artists/{}/similar?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+            self.api_base, artist_id, self.country_code, limit, offset
         );
         self.get_json(&url).await
     }
@@ -837,7 +844,7 @@ impl TidalClient {
     fn search_catalog_url(&self, query: &str, limit: i32, offset: i32, types: &str) -> String {
         format!(
             "{}/search?query={}&countryCode={}&limit={}&offset={}&types={}",
-            TIDAL_API_URL,
+            self.api_base,
             urlencoding::encode(query),
             self.country_code,
             limit,
@@ -933,7 +940,7 @@ impl TidalClient {
     ) -> Result<Vec<TidalSearchVideo>> {
         let url = format!(
             "{}/search?query={}&countryCode={}&limit={}&offset={}&types=VIDEOS",
-            TIDAL_API_URL,
+            self.api_base,
             urlencoding::encode(query),
             self.country_code,
             limit,
@@ -957,7 +964,7 @@ impl TidalClient {
     pub async fn get_video(&self, video_id: i64) -> Result<TidalArtistVideo> {
         let url = format!(
             "{}/videos/{}?countryCode={}",
-            TIDAL_API_URL, video_id, self.country_code
+            self.api_base, video_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -982,7 +989,7 @@ impl TidalClient {
     pub async fn get_editorial_top_tracks(&self, limit: i32) -> Result<Vec<TidalSearchTrack>> {
         let url = format!(
             "{}/pages/genre/all/tracks?countryCode={}&limit={}&deviceType=DESKTOP",
-            TIDAL_API_URL, self.country_code, limit
+            self.api_base, self.country_code, limit
         );
         let payload: serde_json::Value = match self.get_json(&url).await {
             Ok(v) => v,
@@ -1017,7 +1024,7 @@ impl TidalClient {
     pub async fn get_my_mixes(&self) -> Result<Vec<TidalMix>> {
         let url = format!(
             "{}/pages/my_collection_my_mixes?countryCode={}&deviceType=BROWSER&locale=en_US",
-            TIDAL_API_URL, self.country_code
+            self.api_base, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         let mixes = Self::parse_my_mixes(&payload);
@@ -1080,7 +1087,7 @@ impl TidalClient {
     pub async fn get_my_radio_stations(&self) -> Result<Vec<TidalMix>> {
         let url = format!(
             "{}/pages/for_you?countryCode={}&deviceType=BROWSER&locale=en_US",
-            TIDAL_API_URL, self.country_code
+            self.api_base, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         // Substring match — looser than the literal title so a Tidal rename
@@ -1100,7 +1107,7 @@ impl TidalClient {
         // forcing the user to engage the rail scroll for every reveal.
         let url = format!(
             "{}/pages/home?countryCode={}&deviceType=BROWSER&locale=en_US&limit=12",
-            TIDAL_API_URL, self.country_code
+            self.api_base, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_home_modules(&payload))
@@ -1170,7 +1177,7 @@ impl TidalClient {
     /// (`rows[].modules[]`) is universal across home / charts / moods / genres /
     /// new-releases / mood/{id} / genre/{id}.
     pub async fn get_page_modules(&self, page_path: &str) -> Result<Vec<TidalHomeModule>> {
-        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12)?;
+        let url = Self::build_page_modules_url(&self.api_base, page_path, &self.country_code, 12)?;
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_home_modules(&payload))
     }
@@ -1180,7 +1187,7 @@ impl TidalClient {
     /// expose TIDAL's module-type vocabulary while we firm up which slugs and
     /// shapes we need to handle.
     pub async fn get_page_raw(&self, page_path: &str) -> Result<serde_json::Value> {
-        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12)?;
+        let url = Self::build_page_modules_url(&self.api_base, page_path, &self.country_code, 12)?;
         self.get_json(&url).await
     }
 
@@ -1268,7 +1275,7 @@ impl TidalClient {
         limit: u32,
     ) -> Result<Vec<TidalHomeItem>> {
         let url =
-            Self::build_page_modules_url(TIDAL_API_URL, more_path, &self.country_code, limit)?;
+            Self::build_page_modules_url(&self.api_base, more_path, &self.country_code, limit)?;
         let payload: serde_json::Value = self.get_json(&url).await?;
         // "show more" endpoints return either a top-level pagedList or a
         // wrapped row/module shape — unwrap whichever we get.
@@ -1482,7 +1489,7 @@ impl TidalClient {
     pub async fn get_mix_tracks(&self, mix_id: &str) -> Result<Vec<TidalTrack>> {
         let url = format!(
             "{}/mixes/{}/items?countryCode={}&limit=100",
-            TIDAL_API_URL, mix_id, self.country_code
+            self.api_base, mix_id, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_mix_track_items(&payload))
@@ -1491,7 +1498,7 @@ impl TidalClient {
     pub async fn get_video_mix_items(&self, mix_id: &str) -> Result<Vec<TidalSearchVideo>> {
         let url = format!(
             "{}/mixes/{}/items?countryCode={}&limit=100&includeTypes=MusicVideo",
-            TIDAL_API_URL, mix_id, self.country_code
+            self.api_base, mix_id, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_mix_video_items(&payload))
@@ -1507,7 +1514,7 @@ impl TidalClient {
     ) -> Result<Vec<TidalSearchVideo>> {
         let url = format!(
             "{}/playlists/{}/items?countryCode={}&limit=100&includeTypes=MusicVideo",
-            TIDAL_API_URL, playlist_uuid, self.country_code
+            self.api_base, playlist_uuid, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_mix_video_items(&payload))
