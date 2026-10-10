@@ -835,15 +835,8 @@ struct PlaybackRuntimeLoopState {
     current_exclusive_release_grace_secs: u32,
     /// Last-known WASAPI exclusive callback period policy.
     current_exclusive_latency_mode: ExclusiveLatencyMode,
-    dj_engine_enabled: bool,
-    dj_lookahead: Option<RuntimeDjLookahead>,
-    dj_lookahead_failure: Option<DjLookaheadFailure>,
-    prepared_dj_mixer: Option<PreparedDjMixer>,
-    prepared_drop_preview_mixer: Option<PreparedDjMixer>,
-    last_dj_renderer_failure: Option<DjRuntimeRendererFailure>,
-    /// Do not repeat a rejected DSP/render attempt just because a later fire
-    /// miss replaces the public diagnostic reason with a decode delay.
-    dj_readiness_permanent_failure: Option<DjRuntimeRendererFailure>,
+    /// DJ transition preparation (lookahead, prepared mixers, renderer failures).
+    dj: DjTransitionState,
     /// User transport intent as most recently processed by this loop: `true`
     /// from a Pause command until a Resume (or an explicitly-unpaused job)
     /// clears it. Every engine cold start and promotion consults this, so an
@@ -899,13 +892,7 @@ fn run_runtime_loop(
         current_exclusive_release_grace_secs:
             crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
         current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
-        dj_engine_enabled: config.dj_engine_enabled,
-        dj_lookahead: None,
-        dj_lookahead_failure: None,
-        prepared_dj_mixer: None,
-        prepared_drop_preview_mixer: None,
-        last_dj_renderer_failure: None,
-        dj_readiness_permanent_failure: None,
+        dj: DjTransitionState::new(config.dj_engine_enabled),
         user_paused: false,
         silent_start_streak: 0,
     };
@@ -1189,8 +1176,8 @@ fn run_runtime_loop(
                                     .crossfade_start_signaled
                                     .store(false, Ordering::Relaxed);
                             }
-                            state.prepared_dj_mixer = None;
-                            state.dj_readiness_permanent_failure = None;
+                            state.dj.prepared_mixer = None;
+                            state.dj.readiness_permanent_failure = None;
                             let outcome = if suppressed {
                                 SeekToOutcome::DispatchedCrossfadeSuppressed
                             } else {
@@ -1259,7 +1246,7 @@ fn run_runtime_loop(
                     if !already_pending {
                         // Stop any stale pending engine first.
                         if let Some(mut stale) = state.next_engine.take() {
-                            state.prepared_dj_mixer = None;
+                            state.dj.prepared_mixer = None;
                             stale.stop();
                         }
                         let pending_position = Arc::new(AtomicU64::new(0));
@@ -1312,8 +1299,8 @@ fn run_runtime_loop(
                     }
                 }
                 PlaybackRuntimeCommand::PrepareDropPreview(job) => {
-                    if !state.dj_engine_enabled {
-                        state.prepared_drop_preview_mixer = None;
+                    if !state.dj.engine_enabled {
+                        state.dj.prepared_drop_preview_mixer = None;
                         if let Some(mut stale) = state.drop_preview_engine.take() {
                             stale.stop();
                         }
@@ -1324,7 +1311,7 @@ fn run_runtime_loop(
                         .as_ref()
                         .is_some_and(|transition| transition.program.template == "DropPreview16");
                     if !has_drop_preview_program {
-                        state.prepared_drop_preview_mixer = None;
+                        state.dj.prepared_drop_preview_mixer = None;
                         if let Some(mut stale) = state.drop_preview_engine.take() {
                             stale.stop();
                         }
@@ -1339,7 +1326,7 @@ fn run_runtime_loop(
                         .unwrap_or(false);
                     if !already_pending {
                         if let Some(mut stale) = state.drop_preview_engine.take() {
-                            state.prepared_drop_preview_mixer = None;
+                            state.dj.prepared_drop_preview_mixer = None;
                             stale.stop();
                         }
                         let pending_position = Arc::new(AtomicU64::new(0));
@@ -1400,9 +1387,9 @@ fn run_runtime_loop(
                     queue_generation,
                     deadline_samples,
                 } => {
-                    if !state.dj_engine_enabled {
-                        state.dj_lookahead = None;
-                        state.prepared_dj_mixer = None;
+                    if !state.dj.engine_enabled {
+                        state.dj.lookahead = None;
+                        state.dj.prepared_mixer = None;
                     } else {
                         let outcome = start_dj_lookahead_in_state(
                             &mut state,
@@ -1592,7 +1579,8 @@ fn run_runtime_loop(
                                         .load(Ordering::Relaxed)),
                                 prepared_mixer_matches = prepared_dj_mixer_matches_pair(&state),
                                 last_prepare_failure = state
-                                    .last_dj_renderer_failure
+                                    .dj
+                                    .last_renderer_failure
                                     .map(|failure| failure.reason.as_str()),
                                 "DJ transition fire blocked by incoming audio readiness"
                             );
@@ -1625,7 +1613,7 @@ fn run_runtime_loop(
                     generation,
                     trigger_position_samples,
                 } => {
-                    if !state.dj_engine_enabled {
+                    if !state.dj.engine_enabled {
                         if let Some(active) = state.engine.as_ref() {
                             active.shared.clear_drop_preview_trigger();
                         }
@@ -1676,7 +1664,7 @@ fn run_runtime_loop(
                                     reason.as_str()
                                 },
                             });
-                            state.prepared_drop_preview_mixer = None;
+                            state.dj.prepared_drop_preview_mixer = None;
                             if let Some(mut engine) = state.drop_preview_engine.take() {
                                 engine.stop();
                             }
@@ -2019,7 +2007,7 @@ fn run_runtime_loop(
                                 "Playback terminal ignored for drop preview engine: track_id={}, generation={}, outcome={:?}",
                                 track_id, generation, outcome
                             );
-                            state.prepared_drop_preview_mixer = None;
+                            state.dj.prepared_drop_preview_mixer = None;
                             if let Some(mut engine) = state.drop_preview_engine.take() {
                                 engine.stop();
                             }
@@ -2397,8 +2385,8 @@ fn transition_to_job(
     // in-flight crossfade - the fading-out engine has to go too, or it keeps
     // producing audio underneath the new track. Both retire in one batch so
     // they share a single fade window instead of serializing.
-    state.prepared_dj_mixer = None;
-    state.prepared_drop_preview_mixer = None;
+    state.dj.prepared_mixer = None;
+    state.dj.prepared_drop_preview_mixer = None;
     let mut retiring: Vec<PlaybackEngine> = Vec::new();
     retiring.extend(state.engine.take());
     retiring.extend(state.fading_out_engine.take());
@@ -2692,15 +2680,15 @@ fn fade_out_and_stop(mut engines: Vec<PlaybackEngine>) {
 }
 
 fn stop_current_engine(state: &mut PlaybackRuntimeLoopState) {
-    state.prepared_dj_mixer = None;
-    state.prepared_drop_preview_mixer = None;
+    state.dj.prepared_mixer = None;
+    state.dj.prepared_drop_preview_mixer = None;
     fade_out_and_stop(state.engine.take().into_iter().collect());
 }
 
 fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
-    state.dj_readiness_permanent_failure = None;
-    state.prepared_dj_mixer = None;
-    state.prepared_drop_preview_mixer = None;
+    state.dj.readiness_permanent_failure = None;
+    state.dj.prepared_mixer = None;
+    state.dj.prepared_drop_preview_mixer = None;
     // Retire as one batch so the audible decks share a single fade window
     // instead of serializing one after another.
     let mut retiring: Vec<PlaybackEngine> = Vec::new();
@@ -2940,8 +2928,8 @@ fn adaptive_rhythmic_transition(
     let active = state.engine.as_ref()?;
     let incoming = state.next_engine.as_ref()?;
     let transition = incoming.job.prepared_transition.as_ref()?;
-    let lookahead = state.dj_lookahead.as_ref()?;
-    (state.dj_engine_enabled
+    let lookahead = state.dj.lookahead.as_ref()?;
+    (state.dj.engine_enabled
         && beat_sync::required(&transition.program)
         && lookahead.matches_pair(
             transition.queue_generation,
@@ -2969,7 +2957,7 @@ fn adaptive_next_required_samples(
 ) -> Option<u64> {
     let transition = adaptive_rhythmic_transition(state)?;
     if prepared_dj_mixer_matches_pair(state) {
-        let prepared = state.prepared_dj_mixer.as_ref()?;
+        let prepared = state.dj.prepared_mixer.as_ref()?;
         if handoff_mixer_program(&prepared.program) {
             let channels = u64::from(state.device_channels.max(1));
             let cue = prepared.program.deck_b_start_frame.saturating_mul(channels);
@@ -3054,7 +3042,7 @@ fn promote_next_to_active(
     runtime_planned_start_ms: Option<i64>,
     runtime_renderer: DjRuntimeRendererOutcome,
 ) {
-    state.prepared_dj_mixer = None;
+    state.dj.prepared_mixer = None;
     let Some(next) = state.next_engine.take() else {
         return;
     };
@@ -3202,7 +3190,7 @@ fn promote_prepared_at_boundary(
     let runtime_renderer = DjRuntimeRendererOutcome::boundary_fallback(
         runtime_renderer_boundary_fallback_reason(state),
     );
-    state.prepared_dj_mixer = None;
+    state.dj.prepared_mixer = None;
     let Some(next) = state.next_engine.take() else {
         return;
     };
@@ -3501,12 +3489,13 @@ mod tests {
             assert_eq!(replacement, StartDjLookaheadOutcome::Started);
             assert_eq!(
                 state
-                    .dj_lookahead
+                    .dj
+                    .lookahead
                     .as_ref()
                     .map(|lookahead| lookahead.next_queue_item_id),
                 Some(14)
             );
-            assert!(state.dj_lookahead_failure.is_none());
+            assert!(state.dj.lookahead_failure.is_none());
         }
 
         #[test]
@@ -3554,7 +3543,8 @@ mod tests {
             assert_eq!(outcome, StartDjLookaheadOutcome::ReusedPreparedNext);
             assert_eq!(
                 state
-                    .dj_lookahead
+                    .dj
+                    .lookahead
                     .as_ref()
                     .map(|lookahead| lookahead.next.clone()),
                 Some(library_ref(2))
@@ -3576,10 +3566,11 @@ mod tests {
             );
 
             assert_eq!(outcome, StartDjLookaheadOutcome::MissingNext);
-            assert!(state.dj_lookahead.is_none());
+            assert!(state.dj.lookahead.is_none());
             assert_eq!(
                 state
-                    .dj_lookahead_failure
+                    .dj
+                    .lookahead_failure
                     .as_ref()
                     .map(|failure| failure.reason),
                 Some(DjLookaheadFailureReason::NextNotResolved)
@@ -3602,7 +3593,8 @@ mod tests {
 
             assert_eq!(
                 state
-                    .dj_lookahead
+                    .dj
+                    .lookahead
                     .as_ref()
                     .map(|lookahead| lookahead.deadline_samples),
                 Some(96_000)
@@ -3614,7 +3606,7 @@ mod tests {
             let mut state = test_runtime_loop_state();
             state.engine = Some(test_engine_with_shared(1, 10));
 
-            state.dj_lookahead_failure = Some(DjLookaheadFailure {
+            state.dj.lookahead_failure = Some(DjLookaheadFailure {
                 queue_generation: 20,
                 current_queue_item_id: Some(11),
                 next_queue_item_id: Some(12),
@@ -3624,7 +3616,8 @@ mod tests {
             assert!(state.engine.is_some());
             assert_eq!(
                 state
-                    .dj_lookahead_failure
+                    .dj
+                    .lookahead_failure
                     .as_ref()
                     .map(|failure| failure.reason),
                 Some(DjLookaheadFailureReason::AnalysisDeadlineMissed)
@@ -3905,7 +3898,7 @@ mod tests {
         state.next_engine = Some(next);
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
-        let prepared = state.prepared_dj_mixer.as_ref().expect("prepared mixer");
+        let prepared = state.dj.prepared_mixer.as_ref().expect("prepared mixer");
         assert_eq!(prepared.current_track_id, 1);
         assert_eq!(prepared.next_track_id, 2);
 
@@ -3950,7 +3943,7 @@ mod tests {
         state.next_engine = Some(next);
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
-        let prepared = state.prepared_dj_mixer.as_ref().expect("prepared mixer");
+        let prepared = state.dj.prepared_mixer.as_ref().expect("prepared mixer");
         assert_eq!(prepared.program.deck_a_start_frame, 1);
     }
 
@@ -3991,7 +3984,8 @@ mod tests {
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
         assert_eq!(
             state
-                .prepared_dj_mixer
+                .dj
+                .prepared_mixer
                 .as_ref()
                 .expect("early mixer")
                 .program
@@ -4012,7 +4006,8 @@ mod tests {
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
         assert_eq!(
             state
-                .prepared_dj_mixer
+                .dj
+                .prepared_mixer
                 .as_ref()
                 .expect("rebuilt mixer")
                 .program
@@ -4049,7 +4044,7 @@ mod tests {
         state.next_engine = Some(next);
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
-        let prepared = state.prepared_dj_mixer.as_ref().expect("prepared mixer");
+        let prepared = state.dj.prepared_mixer.as_ref().expect("prepared mixer");
 
         assert!(
             prepared.rendered[..2]
@@ -4088,7 +4083,7 @@ mod tests {
         state.next_engine = Some(next);
 
         assert!(prepare_dj_mixer_for_pair(&mut state, 64).is_ok());
-        let prepared = state.prepared_dj_mixer.as_ref().expect("prepared mixer");
+        let prepared = state.dj.prepared_mixer.as_ref().expect("prepared mixer");
         assert_eq!(prepared.program.sample_rate, 48_000);
         assert_eq!(prepared.program.deck_b_start_frame, 2);
         assert_eq!(prepared.program.resolve_at, 4);
@@ -4138,7 +4133,7 @@ mod tests {
         assert!(buffer.finished);
         assert_eq!(next.shared.total_samples.load(Ordering::Relaxed), 8);
         assert_eq!(next.shared.crossfade_samples.load(Ordering::Relaxed), 0);
-        assert!(state.prepared_dj_mixer.is_none());
+        assert!(state.dj.prepared_mixer.is_none());
     }
 
     #[test]
@@ -4339,7 +4334,7 @@ mod tests {
             .is_ok()
         );
 
-        assert!(state.prepared_dj_mixer.is_none());
+        assert!(state.dj.prepared_mixer.is_none());
         assert_eq!(state.engine.as_ref().map(|engine| engine.track_id), Some(1));
         assert_eq!(
             state.next_engine.as_ref().map(|engine| engine.track_id),
@@ -4504,7 +4499,7 @@ mod tests {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
         assert!(start_prepared_drop_preview_overlay(&mut state, &event_tx, 120_000).is_ok());
 
-        assert!(state.prepared_drop_preview_mixer.is_none());
+        assert!(state.dj.prepared_drop_preview_mixer.is_none());
         assert_eq!(state.engine.as_ref().map(|engine| engine.track_id), Some(1));
         assert_eq!(
             state.next_engine.as_ref().map(|engine| engine.track_id),
@@ -4605,6 +4600,7 @@ mod tests {
         prepare_drop_preview_mixer(&mut state, 1024).unwrap();
         assert_eq!(
             state
+                .dj
                 .prepared_drop_preview_mixer
                 .as_ref()
                 .unwrap()
@@ -4665,8 +4661,8 @@ mod tests {
             prepare_drop_preview_mixer(&mut state, 1024),
             Err(DjRuntimeRendererReason::MixerRejected)
         );
-        assert!(state.prepared_drop_preview_mixer.is_none());
-        assert!(state.prepared_dj_mixer.is_none());
+        assert!(state.dj.prepared_drop_preview_mixer.is_none());
+        assert!(state.dj.prepared_mixer.is_none());
         assert_eq!(state.engine.as_ref().unwrap().track_id, 1);
         assert_eq!(state.next_engine.as_ref().unwrap().track_id, 3);
         assert!(
@@ -4725,7 +4721,7 @@ mod tests {
     #[test]
     fn dj_flag_off_refuses_to_arm_drop_preview() {
         let mut state = test_runtime_loop_state();
-        state.dj_engine_enabled = false;
+        state.dj.engine_enabled = false;
         let active = test_engine_with_shared(1, 20);
         active
             .shared
@@ -5521,7 +5517,7 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
         prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
-        let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+        let prepared = state.dj.prepared_mixer.as_ref().unwrap();
         let rate = prepared
             .program
             .automation
@@ -5672,7 +5668,7 @@ mod tests {
             assert!(dj_pcm_readiness_wakeup(&state).is_some(), "{name}");
 
             prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
-            let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+            let prepared = state.dj.prepared_mixer.as_ref().unwrap();
             let expected_template = if expected_beats == 48.0 {
                 "BassSwap32"
             } else if expected_beats > 0.0 {
@@ -6046,7 +6042,7 @@ mod tests {
         state.next_engine = Some(next);
 
         prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
-        let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+        let prepared = state.dj.prepared_mixer.as_ref().unwrap();
         assert_eq!(prepared.program.template, "DropSwap");
         let source_cue = 48_000 + prepared.program.deck_b_start_frame;
         assert!(source_cue.abs_diff(2 * 48_000) <= 1440);
@@ -6135,7 +6131,7 @@ mod tests {
         state.engine = Some(active);
         state.next_engine = Some(next);
         prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
-        let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+        let prepared = state.dj.prepared_mixer.as_ref().unwrap();
         assert_eq!(prepared.program.template, "SafeCrossfade");
         assert_eq!(prepared.program.resolve_at, 4 * 48_000);
         assert!(
@@ -6213,7 +6209,7 @@ mod tests {
     fn state_with_late_unverified_rhythmic_mix() -> PlaybackRuntimeLoopState {
         let mut state = state_with_unverified_rhythmic_tracks();
         prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
-        let prepared = state.prepared_dj_mixer.as_ref().unwrap();
+        let prepared = state.dj.prepared_mixer.as_ref().unwrap();
         assert_eq!(prepared.program.template, "SafeCrossfade");
         assert_eq!(prepared.program.resolve_at, 4 * 48_000);
         let active = state.engine.as_ref().unwrap();
@@ -6343,7 +6339,7 @@ mod tests {
         assert!(!dj_crossfade_next_ready(&state, buffer, 12 * 96_000));
         prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
         assert_eq!(
-            state.prepared_dj_mixer.as_ref().unwrap().program.template,
+            state.dj.prepared_mixer.as_ref().unwrap().program.template,
             "SafeCrossfade"
         );
         assert!(dj_crossfade_next_ready(&state, buffer, 12 * 96_000));
@@ -6381,12 +6377,12 @@ mod tests {
     fn dj_readiness_respects_transport_pair_and_permanent_failure_guards() {
         let mut state = state_with_unverified_rhythmic_tracks();
         assert!(dj_pcm_readiness_wakeup(&state).is_some());
-        state.dj_engine_enabled = false;
+        state.dj.engine_enabled = false;
         assert!(dj_pcm_readiness_wakeup(&state).is_none());
-        state.dj_engine_enabled = true;
-        state.dj_lookahead.as_mut().unwrap().queue_generation += 1;
+        state.dj.engine_enabled = true;
+        state.dj.lookahead.as_mut().unwrap().queue_generation += 1;
         assert!(dj_pcm_readiness_wakeup(&state).is_none());
-        state.dj_lookahead.as_mut().unwrap().queue_generation -= 1;
+        state.dj.lookahead.as_mut().unwrap().queue_generation -= 1;
         let outgoing = state.engine.as_ref().unwrap();
         outgoing
             .shared
@@ -6481,7 +6477,7 @@ mod tests {
             prepare_dj_mixer_for_pair(&mut state, 1024),
             Err(DjRuntimeRendererReason::ActiveDeckNotDecoded)
         );
-        assert!(state.prepared_dj_mixer.is_none());
+        assert!(state.dj.prepared_mixer.is_none());
         // Although the original twelve-second overlap is unavailable, four
         // seconds can still be rendered safely from the current outgoing cue.
         let active = state.engine.as_ref().unwrap();
@@ -6540,12 +6536,12 @@ mod tests {
     #[test]
     fn protected_recovery_preserves_track_and_queue_pair_guards() {
         let mut state = state_with_unverified_rhythmic_tracks();
-        state.dj_lookahead.as_mut().unwrap().queue_generation += 1;
+        state.dj.lookahead.as_mut().unwrap().queue_generation += 1;
         assert_eq!(
             install_prepared_handoff_mixer_buffer(&mut state),
             Err(DjRuntimeRendererReason::PreparedMixerMissing)
         );
-        assert!(state.prepared_dj_mixer.is_none());
+        assert!(state.dj.prepared_mixer.is_none());
         assert_eq!(
             state
                 .next_engine
@@ -6556,8 +6552,8 @@ mod tests {
                 .load(Ordering::Relaxed),
             12 * 48_000 * 2
         );
-        state.dj_lookahead.as_mut().unwrap().queue_generation -= 1;
-        state.dj_lookahead.as_mut().unwrap().next = DjMediaRef::LibraryTrack { track_id: 3 };
+        state.dj.lookahead.as_mut().unwrap().queue_generation -= 1;
+        state.dj.lookahead.as_mut().unwrap().next = DjMediaRef::LibraryTrack { track_id: 3 };
         assert_eq!(
             install_prepared_handoff_mixer_buffer(&mut state),
             Err(DjRuntimeRendererReason::PreparedMixerMissing)
@@ -6722,7 +6718,8 @@ mod tests {
         prepare_dj_mixer_for_pair(&mut state, 64).unwrap();
         assert_eq!(
             state
-                .prepared_dj_mixer
+                .dj
+                .prepared_mixer
                 .as_ref()
                 .unwrap()
                 .program
@@ -6802,25 +6799,25 @@ mod tests {
     #[test]
     fn dj_flag_off_does_not_construct_mixer() {
         let mut state = state_with_ready_dj_pair();
-        state.dj_engine_enabled = false;
+        state.dj.engine_enabled = false;
 
         assert_eq!(
             prepare_dj_mixer_for_pair(&mut state, 64),
             Err(DjRuntimeRendererReason::DjDisabled)
         );
-        assert!(state.prepared_dj_mixer.is_none());
+        assert!(state.dj.prepared_mixer.is_none());
     }
 
     #[test]
     fn dj_flag_off_ignores_transition_program_field() {
         let mut state = test_runtime_loop_state();
-        state.dj_engine_enabled = false;
+        state.dj.engine_enabled = false;
         let mut job = PreparedPlaybackJob::test_fixture(2, 21)
             .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
 
         assert!(!gate_prepare_next_for_dj(&mut state, &mut job));
         assert!(job.prepared_transition.is_none());
-        assert!(state.prepared_dj_mixer.is_none());
+        assert!(state.dj.prepared_mixer.is_none());
     }
 
     #[test]
@@ -6839,8 +6836,8 @@ mod tests {
 
         set_dj_engine_enabled_in_state(&mut state, false);
 
-        assert!(!state.dj_engine_enabled);
-        assert!(state.prepared_dj_mixer.is_none());
+        assert!(!state.dj.engine_enabled);
+        assert!(state.dj.prepared_mixer.is_none());
         let active = state.engine.as_ref().expect("active engine");
         let next = state.next_engine.as_ref().expect("next engine");
         assert!(!active.shared.stopped.load(Ordering::SeqCst));
@@ -7906,12 +7903,12 @@ mod tests {
             .shared
             .target_sample_rate
             .store(48_000, Ordering::Relaxed);
-        state.dj_lookahead.as_mut().unwrap().queue_generation += 1;
+        state.dj.lookahead.as_mut().unwrap().queue_generation += 1;
         assert!(!dj_crossfade_next_ready(&state, buffer, outgoing_window));
-        state.dj_lookahead.as_mut().unwrap().queue_generation -= 1;
-        state.dj_engine_enabled = false;
+        state.dj.lookahead.as_mut().unwrap().queue_generation -= 1;
+        state.dj.engine_enabled = false;
         assert!(!dj_crossfade_next_ready(&state, buffer, outgoing_window));
-        state.dj_engine_enabled = true;
+        state.dj.engine_enabled = true;
         state
             .next_engine
             .as_mut()
@@ -8233,13 +8230,7 @@ mod tests {
             current_exclusive_release_grace_secs:
                 crate::db::audio_settings::DEFAULT_EXCLUSIVE_RELEASE_GRACE_SECS,
             current_exclusive_latency_mode: ExclusiveLatencyMode::Stable,
-            dj_engine_enabled: true,
-            dj_lookahead: None,
-            dj_lookahead_failure: None,
-            prepared_dj_mixer: None,
-            prepared_drop_preview_mixer: None,
-            last_dj_renderer_failure: None,
-            dj_readiness_permanent_failure: None,
+            dj: DjTransitionState::new(true),
             user_paused: false,
             silent_start_streak: 0,
         }
@@ -8582,7 +8573,7 @@ mod tests {
             .samples = vec![0.3; 2 * 96_000];
         assert!(can_prepare_dj_mixer_before_fire(&state));
         prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
-        let rendered = state.prepared_dj_mixer.as_ref().unwrap();
+        let rendered = state.dj.prepared_mixer.as_ref().unwrap();
         assert_eq!(rendered.program.deck_a_start_frame, 6 * 48_000);
         assert!(
             rendered.rendered[0] > 0.5,
