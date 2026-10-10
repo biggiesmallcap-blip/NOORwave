@@ -102,6 +102,7 @@ pub(crate) fn test_stream_info(track_id: i64) -> tidal_stream::StreamInfo {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum TidalPlaybackError {
     NotConnected,
     SessionRefreshFailed(String),

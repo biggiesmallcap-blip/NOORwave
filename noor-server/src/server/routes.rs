@@ -10009,7 +10009,7 @@ fn release_next_prebuffer_slot(
     }
 }
 
-async fn transport_intent_is_playing(state: &SharedState) -> bool {
+pub(crate) async fn transport_intent_is_playing(state: &SharedState) -> bool {
     let guard = state.read().await;
     guard
         .db
@@ -11099,7 +11099,7 @@ fn should_skip_prebuffer_for_sample_rate_follow_format_change(
     rate_changes || (exclusive_mode && bit_depth_changes)
 }
 
-async fn current_user_audio_quality(
+pub(crate) async fn current_user_audio_quality(
     state: &SharedState,
 ) -> Option<crate::db::audio_settings::AudioQuality> {
     let guard = state.read().await;

@@ -4,4 +4,5 @@
 
 pub(crate) mod generation;
 pub(crate) mod runtime;
+pub(crate) mod start;
 pub(crate) mod stream;
