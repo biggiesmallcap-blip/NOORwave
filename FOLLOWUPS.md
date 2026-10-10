@@ -10,6 +10,14 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### deps: migrate symphonia 0.5 -> 0.6
+
+symphonia 0.6 reshapes the decode API: SampleBuffer, DecoderOptions, the probe
+module and the Decoder trait moved, and Packet's fields went private. Port the
+noor-server and noor-mix decode paths, then let Dependabot propose the bump
+again (closed PR #337 shows the 13 compile errors).
+Spawned by: Dependabot PR #337
+
 ### radio: TIDAL track-mix lane
 
 TIDAL's per-track mix ("Track Radio") already fills song and artist radio when
