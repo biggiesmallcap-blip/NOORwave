@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { SearchResults, TidalSearchResults, TidalSearchTrack } from '$lib/api/client';
-import { runPrimarySearch, type PrimarySearch } from './primary_search';
+import { runPrimarySearch, settleWhileCurrent, type PrimarySearch } from './primary_search';
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -103,5 +103,23 @@ describe('runPrimarySearch', () => {
 		await vi.advanceTimersByTimeAsync(0);
 		await h.run;
 		expect(done).toBe(true);
+	});
+});
+
+describe('settleWhileCurrent', () => {
+	test('applies the answer and clears loading while current', async () => {
+		const events: string[] = [];
+		await settleWhileCurrent(Promise.resolve(3), () => true, (n) => events.push(`result:${n}`), () => events.push('settled'));
+		expect(events).toEqual(['result:3', 'settled']);
+	});
+	test('a stale search ignores the answer and leaves loading to the newer search', async () => {
+		const events: string[] = [];
+		await settleWhileCurrent(Promise.resolve(3), () => false, () => events.push('result'), () => events.push('settled'));
+		expect(events).toEqual([]);
+	});
+	test('a failing provider still settles without surfacing an error', async () => {
+		const events: string[] = [];
+		await settleWhileCurrent(Promise.reject(new Error('timeout')), () => true, () => events.push('result'), () => events.push('settled'));
+		expect(events).toEqual(['settled']);
 	});
 });

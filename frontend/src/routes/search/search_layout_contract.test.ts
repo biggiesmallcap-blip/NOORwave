@@ -43,7 +43,7 @@ describe('search layout contracts', () => {
 		expect(source).toContain('const primary = runPrimarySearch({');
 		expect(source).toContain('local: localPromise,');
 		expect(source).toContain('tidal: tracksPromise,');
-		expect(source).toContain('if (!isCurrentSearch(q, generation, signal)) return');
+		expect(source).toContain('const stillCurrent = () => isCurrentSearch(q, generation, signal)');
 		expect(source).toContain('secondarySpotifyQueued = true');
 		expect(source).toContain('secondarySpotifyTimer = scheduleSearchIdleTask(() => {');
 		expect(source).toContain('}, SECONDARY_PROVIDER_DELAY_MS)');
@@ -51,8 +51,10 @@ describe('search layout contracts', () => {
 		expect(source).toContain('loadingSpotifyPlaylists = true');
 		expect(source).toContain('timeoutMs: SECONDARY_PROVIDER_TIMEOUT_MS');
 		expect(source).toContain('SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS,');
-		expect(source).toContain('void tidalPlaylistPromise.then((playlistResults) => {');
-		expect(source).toContain('void spotifyPlaylistPromise.then((playlistResults) => {');
+		// Each playlist provider settles through settleWhileCurrent (behaviour-tested
+		// in $lib/search/primary_search.test.ts).
+		expect(source).toMatch(/void settleWhileCurrent\(\s*tidalPlaylistPromise,\s*stillCurrent,/);
+		expect(source).toMatch(/void settleWhileCurrent\(\s*spotifyPlaylistPromise,\s*stillCurrent,/);
 		expect(source).toContain('const primaryProviderSearchDone = $derived(');
 		expect(source).toContain('const providerSearchDone = $derived(');
 		expect(source).toContain('{:else if allProviderResultsEmpty && providerSearchDone}');

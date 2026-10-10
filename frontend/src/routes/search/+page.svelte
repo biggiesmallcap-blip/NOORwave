@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { runPrimarySearch } from '$lib/search/primary_search'
+  import { runPrimarySearch, settleWhileCurrent } from '$lib/search/primary_search'
   import {
     appendUnique,
     focusedViewNeedsPrefetch,
@@ -637,25 +637,27 @@
               SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS,
             )
 
-            void tidalPlaylistPromise.then((playlistResults) => {
-              if (!isCurrentSearch(q, generation, signal)) return
-              tidalPlaylistResults = playlistResults.playlists
-              tidalPlaylistOffset = tidalPlaylistResults.length
-              if (tidalPlaylistResults.length < INITIAL_SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
-            }).catch(() => undefined).finally(() => {
-              if (!isCurrentSearch(q, generation, signal)) return
-              loadingTidalPlaylists = false
-            })
-
-            void spotifyPlaylistPromise.then((playlistResults) => {
-              if (!isCurrentSearch(q, generation, signal)) return
-              spotifyPlaylistResults = playlistResults
-              spotifyPlaylistOffset = spotifyPlaylistResults.length
-              if (spotifyPlaylistResults.length < SECONDARY_SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
-            }).catch(() => undefined).finally(() => {
-              if (!isCurrentSearch(q, generation, signal)) return
-              loadingSpotifyPlaylists = false
-            })
+            const stillCurrent = () => isCurrentSearch(q, generation, signal)
+            void settleWhileCurrent(
+              tidalPlaylistPromise,
+              stillCurrent,
+              (playlistResults) => {
+                tidalPlaylistResults = playlistResults.playlists
+                tidalPlaylistOffset = tidalPlaylistResults.length
+                if (tidalPlaylistResults.length < INITIAL_SEARCH_PAGE_SIZE) hasMoreTidalPlaylists = false
+              },
+              () => { loadingTidalPlaylists = false },
+            )
+            void settleWhileCurrent(
+              spotifyPlaylistPromise,
+              stillCurrent,
+              (playlistResults) => {
+                spotifyPlaylistResults = playlistResults
+                spotifyPlaylistOffset = spotifyPlaylistResults.length
+                if (spotifyPlaylistResults.length < SECONDARY_SEARCH_PAGE_SIZE) hasMoreSpotifyPlaylists = false
+              },
+              () => { loadingSpotifyPlaylists = false },
+            )
           }, SECONDARY_PROVIDER_DELAY_MS)
 
           await primary

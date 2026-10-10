@@ -76,3 +76,24 @@ export async function runPrimarySearch(search: PrimarySearch): Promise<void> {
 
 	await Promise.allSettled([local, tidal]);
 }
+
+/**
+ * One secondary provider (TIDAL or Spotify playlists): apply its answer only
+ * while the search is still current, swallow its failure (the rail just stays
+ * empty), and clear its loading flag once it settles.
+ */
+export async function settleWhileCurrent<T>(
+	answer: Promise<T>,
+	isCurrent: () => boolean,
+	onResult: (value: T) => void,
+	onSettled: () => void,
+): Promise<void> {
+	try {
+		const value = await answer;
+		if (isCurrent()) onResult(value);
+	} catch {
+		// A secondary provider failing never surfaces as a search error.
+	} finally {
+		if (isCurrent()) onSettled();
+	}
+}
