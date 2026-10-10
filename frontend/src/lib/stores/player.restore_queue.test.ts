@@ -67,7 +67,7 @@ import {
 	refreshPlaybackState,
 	moveQueueItem,
 	removeTrackFromQueue,
-	restoreQueueItems,
+	restoreQueueItems, setPlayerStateForTests
 } from './player';
 
 type AlbumTracksResult = Awaited<ReturnType<typeof api.getAlbumTracks>>;
@@ -287,11 +287,11 @@ describe('restoreQueueItems', () => {
 		vi.mocked(api.replacePlaybackQueue).mockReset();
 		vi.mocked(api.startRadioStart).mockReset();
 		vi.mocked(api.getRadioTracks).mockReset();
-		currentTrack.set(null);
-		currentQueueItemId.set(null);
-		isPlaying.set(false);
-		playbackQueue.set([]);
-		playerError.set(null);
+		setPlayerStateForTests({ currentTrack: null });
+		setPlayerStateForTests({ currentQueueItemId: null });
+		setPlayerStateForTests({ isPlaying: false });
+		setPlayerStateForTests({ playbackQueue: [] });
+		setPlayerStateForTests({ playerError: null });
 	});
 
 	it('restores a library-only queue via addQueueTrack', async () => {
@@ -371,10 +371,10 @@ describe('removeTrackFromQueue', () => {
 	beforeEach(() => {
 		vi.mocked(api.removeQueueTrack).mockClear();
 		vi.mocked(api.getTrackAudioFeatures).mockReset();
-		currentTrack.set(null);
-		currentQueueItemId.set(null);
-		isPlaying.set(false);
-		playbackQueue.set([]);
+		setPlayerStateForTests({ currentTrack: null });
+		setPlayerStateForTests({ currentQueueItemId: null });
+		setPlayerStateForTests({ isPlaying: false });
+		setPlayerStateForTests({ playbackQueue: [] });
 	});
 
 	it('applies playback state returned by the remove endpoint', async () => {
@@ -399,10 +399,10 @@ describe('moveQueueItem', () => {
 	beforeEach(() => {
 		vi.mocked(api.moveQueueTrack).mockClear();
 		vi.mocked(api.getTrackAudioFeatures).mockReset();
-		currentTrack.set(null);
-		currentQueueItemId.set(null);
-		isPlaying.set(false);
-		playbackQueue.set([libraryRow(10, 1), libraryRow(20, 2)]);
+		setPlayerStateForTests({ currentTrack: null });
+		setPlayerStateForTests({ currentQueueItemId: null });
+		setPlayerStateForTests({ isPlaying: false });
+		setPlayerStateForTests({ playbackQueue: [libraryRow(10, 1), libraryRow(20, 2)] });
 	});
 
 	it('applies playback state returned by the move endpoint', async () => {
@@ -434,12 +434,12 @@ describe('stale playback responses', () => {
 		vi.mocked(api.replacePlaybackQueue).mockReset();
 		vi.mocked(api.startRadioStart).mockReset();
 		vi.mocked(api.getRadioTracks).mockReset();
-		currentTrack.set(null);
-		currentQueueItemId.set(null);
-		isPlaying.set(false);
-		playbackQueue.set([]);
-		playerError.set(null);
-		lastSuccessfulCallAt.set(Date.now());
+		setPlayerStateForTests({ currentTrack: null });
+		setPlayerStateForTests({ currentQueueItemId: null });
+		setPlayerStateForTests({ isPlaying: false });
+		setPlayerStateForTests({ playbackQueue: [] });
+		setPlayerStateForTests({ playerError: null });
+		setPlayerStateForTests({ lastSuccessfulCallAt: Date.now() });
 	});
 
 	it('ignores an older play response after a newer play request wins', async () => {
@@ -507,7 +507,7 @@ describe('stale playback responses', () => {
 	});
 
 	it('restores the transport button when a pause request fails', async () => {
-		isPlaying.set(true);
+		setPlayerStateForTests({ isPlaying: true });
 		vi.mocked(api.pausePlayback).mockRejectedValueOnce(new Error('server not responding'));
 
 		await togglePlayback();
@@ -573,7 +573,7 @@ describe('stale playback responses', () => {
 		const staleRow = libraryRow(90, 900);
 		const current = resolvedTidalRow(1, 501, 101);
 		const queued = pendingTidalRow(2, 102);
-		playbackQueue.set([staleRow]);
+		setPlayerStateForTests({ playbackQueue: [staleRow] });
 		vi.mocked(api.replacePlaybackQueue).mockResolvedValueOnce(mixedQueueResponse(current, [queued]));
 
 		await playTidalTracksNow([tidalPlayable(101), tidalPlayable(102)], 'album');
@@ -587,7 +587,7 @@ describe('stale playback responses', () => {
 
 	it('passes the full loaded TIDAL album track list to playback in order', async () => {
 		const loadedAlbum = Array.from({ length: 45 }, (_, index) => tidalAlbumPlayable(index + 1));
-		playbackQueue.set([libraryRow(90, 900)]);
+		setPlayerStateForTests({ playbackQueue: [libraryRow(90, 900)] });
 		vi.mocked(api.replacePlaybackQueue).mockResolvedValueOnce(
 			mixedQueueResponse(
 				resolvedTidalRow(1, 501, loadedAlbum[0].tidal_id),

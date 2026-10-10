@@ -1,4 +1,4 @@
-import { get, writable } from 'svelte/store';
+import { get, writable, readonly } from 'svelte/store';
 import {
 	api,
 	ApiError,
@@ -40,11 +40,16 @@ function trackLabel(track: { title?: string | null; artist_name?: string | null 
 	return t || a || 'track';
 }
 
-export const currentTrack = writable<Track | null>(null);
-export const currentQueueItemId = writable<number | null>(null);
-export const currentTrackFeatures = writable<AudioDspFeatures | null>(null);
-export const currentStreamDisplay = writable<StreamDisplayInfo | null>(null);
-export const playbackRuntimeInfo = writable<PlaybackRuntimeInfo | null>(null);
+const currentTrackStore = writable<Track | null>(null);
+export const currentTrack = readonly(currentTrackStore);
+const currentQueueItemIdStore = writable<number | null>(null);
+export const currentQueueItemId = readonly(currentQueueItemIdStore);
+const currentTrackFeaturesStore = writable<AudioDspFeatures | null>(null);
+export const currentTrackFeatures = readonly(currentTrackFeaturesStore);
+const currentStreamDisplayStore = writable<StreamDisplayInfo | null>(null);
+export const currentStreamDisplay = readonly(currentStreamDisplayStore);
+const playbackRuntimeInfoStore = writable<PlaybackRuntimeInfo | null>(null);
+export const playbackRuntimeInfo = readonly(playbackRuntimeInfoStore);
 
 // TIDAL tracks only carry artist/album tidal ids in this in-memory cache; the
 // backend queue snapshots may omit them before a pending row resolves. Persisting it to localStorage
@@ -155,7 +160,7 @@ function enrichQueue(queue: QueueItem[]): QueueItem[] {
 }
 
 function setCurrentTrack(track: Track | null) {
-	currentTrack.set(enrichTidalTrack(track));
+	currentTrackStore.set(enrichTidalTrack(track));
 }
 
 let latestQueueRevision: number | null = null;
@@ -172,7 +177,7 @@ function setPlaybackQueue(queue: QueueItem[], queueRevision?: number): boolean {
 	const enriched = enrichQueue(queue);
 	const previous = get(playbackQueue);
 	const resolvedDelta = countResolvedTransitions(previous, enriched);
-	playbackQueue.set(enriched);
+	playbackQueueStore.set(enriched);
 	if (resolvedDelta > 0) announceResolved(resolvedDelta);
 	return true;
 }
@@ -204,16 +209,18 @@ export interface PlayerError {
 	retry?: () => Promise<void>;
 }
 
-export const playerError = writable<PlayerError | null>(null);
+const playerErrorStore = writable<PlayerError | null>(null);
+export const playerError = readonly(playerErrorStore);
 
 // Tracks the last successful API call so `assertOnline` can avoid bouncing the
 // user when the WS happens to be transiently disconnected but the HTTP path is
 // healthy.
-export const lastSuccessfulCallAt = writable<number>(0);
+const lastSuccessfulCallAtStore = writable<number>(0);
+export const lastSuccessfulCallAt = readonly(lastSuccessfulCallAtStore);
 const ONLINE_GRACE_MS = 30_000;
 
 function noteSuccess() {
-	lastSuccessfulCallAt.set(Date.now());
+	lastSuccessfulCallAtStore.set(Date.now());
 }
 
 let playbackIntentSeq = 0;
@@ -289,7 +296,7 @@ export function normalizePlayerError(action: string, error: unknown): string {
 }
 
 function setError(action: string, error: unknown, retry?: () => Promise<void>) {
-	playerError.set({ message: normalizePlayerError(action, error), retry });
+	playerErrorStore.set({ message: normalizePlayerError(action, error), retry });
 }
 
 /**
@@ -301,15 +308,15 @@ function setError(action: string, error: unknown, retry?: () => Promise<void>) {
 export function assertOnline(): boolean {
 	if (get(wsConnected)) return true;
 	if (Date.now() - get(lastSuccessfulCallAt) < ONLINE_GRACE_MS) return true;
-	playerError.set({ message: 'Reconnecting to the server…' });
+	playerErrorStore.set({ message: 'Reconnecting to the server…' });
 	return false;
 }
 
 export async function refreshPlaybackRuntime() {
 	try {
 		const result = await api.getPlaybackRuntime();
-		currentStreamDisplay.set(result.stream ?? null);
-		playbackRuntimeInfo.set(result.runtime ?? null);
+		currentStreamDisplayStore.set(result.stream ?? null);
+		playbackRuntimeInfoStore.set(result.runtime ?? null);
 		// Sync exclusive status store so the pill shows correctly after page load
 		// without waiting for the next WS exclusive event.
 		if (result.runtime) {
@@ -338,18 +345,18 @@ function fetchCurrentTrackFeatures(trackId: number, clearFirst: boolean): void {
 	const seq = ++_featuresFetchSeq;
 	if (clearFirst) {
 		// Clear stale features immediately so UI doesn't show the previous track's badge.
-		currentTrackFeatures.set(null);
+		currentTrackFeaturesStore.set(null);
 	}
 	void api
 		.getTrackAudioFeatures(trackId)
 		.then((res) => {
 			// Guard against out-of-order responses.
 			if (seq !== _featuresFetchSeq) return;
-			currentTrackFeatures.set(res.features ?? null);
+			currentTrackFeaturesStore.set(res.features ?? null);
 		})
 		.catch(() => {
 			if (seq !== _featuresFetchSeq) return;
-			currentTrackFeatures.set(null);
+			currentTrackFeaturesStore.set(null);
 		});
 }
 
@@ -359,7 +366,7 @@ currentTrack.subscribe((track) => {
 	_lastFeaturesTrackId = nextId;
 
 	if (nextId === null) {
-		currentTrackFeatures.set(null);
+		currentTrackFeaturesStore.set(null);
 		return;
 	}
 
@@ -378,10 +385,13 @@ if (typeof window !== 'undefined') {
 	});
 }
 
-export const isPlaying = writable(false);
-export const position = writable(0);
+const isPlayingStore = writable(false);
+export const isPlaying = readonly(isPlayingStore);
+const positionStore = writable(0);
+export const position = readonly(positionStore);
 // Accepted seeks invalidate an active DJ animation immediately, before its next poll.
-export const playbackSeekRevision = writable(0);
+const playbackSeekRevisionStore = writable(0);
+export const playbackSeekRevision = readonly(playbackSeekRevisionStore);
 /**
  * How many ms of the current track are decoded into the playback buffer.
  * Drives the buffered-bar overlay in the scrubber and clamps the user's
@@ -389,13 +399,20 @@ export const playbackSeekRevision = writable(0);
  * 409 ack is the backstop). Updated by `applyState` + a 1 Hz refresher
  * that polls `/api/playback/state` while a track is loading.
  */
-export const buffered = writable(0);
-export const volume = writable(1.0);
-export const volumeBeforeMute = writable<number | null>(null);
-export const automixEnabled = writable(false);
-export const automixDiscoverNew = writable(false);
-export const automixUseLearning = writable(true);
-export const automixAllowExternal = writable(false);
+const bufferedStore = writable(0);
+export const buffered = readonly(bufferedStore);
+const volumeStore = writable(1.0);
+export const volume = readonly(volumeStore);
+const volumeBeforeMuteStore = writable<number | null>(null);
+export const volumeBeforeMute = readonly(volumeBeforeMuteStore);
+const automixEnabledStore = writable(false);
+export const automixEnabled = readonly(automixEnabledStore);
+const automixDiscoverNewStore = writable(false);
+export const automixDiscoverNew = readonly(automixDiscoverNewStore);
+const automixUseLearningStore = writable(true);
+export const automixUseLearning = readonly(automixUseLearningStore);
+const automixAllowExternalStore = writable(false);
+export const automixAllowExternal = readonly(automixAllowExternalStore);
 
 // ─── Client-side position ticker ──────────────────────────────────────────────
 // Uses performance.now() timestamps instead of counting ticks so that browsers
@@ -417,7 +434,7 @@ function startPositionTicker() {
 		const track = get(currentTrack);
 		if (!track?.duration_ms) return;
 		const elapsed = performance.now() - _tickerBaseTime;
-		position.set(Math.min(_tickerBasePosition + elapsed, track.duration_ms));
+		positionStore.set(Math.min(_tickerBasePosition + elapsed, track.duration_ms));
 	}, 250);
 }
 
@@ -474,29 +491,35 @@ function scheduleBufferedRefreshIfNeeded() {
 		}
 	}, BUFFERED_REFRESH_INTERVAL_MS);
 }
-export const shuffleMode = writable<PlaybackState['shuffle_mode']>('off');
-export const repeatMode = writable<PlaybackState['repeat_mode']>('off');
-export const crossfadeMs = writable(0);
-export const playbackQueue = writable<QueueItem[]>([]);
-export const playerReady = writable(false);
+const shuffleModeStore = writable<PlaybackState['shuffle_mode']>('off');
+export const shuffleMode = readonly(shuffleModeStore);
+const repeatModeStore = writable<PlaybackState['repeat_mode']>('off');
+export const repeatMode = readonly(repeatModeStore);
+const crossfadeMsStore = writable(0);
+export const crossfadeMs = readonly(crossfadeMsStore);
+const playbackQueueStore = writable<QueueItem[]>([]);
+export const playbackQueue = readonly(playbackQueueStore);
+const playerReadyStore = writable(false);
+export const playerReady = readonly(playerReadyStore);
 
 // Map track_id → human-readable "why this track is here" string, populated when
 // a radio orchestrator returns candidates. The server attaches a `reason` to
 // every RadioCandidate but our queue endpoint rebuilds QueueItems server-side
 // from track ids, dropping the reason. Keep a client-side map so the queue
 // panel can surface it.
-export const radioReasons = writable<Record<number, string>>({});
+const radioReasonsStore = writable<Record<number, string>>({});
+export const radioReasons = readonly(radioReasonsStore);
 
 function setRadioReasons(entries: { track_id: number; reason?: string | null }[]) {
 	const next: Record<number, string> = {};
 	for (const e of entries) {
 		if (e.reason && e.track_id > 0) next[e.track_id] = e.reason;
 	}
-	radioReasons.set(next);
+	radioReasonsStore.set(next);
 }
 
 function clearRadioReasons() {
-	radioReasons.set({});
+	radioReasonsStore.set({});
 }
 
 // Cycle: off → genre (Galaxy default) → weighted → true → back to off
@@ -504,39 +527,39 @@ const SHUFFLE_SEQUENCE: PlaybackState['shuffle_mode'][] = ['off', 'genre', 'weig
 
 function applyState(state: PlaybackState) {
 	setCurrentTrack(state.current_track);
-	currentQueueItemId.set(state.current_queue_item_id ?? null);
-	isPlaying.set(state.is_playing);
-	position.set(state.position_ms);
+	currentQueueItemIdStore.set(state.current_queue_item_id ?? null);
+	isPlayingStore.set(state.is_playing);
+	positionStore.set(state.position_ms);
 	anchorPositionTicker(state.position_ms);
-	buffered.set(state.buffered_ms ?? 0);
-	volume.set(state.volume);
-	shuffleMode.set(state.shuffle_mode);
-	repeatMode.set(state.repeat_mode);
-	automixEnabled.set(state.automix_enabled);
-	crossfadeMs.set(state.crossfade_ms);
-	automixDiscoverNew.set(state.automix_discover_new);
-	automixUseLearning.set(state.automix_use_learning);
-	automixAllowExternal.set(state.automix_allow_external);
+	bufferedStore.set(state.buffered_ms ?? 0);
+	volumeStore.set(state.volume);
+	shuffleModeStore.set(state.shuffle_mode);
+	repeatModeStore.set(state.repeat_mode);
+	automixEnabledStore.set(state.automix_enabled);
+	crossfadeMsStore.set(state.crossfade_ms);
+	automixDiscoverNewStore.set(state.automix_discover_new);
+	automixUseLearningStore.set(state.automix_use_learning);
+	automixAllowExternalStore.set(state.automix_allow_external);
 	scheduleBufferedRefreshIfNeeded();
 }
 
 function resetOptimisticPlaybackProgress() {
 	clearBufferedRefresher();
-	position.set(0);
+	positionStore.set(0);
 	anchorPositionTicker(0);
-	buffered.set(0);
+	bufferedStore.set(0);
 }
 
 export function hydratePlayback(snapshot: PlaybackSnapshot) {
 	applyState(snapshot.state);
 	setPlaybackQueue(snapshot.queue, snapshot.queue_revision);
-	playerReady.set(true);
-	playerError.set(null);
+	playerReadyStore.set(true);
+	playerErrorStore.set(null);
 	noteSuccess();
 }
 
 export async function refreshPlaybackState() {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const refreshSeq = currentPlaybackIntentSeq();
 	try {
 		const snapshot = await api.getPlaybackState();
@@ -549,7 +572,7 @@ export async function refreshPlaybackState() {
 }
 
 export async function playTrackNow(trackId: number) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.playTrack(trackId);
@@ -562,7 +585,7 @@ export async function playTrackNow(trackId: number) {
 	}
 }
 export async function playQueueItemNow(queueItemId: number) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.playQueueItem(queueItemId);
@@ -612,7 +635,7 @@ export function toggleLatchShouldRelease(
 }
 
 export async function togglePlayback() {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const previousPlaying = get(isPlaying);
 	// Decide the intended action ONCE, from the freshest signal available:
 	// the previous in-flight toggle if there is one, else the current store.
@@ -620,7 +643,7 @@ export async function togglePlayback() {
 	pendingToggleAction = intended;
 	// Instant button feedback; the response snapshot below (and the WS-driven
 	// authoritative state pushes) reconcile to the server's truth.
-	isPlaying.set(intended === 'resume');
+	isPlayingStore.set(intended === 'resume');
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const result =
@@ -632,7 +655,7 @@ export async function togglePlayback() {
 		// The optimistic icon must not remain inverted when the transport
 		// request times out or the runtime rejects it. A later WS/state refresh
 		// can still replace this rollback with authoritative server truth.
-		isPlaying.set(previousPlaying);
+		isPlayingStore.set(previousPlaying);
 		setError('toggle playback', error, () => togglePlayback());
 	} finally {
 		if (toggleLatchShouldRelease(pendingToggleAction, intended)) {
@@ -648,7 +671,7 @@ export async function togglePlayback() {
  * toggle's alternation logic entirely: the caller already knows the action.
  */
 export async function pausePlayer() {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.pausePlayback();
@@ -663,7 +686,7 @@ export async function pausePlayer() {
 }
 
 export async function resumePlayer() {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.resumePlayback();
@@ -678,7 +701,7 @@ export async function resumePlayer() {
 }
 
 export async function playPreviousTrack() {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.previousTrack();
@@ -692,7 +715,7 @@ export async function playPreviousTrack() {
 }
 
 export async function playNextTrack() {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		// Optimistic update: show the next queued track immediately rather than waiting
@@ -710,7 +733,7 @@ export async function playNextTrack() {
 				setCurrentTrack(nextItem.track);
 			}
 		}
-		position.set(0);
+		positionStore.set(0);
 		anchorPositionTicker(0);
 
 		const snapshot = await api.nextTrack();
@@ -724,13 +747,13 @@ export async function playNextTrack() {
 }
 
 export async function setPlayerVolume(nextVolume: number) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	try {
 		const clamped = clamp01(nextVolume);
 		const result = await api.setPlaybackVolume(clamped);
 		// Only sync volume — applying full state would overwrite the local position
 		// ticker with a slightly stale server value, causing the displayed time to jump.
-		volume.set(result.state.volume);
+		volumeStore.set(result.state.volume);
 		noteSuccess();
 	} catch (error) {
 		setError('set volume', error);
@@ -740,17 +763,17 @@ export async function setPlayerVolume(nextVolume: number) {
 export async function toggleMute() {
 	const current = get(volume);
 	if (current > 0) {
-		volumeBeforeMute.set(current);
+		volumeBeforeMuteStore.set(current);
 		await setPlayerVolume(0);
 	} else {
 		const restore = get(volumeBeforeMute) ?? 0.5;
-		volumeBeforeMute.set(null);
+		volumeBeforeMuteStore.set(null);
 		await setPlayerVolume(restore);
 	}
 }
 
 export async function setPlayerPosition(nextPositionMs: number) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		// Always opt in to the segment-restart path (option C). With
@@ -760,7 +783,7 @@ export async function setPlayerPosition(nextPositionMs: number) {
 		// applies the corrective snapshot); transition errors get 500
 		// (treat as recoverable error - the user can retry the drag).
 		const result = await api.setPlaybackPosition(nextPositionMs, true);
-		if (isLatestPlaybackIntent(intentSeq)) playbackSeekRevision.update((revision) => revision + 1);
+		if (isLatestPlaybackIntent(intentSeq)) playbackSeekRevisionStore.update((revision) => revision + 1);
 		if (!applyStateIfLatest(result.state, intentSeq)) return;
 		noteSuccess();
 	} catch (error) {
@@ -787,7 +810,7 @@ export async function setPlayerPosition(nextPositionMs: number) {
 }
 
 export async function setPlayerRepeatMode(mode: PlaybackState['repeat_mode']) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const result = await api.setPlaybackRepeat(mode);
@@ -809,7 +832,7 @@ export async function cyclePlayerRepeatMode() {
 }
 
 export async function setPlayerShuffleMode(mode: PlaybackState['shuffle_mode']) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const snapshot = await api.setPlaybackShuffle(mode);
@@ -833,7 +856,7 @@ export async function setPlayerAutomixEnabled(
 	use_learning?: boolean,
 	allow_external?: boolean
 ) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	try {
 		const result = await api.setPlaybackAutomix(
 			enabled,
@@ -843,11 +866,11 @@ export async function setPlayerAutomixEnabled(
 			allow_external
 		);
 		// Only sync automix fields — applying full state would clobber the local position ticker.
-		automixEnabled.set(result.state.automix_enabled);
-		crossfadeMs.set(result.state.crossfade_ms);
-		automixDiscoverNew.set(result.state.automix_discover_new);
-		automixUseLearning.set(result.state.automix_use_learning);
-		automixAllowExternal.set(result.state.automix_allow_external);
+		automixEnabledStore.set(result.state.automix_enabled);
+		crossfadeMsStore.set(result.state.crossfade_ms);
+		automixDiscoverNewStore.set(result.state.automix_discover_new);
+		automixUseLearningStore.set(result.state.automix_use_learning);
+		automixAllowExternalStore.set(result.state.automix_allow_external);
 		if (result.queue) setPlaybackQueue(result.queue, result.queue_revision);
 		noteSuccess();
 	} catch (error) {
@@ -901,7 +924,7 @@ export async function addTrackToQueue(trackId: number) {
 	try {
 		const result = await api.addQueueTrack(trackId);
 		setPlaybackQueue(result.queue, result.queue_revision);
-		playerError.set(null);
+		playerErrorStore.set(null);
 		noteSuccess();
 		showToast('Added to queue', 'success');
 		announceQueue('Added to queue');
@@ -968,7 +991,7 @@ export function selectAppendedQueueRow<T extends { id: number; track: { id: numb
 }
 
 export async function moveQueueTrackNext(queueItemId: number) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const queue = get(playbackQueue);
 	const targetIndex = queue.findIndex((item) => item.id === queueItemId);
 	if (targetIndex === -1) return;
@@ -995,7 +1018,7 @@ export async function moveQueueTrackNext(queueItemId: number) {
 }
 
 export async function removeTrackFromQueue(queueItemId: number) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	try {
 		const result = await api.removeQueueTrack(queueItemId);
 		setPlaybackQueue(result.queue, result.queue_revision);
@@ -1024,7 +1047,7 @@ export async function moveQueueItem(itemId: number, newPos: number) {
 		const result = await api.moveQueueTrack(itemId, target);
 		setPlaybackQueue(result.queue, result.queue_revision);
 		if (result.playback_state) applyState(result.playback_state);
-		playerError.set(null);
+		playerErrorStore.set(null);
 	} catch (error) {
 		// Roll back on failure.
 		setPlaybackQueue(before);
@@ -1038,7 +1061,7 @@ export async function clearQueue(): Promise<QueueItem[]> {
 		const result = await api.clearQueue();
 		setPlaybackQueue(result.queue, result.queue_revision);
 		if (result.playback_state) applyState(result.playback_state);
-		playerError.set(null);
+		playerErrorStore.set(null);
 		// Offer undo via toast.
 		const restorable = before.filter(
 			(item) => !result.queue.some((q) => q.id === item.id)
@@ -1095,7 +1118,7 @@ export async function restoreQueueItems(items: QueueItem[]): Promise<RestoreSumm
 		}
 		const snapshot = await api.getPlaybackState();
 		setPlaybackQueue(snapshot.queue, snapshot.queue_revision);
-		playerError.set(null);
+		playerErrorStore.set(null);
 		if (summary.restored > 0) {
 			announceQueue(
 				summary.skipped === 0
@@ -1127,7 +1150,7 @@ export async function saveQueueAsPlaylist(
 		// without this the new playlist stays invisible until that expires.
 		invalidatePlaylistCaches();
 		showToast(`Saved "${result.playlist.name}" — ${result.added} tracks`, 'success');
-		playerError.set(null);
+		playerErrorStore.set(null);
 		return result.playlist;
 	} catch (error) {
 		setError('save queue as playlist', error);
@@ -1150,10 +1173,10 @@ export function setTrackFavoriteStatus(trackId: number, favorite: boolean, track
 			is_favorite: favorite,
 		});
 	}
-	currentTrack.update((t) =>
+	currentTrackStore.update((t) =>
 		t && t.id === trackId ? { ...t, is_favorite: favorite } : t
 	);
-	playbackQueue.update((queue) =>
+	playbackQueueStore.update((queue) =>
 		queue.map((item) =>
 			item.track.id === trackId
 				? { ...item, track: { ...item.track, is_favorite: favorite } }
@@ -1186,7 +1209,7 @@ export async function toggleTrackFavorite(trackId: number, currentIsFavorite?: b
 	setTrackFavoriteStatus(trackId, nextFavorite, playerTrack ?? undefined);
 	try {
 		await api.setTrackFavorite(trackId, nextFavorite);
-		playerError.set(null);
+		playerErrorStore.set(null);
 		noteSuccess();
 	} catch (error) {
 		// Roll back the optimistic update.
@@ -1227,7 +1250,7 @@ export async function toggleTidalTrackFavorite(
 				is_favorite: nextFavorite,
 			});
 		}
-		playerError.set(null);
+		playerErrorStore.set(null);
 		noteSuccess();
 		return { local_id: localId, is_favorite: nextFavorite };
 	} catch (error) {
@@ -1256,7 +1279,7 @@ async function loadQueueAndPlay(
 ) {
 	if (trackIds.length === 0) return;
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = options?.intentSeq ?? beginPlaybackIntent();
 	const ownsIntent = options?.intentSeq == null;
 	if (!options?.preserveRadioReasons) clearRadioReasons();
@@ -1350,7 +1373,7 @@ export async function playLibrary(options?: {
 	shuffle?: boolean;
 }) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	try {
 		// Shuffle pulls a random slice of the entire library; Play honors the
 		// active sort. Without 'random' here, Shuffle only ever saw the first 200
@@ -1364,7 +1387,7 @@ export async function playLibrary(options?: {
 			options?.likedOnly ?? false,
 		);
 		if (tracks.length === 0) {
-			playerError.set({ message: 'No tracks in your library yet.' });
+			playerErrorStore.set({ message: 'No tracks in your library yet.' });
 			return;
 		}
 		await playTracksInContext(
@@ -1408,7 +1431,7 @@ export async function playAlbum(
 	preloaded?: AlbumTracksData,
 ) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const data = preloaded ?? (await api.getAlbumTracks(albumId));
@@ -1443,7 +1466,7 @@ export async function playAlbum(
 		// Fully-owned or local-only album: the owned rows already are the whole
 		// album, so keep the plain local queue path.
 		if (tracks.length === 0) {
-			playerError.set({ message: 'Album has no tracks.' });
+			playerErrorStore.set({ message: 'Album has no tracks.' });
 			return;
 		}
 		await loadQueueAndPlay(sliceContextTrackIds(tracks.map((t) => t.id), startTrackId), {
@@ -1460,7 +1483,7 @@ export async function playAlbum(
 
 export async function shuffleAlbum(albumId: number, preloaded?: AlbumTracksData) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const data = preloaded ?? (await api.getAlbumTracks(albumId));
@@ -1486,7 +1509,7 @@ export async function shuffleAlbum(albumId: number, preloaded?: AlbumTracksData)
 		}
 
 		if (tracks.length === 0) {
-			playerError.set({ message: 'Album has no tracks.' });
+			playerErrorStore.set({ message: 'Album has no tracks.' });
 			return;
 		}
 		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true', intentSeq });
@@ -1538,13 +1561,13 @@ export async function toggleAlbumFavorite(
 
 export async function playArtist(artistId: number, startTrackId?: number) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getArtistTracks(artistId);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
-			playerError.set({ message: 'Artist has no tracks.' });
+			playerErrorStore.set({ message: 'Artist has no tracks.' });
 			return;
 		}
 		await loadQueueAndPlay(sliceContextTrackIds(tracks.map((t) => t.id), startTrackId), {
@@ -1561,13 +1584,13 @@ export async function playArtist(artistId: number, startTrackId?: number) {
 
 export async function shuffleArtist(artistId: number) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getArtistTracks(artistId);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
-			playerError.set({ message: 'Artist has no tracks.' });
+			playerErrorStore.set({ message: 'Artist has no tracks.' });
 			return;
 		}
 		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true', intentSeq });
@@ -1591,7 +1614,7 @@ async function startSongRadioFromLibraryTrack(
 
 export async function startSongRadio(seedTrackId: number) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	// Server-side fallback (artist.getsimilar when track-level recall is empty)
 	// can take a few seconds. Surface a loading toast so the user knows the
@@ -1629,13 +1652,13 @@ export async function shufflePlaylist(
  */
 export async function playPlaylist(playlistId: number, startTrackId?: number) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getPlaylistTracks(playlistId);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (tracks.length === 0) {
-			playerError.set({ message: 'Playlist is empty.' });
+			playerErrorStore.set({ message: 'Playlist is empty.' });
 			return;
 		}
 		await loadQueueAndPlay(sliceContextTrackIds(tracks.map((t) => t.id), startTrackId), {
@@ -1659,13 +1682,13 @@ export async function startPlaylistRadio(tracks: { id: number; play_count?: numb
 
 export async function playTidalPlaylist(tidalUuid: string) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getTidalPlaylistTracks(tidalUuid);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!tracks.length) {
-			playerError.set({ message: 'No playable tracks in this playlist.' });
+			playerErrorStore.set({ message: 'No playable tracks in this playlist.' });
 			return;
 		}
 		await startTidalQueue(tracks, { shuffleMode: get(shuffleMode), intentSeq });
@@ -1681,13 +1704,13 @@ export async function playTidalPlaylist(tidalUuid: string) {
 
 export async function startArtistRadio(artistId: number, _seedTrackId?: number) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const queue = await api.startRadioArtist({ seed_artist_id: artistId, limit: 60 });
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!queue.first_playable) {
-			playerError.set({ message: 'No tracks found for radio.' });
+			playerErrorStore.set({ message: 'No tracks found for radio.' });
 			return;
 		}
 		setRadioReasons(queue.tracks);
@@ -1709,13 +1732,13 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 
 export async function startAlbumRadio(albumId: number) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const queue = await api.startRadioAlbum({ seed_album_id: albumId, limit: 60 });
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!queue.first_playable) {
-			playerError.set({ message: 'No tracks found for radio.' });
+			playerErrorStore.set({ message: 'No tracks found for radio.' });
 			return;
 		}
 		setRadioReasons(queue.tracks);
@@ -1744,7 +1767,7 @@ export async function startAlbumRadio(albumId: number) {
  */
 export async function startGenreRadio(seedTrackId: number, blend: RadioBlend, label: string) {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	const loadingToastId = showToast(`Starting ${label} radio...`, 'info', 8000);
 	try {
@@ -1752,7 +1775,7 @@ export async function startGenreRadio(seedTrackId: number, blend: RadioBlend, la
 		dismissToast(loadingToastId);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		if (!queue.first_playable) {
-			playerError.set({ message: 'No radio tracks found for that seed.' });
+			playerErrorStore.set({ message: 'No radio tracks found for that seed.' });
 			return;
 		}
 		setRadioReasons(queue.tracks);
@@ -1774,7 +1797,7 @@ export async function startGenreRadio(seedTrackId: number, blend: RadioBlend, la
 }
 
 export async function playTrackNext(trackId: number) {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	// Add to queue, then move next to the currently-playing track.
 	try {
 		const before = get(playbackQueue);
@@ -1796,7 +1819,7 @@ export async function playTrackNext(trackId: number) {
 
 export async function playTidalTrackNow(track: TidalPlayable): Promise<void> {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		rememberTidalPlayable(track);
@@ -1863,11 +1886,11 @@ function setOptimisticTidalTrack(track: TidalPlayable) {
 		source: 'tidal_stream',
 		artwork_url: track.artwork_url,
 	});
-	isPlaying.set(true);
+	isPlayingStore.set(true);
 }
 
 export async function playTidalTrackNext(track: TidalPlayable): Promise<void> {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	try {
 		const result = await api.queuePlayNext(tidalQueueRequest(track));
 		setPlaybackQueue(result.queue, result.queue_revision);
@@ -1896,7 +1919,7 @@ export async function playTidalTracksNow(
 		return;
 	}
 	rememberTidalPlayables(playable);
-	playerError.set(null);
+	playerErrorStore.set(null);
 	clearRadioReasons();
 	const intentSeq = beginPlaybackIntent();
 	try {
@@ -1935,7 +1958,7 @@ export async function playTidalTracksNext(tracks: TidalPlayable[]): Promise<void
 		showToast('No playable tracks ready yet', 'info');
 		return;
 	}
-	playerError.set(null);
+	playerErrorStore.set(null);
 	try {
 		const result = await api.queuePlayNextMany(playable.map(tidalQueueRequest));
 		setPlaybackQueue(result.queue, result.queue_revision);
@@ -1947,7 +1970,7 @@ export async function playTidalTracksNext(tracks: TidalPlayable[]): Promise<void
 }
 
 export async function addTidalTrackToQueue(track: TidalPlayable): Promise<void> {
-	playerError.set(null);
+	playerErrorStore.set(null);
 	try {
 		const result = await api.queueAppend(tidalQueueRequest(track));
 		setPlaybackQueue(result.queue, result.queue_revision);
@@ -1964,7 +1987,7 @@ export async function addTidalTracksToQueue(tracks: TidalPlayable[]): Promise<vo
 		showToast('No playable tracks ready yet', 'info');
 		return;
 	}
-	playerError.set(null);
+	playerErrorStore.set(null);
 	try {
 		const result = await api.queueAppendMany(playable.map(tidalQueueRequest));
 		setPlaybackQueue(result.queue, result.queue_revision);
@@ -1977,7 +2000,7 @@ export async function addTidalTracksToQueue(tracks: TidalPlayable[]): Promise<vo
 
 export async function playTidalAlbum(tidalAlbumId: number): Promise<void> {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getTidalAlbumTracks(tidalAlbumId);
@@ -2055,7 +2078,7 @@ async function startTidalQueue(
 
 export async function playTidalMix(mixId: string): Promise<void> {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	try {
 		const { tracks } = await api.getTidalMixTracks(mixId);
@@ -2078,7 +2101,7 @@ export async function playTidalMix(mixId: string): Promise<void> {
 
 export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	if (!assertOnline()) return;
-	playerError.set(null);
+	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
 	const loadingToastId = showToast('Starting Song Radio...', 'info', 8000);
 	try {
@@ -2130,7 +2153,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 			dismissToast(loadingToastId);
 			if (!isLatestPlaybackIntent(intentSeq)) return;
 			showToast(`Radio from ${trackLabel(track)}`, 'success');
-			playerError.set(null);
+			playerErrorStore.set(null);
 			return;
 		}
 	} catch (error) {
@@ -2160,7 +2183,7 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 		dismissToast(loadingToastId);
 		if (!applied) return;
 		showToast(`Radio from ${trackLabel(track)}`, 'success');
-		playerError.set(null);
+		playerErrorStore.set(null);
 	} catch (error) {
 		dismissToast(loadingToastId);
 		if (!isLatestPlaybackIntent(intentSeq)) return;
@@ -2170,4 +2193,39 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 	} finally {
 		finishPlaybackIntent(intentSeq);
 	}
+}
+
+/** Report a playback-related failure to the user (shown by the player bar). */
+export function reportPlayerError(message: string): void {
+	playerErrorStore.set({ message });
+}
+
+export function dismissPlayerError(): void {
+	playerErrorStore.set(null);
+}
+
+/**
+ * Test-only: put the player stores into a known state. Production code changes
+ * player state only through the commands above and server snapshots.
+ */
+export function setPlayerStateForTests(state: {
+	currentTrack?: Track | null;
+	currentQueueItemId?: number | null;
+	isPlaying?: boolean;
+	playbackQueue?: QueueItem[];
+	playerError?: { message: string } | null;
+	lastSuccessfulCallAt?: number;
+	playbackSeekRevision?: number;
+	position?: number;
+	buffered?: number;
+}): void {
+	if ('currentTrack' in state) currentTrackStore.set(state.currentTrack ?? null);
+	if ('currentQueueItemId' in state) currentQueueItemIdStore.set(state.currentQueueItemId ?? null);
+	if ('isPlaying' in state) isPlayingStore.set(state.isPlaying ?? false);
+	if ('playbackQueue' in state) playbackQueueStore.set(state.playbackQueue ?? []);
+	if ('playerError' in state) playerErrorStore.set(state.playerError ?? null);
+	if (state.lastSuccessfulCallAt != null) lastSuccessfulCallAtStore.set(state.lastSuccessfulCallAt);
+	if (state.playbackSeekRevision != null) playbackSeekRevisionStore.set(state.playbackSeekRevision);
+	if (state.position != null) positionStore.set(state.position);
+	if (state.buffered != null) bufferedStore.set(state.buffered);
 }

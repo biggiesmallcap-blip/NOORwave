@@ -23,7 +23,7 @@
 	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import Segmented from '$lib/components/ui/Segmented.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
-	import { playTidalTrackNow, playTrackNow, playerError } from '$lib/stores/player';
+	import { playTidalTrackNow, playTrackNow, reportPlayerError } from '$lib/stores/player';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
@@ -344,7 +344,7 @@
 		}
 		const playable = await playableFor(item);
 		if (!playable) {
-			playerError.set({ message: "Couldn't find that chart entry on TIDAL." });
+			reportPlayerError("Couldn't find that chart entry on TIDAL.");
 			return;
 		}
 		await playTidalTrackNow(playable);

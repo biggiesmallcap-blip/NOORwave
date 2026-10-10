@@ -5,7 +5,7 @@ import {
 	playArtist,
 	playTidalAlbum,
 	playTidalTracksNow,
-	playerError,
+	reportPlayerError,
 } from '$lib/stores/player';
 import {
 	findAlbumMatch,
@@ -65,7 +65,7 @@ export async function playRecommendationAlbum(item: ProviderRecommendationItem):
 	const resolved = await resolveRecommendationAlbum(item);
 	if (resolved?.localId) return playAlbum(resolved.localId);
 	if (resolved?.tidalId) return playTidalAlbum(resolved.tidalId);
-	playerError.set({ message: "Couldn't find that album on Tidal." });
+	reportPlayerError("Couldn't find that album on Tidal.");
 }
 
 export async function playRecommendationArtist(item: ProviderRecommendationItem): Promise<void> {
@@ -73,7 +73,7 @@ export async function playRecommendationArtist(item: ProviderRecommendationItem)
 	if (resolved?.localId) return playArtist(resolved.localId);
 	const tidalId = resolved?.tidalId ?? null;
 	if (!tidalId) {
-		playerError.set({ message: "Couldn't find that artist on Tidal." });
+		reportPlayerError("Couldn't find that artist on Tidal.");
 		return;
 	}
 	try {
@@ -83,11 +83,11 @@ export async function playRecommendationArtist(item: ProviderRecommendationItem)
 			artist_name: track.artist_name ?? item.artist_name ?? item.title,
 		}));
 		if (!tracks.length) {
-			playerError.set({ message: 'No playable tracks for that artist yet.' });
+			reportPlayerError('No playable tracks for that artist yet.');
 			return;
 		}
 		await playTidalTracksNow(tracks, item.title);
 	} catch {
-		playerError.set({ message: "Couldn't load that artist's top tracks." });
+		reportPlayerError("Couldn't load that artist's top tracks.");
 	}
 }

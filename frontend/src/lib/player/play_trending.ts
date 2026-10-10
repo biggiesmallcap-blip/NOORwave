@@ -1,6 +1,6 @@
 import { api, type TidalPlayable } from '$lib/api/client';
 import { tidalSearchTrackToPlayable } from '$lib/utils/track';
-import { playTidalTrackNow, playTidalTracksNow, playerError } from '$lib/stores/player';
+import { playTidalTrackNow, playTidalTracksNow, reportPlayerError } from '$lib/stores/player';
 
 /// Play a TidalPlayable from a chart entry. Last.fm-only entries arrive with
 /// `tidal_id === 0` (the backend doesn't pre-search Tidal for them); we resolve
@@ -31,7 +31,7 @@ export async function resolveChartTidalTrack(tp: TidalPlayable): Promise<TidalPl
 export async function playChartTidalTrack(tp: TidalPlayable): Promise<void> {
 	const playable = await resolveChartTidalTrack(tp);
 	if (!playable) {
-		playerError.set({ message: "Couldn't find that track on Tidal." });
+		reportPlayerError("Couldn't find that track on Tidal.");
 		return;
 	}
 	return playTidalTrackNow(playable);
@@ -44,7 +44,7 @@ export async function playChartTidalTracks(tracks: TidalPlayable[], label = 'rec
 		if (resolved) playable.push(resolved);
 	}
 	if (!playable.length) {
-		playerError.set({ message: 'No playable tracks ready yet.' });
+		reportPlayerError('No playable tracks ready yet.');
 		return;
 	}
 	return playTidalTracksNow(playable, label);

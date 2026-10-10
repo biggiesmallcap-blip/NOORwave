@@ -23,6 +23,7 @@
 		repeatMode,
 		playbackQueue,
 		playerError,
+		dismissPlayerError,
 		refreshPlaybackState,
 		playTrackNow,
 		playQueueItemNow,
@@ -334,7 +335,7 @@
 			_errorDismissTimer = null;
 		}
 		if (err) {
-			_errorDismissTimer = setTimeout(() => playerError.set(null), 6000);
+			_errorDismissTimer = setTimeout(() => dismissPlayerError(), 6000);
 		}
 	});
 	let nowPlayingOpen = $state(false);
@@ -1857,7 +1858,7 @@
 			onVolumePreview={(percent) => { displayVolume = percent; }}
 			onVolumeChange={(nextVolume) => void setPlayerVolume(nextVolume)}
 			onRetryPlayerError={async (retry) => { await retry(); }}
-			onDismissPlayerError={() => playerError.set(null)}
+			onDismissPlayerError={() => dismissPlayerError()}
 		/>
 		{#if effectivePlayerLayout === 'bottom' && queueDrawerOpen}
 			<button class="queue-drawer-backdrop" type="button" tabindex="-1" aria-label="Close queue" onclick={() => { queueDrawerOpen = false; }}></button>
