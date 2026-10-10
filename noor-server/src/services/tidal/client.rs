@@ -135,6 +135,58 @@ mod request_limiter_tests {
     }
 }
 
+/// A non-success answer from the TIDAL API. `Display` keeps the legacy
+/// `TIDAL API error {status}: {body}` text so log lines and any remaining
+/// string checks are unchanged.
+#[derive(Debug)]
+pub struct TidalApiError {
+    pub status: u16,
+    pub sub_status: Option<i64>,
+    pub body: String,
+}
+
+impl TidalApiError {
+    pub fn from_response_parts(status: reqwest::StatusCode, body: String) -> Self {
+        let sub_status = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("subStatus").and_then(serde_json::Value::as_i64));
+        Self {
+            status: status.as_u16(),
+            sub_status,
+            body,
+        }
+    }
+
+    /// CONTEXT.md "Auth failure": HTTP 401 other than subStatus 4005 (asset
+    /// not ready, a playability answer), or subStatus 6001 on any status.
+    pub fn is_auth_failure(&self) -> bool {
+        if self.sub_status == Some(6001) {
+            return true;
+        }
+        self.status == 401 && self.sub_status != Some(4005)
+    }
+}
+
+impl std::fmt::Display for TidalApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match reqwest::StatusCode::from_u16(self.status) {
+            Ok(status) => write!(f, "TIDAL API error {}: {}", status, self.body),
+            Err(_) => write!(f, "TIDAL API error {}: {}", self.status, self.body),
+        }
+    }
+}
+
+impl std::error::Error for TidalApiError {}
+
+/// True when `err` (or anything it wraps) is a TIDAL auth failure.
+pub fn is_auth_failure(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<TidalApiError>()
+            .is_some_and(TidalApiError::is_auth_failure)
+    })
+}
+
 #[derive(Clone)]
 pub struct TidalClient {
     http: reqwest::Client,
@@ -431,7 +483,7 @@ impl TidalClient {
             let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
             let body = resp.text().await.unwrap_or_default();
             crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-            anyhow::bail!("TIDAL API error {}: {}", status, body);
+            return Err(TidalApiError::from_response_parts(status, body).into());
         }
 
         let body = resp.text().await.context("Failed to read response body")?;
@@ -2458,5 +2510,40 @@ mod tests {
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, 1);
+    }
+
+    #[test]
+    fn api_error_classifies_auth_failures_from_status_and_substatus() {
+        let plain_401 = TidalApiError::from_response_parts(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"status":401,"subStatus":11003,"userMessage":"expired"}"#.to_string(),
+        );
+        let asset_not_ready = TidalApiError::from_response_parts(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#
+                .to_string(),
+        );
+        let invalid_session = TidalApiError::from_response_parts(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"status":400,"subStatus":6001,"userMessage":"invalid session"}"#.to_string(),
+        );
+        let not_found =
+            TidalApiError::from_response_parts(reqwest::StatusCode::NOT_FOUND, "not found".into());
+        assert!(plain_401.is_auth_failure());
+        assert!(!asset_not_ready.is_auth_failure());
+        assert!(invalid_session.is_auth_failure());
+        assert!(!not_found.is_auth_failure());
+    }
+
+    #[test]
+    fn api_error_display_matches_legacy_text_and_survives_context() {
+        let err =
+            TidalApiError::from_response_parts(reqwest::StatusCode::UNAUTHORIZED, "{}".into());
+        assert_eq!(err.to_string(), "TIDAL API error 401 Unauthorized: {}");
+        let wrapped = anyhow::Error::new(err).context("loading artist");
+        assert!(is_auth_failure(&wrapped));
+        assert!(!is_auth_failure(&anyhow::anyhow!(
+            "TIDAL API error 401 Unauthorized"
+        )));
     }
 }
