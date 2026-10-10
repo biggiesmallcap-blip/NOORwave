@@ -75,7 +75,6 @@ describe('library home hero contract', () => {
 		expect(muralModel).toContain("caption: 'from your listening history'");
 		expect(muralModel).toContain("label: 'Random tracks'");
 		expect(muralModel).toContain("label: 'Random albums'");
-		expect(muralModel).toContain('export const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000');
 		expect(muralModel).toContain('export const SUGGESTION_ARTIST_CAP = 2');
 		// The artist cap shapes the head of the mural; it must top up from what
 		// it skipped rather than hand back a short panel (5 of 12 picks).
@@ -86,14 +85,17 @@ describe('library home hero contract', () => {
 		expect(muralModel).toContain('sources.suggestionAlbums.slice(0, HOME_MURAL_ITEM_LIMIT).map(albumToMuralItem)');
 		expect(muralModel).not.toContain('sameArtistExpansion');
 
-		// Both random murals come from one server call fired on mount, and the
-		// suggestions are seedless, so neither waits for the library store.
-		expect(murals).toContain('async function loadRandomPanelCandidates(requestKey: string)');
-		expect(murals).toContain('cachedApi.getHomeShufflePicks(HOME_MURAL_ITEM_LIMIT)');
-		expect(murals).toContain('async function loadSuggestionCandidates(requestKey: string)');
-		expect(murals).toContain('cachedApi.getHomeSuggestions([], 50)');
-		expect(murals).toContain('const requestKey = String(homePanelRefreshBucket())');
-		expect(murals).toContain('const muralCandidateCache = {');
+		// Both murals subscribe to reactive cache queries fired on mount, so the
+		// background refresh replaces a stale (possibly empty boot-time) sample
+		// instead of being dropped, and neither waits for the library store.
+		expect(murals).toContain('cachedApi.homeShufflePicksQuery(HOME_MURAL_ITEM_LIMIT)');
+		expect(murals).toContain('cachedApi.homeSuggestionsQuery(50)');
+		expect(murals).toContain('shuffleQuery.subscribe((state) => {');
+		expect(murals).toContain('suggestionsQuery.subscribe((state) => {');
+		expect(murals).toContain('MURAL_RETRY_DELAYS_MS');
+		expect(murals).not.toContain('cachedApi.getHomeShufflePicks');
+		expect(murals).not.toContain('cachedApi.getHomeSuggestions');
+		expect(murals).not.toContain('homePanelRefreshBucket');
 		expect(murals).not.toContain('listenHistorySeeds()');
 		expect(murals).not.toContain('stableRandomOffsets');
 
