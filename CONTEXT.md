@@ -50,6 +50,15 @@ A monotonically increasing counter bumped by every user transport command. Work 
 **Queue edit**:
 Adding, appending, play-next, moving, removing or clearing queue rows. Not part of the **Transport**; a queue edit that changes the current item asks the **Transport** to act.
 
+### Track identity in the frontend
+
+**TidalPlayable**:
+The one normalized shape for a track that TIDAL actions can address (play, queue, radio, menus): TIDAL id plus display metadata plus optional library identity (`local_id`, `is_in_library`). Every source shape (library `Track`, search hit, discography row, home item, queue item) converts through the mappers in `frontend/src/lib/utils/track.ts`; never hand-copy fields into one.
+_Avoid_: building `{ tidal_id, title, ... }` object literals at call sites (they drop artist/album ids).
+
+**PlayableTrack**:
+A different question from **TidalPlayable**: can this be played right now, and what should the play control say (library, TIDAL, pending Last.fm row, unavailable). Lives in `frontend/src/lib/player/playable.ts`. Not a competing identity model; do not merge the two.
+
 ## Example dialogue
 
 **Dev:** The Otis Redding page only shows Top tracks. Is `available` false?
