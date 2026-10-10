@@ -109,6 +109,7 @@ import type {
 	DatabaseStats,
 	HomeSuggestionsResponse,
 	HomeShufflePicksResponse,
+	LibraryTopArtist,
 	LastfmAuthStartResponse,
 	LastfmAuthCompleteResponse,
 	HomePicksResponse,
@@ -2046,6 +2047,12 @@ export const api = {
 	// start until the library store had paged in.
 	getHomeShufflePicks(limit = 12) {
 		return fetchApi<HomeShufflePicksResponse>('/api/home/shuffle-picks', { limit: String(limit) });
+	},
+
+	// Library hero: artists ranked by plays summed per artist server-side, so
+	// plays spread over many tracks count in full.
+	getLibraryTopArtists(limit = 20) {
+		return fetchApi<{ artists: LibraryTopArtist[] }>('/api/library/top-artists', { limit: String(limit) });
 	},
 
 	// ─── TIDAL: Your Mixes ────────────────────────────────────────────────

@@ -3554,6 +3554,53 @@ fn library_search_empty_query_with_filters_returns_filtered_set() {
 }
 
 #[test]
+fn library_top_artists_sum_plays_across_every_track() {
+    let conn = Connection::open_in_memory().expect("in-memory db");
+    schema::run_migrations(&conn).expect("migrations");
+    conn.execute_batch(
+        "INSERT INTO artists (id, name) VALUES (5101, 'Spread'), (5102, 'One Hit'), (5103, 'Unplayed');
+         INSERT INTO albums (id, title, artist_id, source, artwork_url) VALUES
+             (5101, 'S1', 5101, 'tidal', 'https://art/s1'),
+             (5102, 'S2', 5101, 'tidal', NULL),
+             (5103, 'H', 5102, 'tidal', 'https://art/h'),
+             (5104, 'U', 5103, 'tidal', NULL);",
+    )
+    .expect("seed");
+    let insert = |id: i64, artist: i64, album: i64, plays: i64, favorite: i64| {
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, tidal_id,
+                 best_quality, best_source, fidelity_score, is_favorite, source, play_count)
+             VALUES (?1, 'T', ?2, ?3, 200000, ?1, 'LOSSLESS', 'tidal', 5, ?4, 'tidal', ?5)",
+            params![id, artist, album, favorite, plays],
+        )
+        .expect("track");
+    };
+    // 'Spread': 12 tracks x 3 plays = 36, none individually near the top.
+    for i in 0..12 {
+        insert(5110 + i, 5101, if i < 6 { 5101 } else { 5102 }, 3, 1);
+    }
+    // 'One Hit': one track with 30 plays, plus an unliked track that is
+    // outside the library and must not count.
+    insert(5130, 5102, 5103, 30, 1);
+    insert(5131, 5102, 5103, 100, 0);
+    insert(5140, 5103, 5104, 0, 1);
+
+    let top = get_library_top_artists(&conn, 20).expect("top artists");
+    let ids: Vec<i64> = top.iter().map(|a| a.id).collect();
+    assert_eq!(
+        ids,
+        vec![5101, 5102],
+        "spread plays outrank one hit; unplayed is dropped"
+    );
+    assert_eq!(top[0].play_count, 36);
+    assert_eq!(top[0].track_count, 12);
+    assert_eq!(top[0].album_count, 2);
+    assert_eq!(top[0].fallback_art_url.as_deref(), Some("https://art/s1"));
+    assert_eq!(top[1].play_count, 30);
+    assert_eq!(top[1].track_count, 1);
+}
+
+#[test]
 fn shuffled_audio_search_covers_full_matching_set() {
     let conn = Connection::open_in_memory().expect("in-memory db");
     schema::run_migrations(&conn).expect("migrations");

@@ -24,6 +24,7 @@ import {
 	type HomeRecommendationsResponse,
 	type HomeShufflePicksResponse,
 	type HomeSuggestionsResponse,
+	type LibraryTopArtist,
 	type LastfmStatus,
 	type ListenBrainzStatus,
 	type MusicBrainzStatus,
@@ -113,6 +114,14 @@ function chartStaleMs(data: unknown): number {
 	const rows = payload.tracks ?? payload.entries ?? payload.rows ?? [];
 	return rows.length > 0 ? 15 * MINUTE : 30 * SECOND;
 }
+// Library mural payloads: an empty sample is usually the server still warming
+// up at boot, so it must not pin empty murals for the whole window.
+function homeMuralStaleMs(fullMs: number): (data: unknown) => number {
+	return (data) => {
+		const payload = (data ?? {}) as { tracks?: unknown[] | null; albums?: unknown[] | null };
+		return (payload.tracks?.length ?? 0) + (payload.albums?.length ?? 0) > 0 ? fullMs : 15 * SECOND;
+	};
+}
 const chartOptions: QueryOptions = {
 	staleMs: 15 * MINUTE,
 	staleMsForData: chartStaleMs,
@@ -179,6 +188,7 @@ export const cacheKeys = {
 	homeRecommendations: () => ['api', 'getHomeRecommendations'] as const,
 	homeSuggestions: (seedKey: string) => ['api', 'getHomeSuggestions', { seedKey }] as const,
 	homeShufflePicks: (limit: number) => ['api', 'getHomeShufflePicks', { limit }] as const,
+	libraryTopArtists: (limit: number) => ['api', 'getLibraryTopArtists', { limit }] as const,
 	tidalMixes: () => ['api', 'getTidalMixes'] as const,
 	tidalRadioStations: () => ['api', 'getTidalRadioStations'] as const,
 	tidalHomeModules: () => ['api', 'getTidalHomeModules'] as const,
@@ -498,26 +508,35 @@ export const cachedApi = {
 			staticOptions,
 		);
 	},
-	// In-memory only (no persist): suggestion payloads vary per seed set and
-	// carry full Track rows, so persisting every rotation would bloat the
-	// localStorage query cache (the boot-crash quota risk).
-	getHomeSuggestions(seedTrackIds: number[] = [], limit?: number) {
-		const seedKey = [...seedTrackIds].sort((a, b) => a - b).join('-');
-		return fetchCached<HomeSuggestionsResponse>(
-			cacheKeys.homeSuggestions(seedKey),
-			() => api.getHomeSuggestions(seedTrackIds, limit),
-			{ staleMs: 30 * MINUTE, returnStale: true },
+	// Reactive queries for the Library murals. Mounted components subscribe, so
+	// the stale-first paint is replaced when the background refresh lands; the
+	// old one-shot fetchQuery(returnStale) handed back the stale payload and
+	// dropped the fresh one, leaving a boot-time empty sample on screen until a
+	// hard reload. Empty payloads go stale fast for the same reason.
+	// In-memory only (no persist): suggestion payloads carry full Track rows, so
+	// persisting every rotation would bloat the localStorage query cache (the
+	// boot-crash quota risk).
+	homeSuggestionsQuery(limit?: number) {
+		return query<HomeSuggestionsResponse>(
+			cacheKeys.homeSuggestions(''),
+			() => api.getHomeSuggestions([], limit),
+			{ staleMs: 30 * MINUTE, staleMsForData: homeMuralStaleMs(30 * MINUTE) },
 		);
 	},
-	// Stale-first like the suggestion murals: the last sample paints immediately
-	// on mount and a fresh one swaps in behind it, so the Random panels never
-	// start empty. The server holds each sample for five minutes, so refetching
-	// inside that window repaints the same picks rather than reshuffling.
-	getHomeShufflePicks(limit = 12) {
-		return fetchCached<HomeShufflePicksResponse>(
+	// The server holds each sample for five minutes, so refetching inside that
+	// window repaints the same picks rather than reshuffling.
+	homeShufflePicksQuery(limit = 12) {
+		return query<HomeShufflePicksResponse>(
 			cacheKeys.homeShufflePicks(limit),
 			() => api.getHomeShufflePicks(limit),
-			{ staleMs: 5 * MINUTE, returnStale: true },
+			{ staleMs: 5 * MINUTE, staleMsForData: homeMuralStaleMs(5 * MINUTE) },
+		);
+	},
+	getLibraryTopArtists(limit = 20) {
+		return fetchCached<{ artists: LibraryTopArtist[] }>(
+			cacheKeys.libraryTopArtists(limit),
+			() => api.getLibraryTopArtists(limit),
+			mediumOptions,
 		);
 	},
 	getTidalMixes() {
@@ -735,6 +754,7 @@ export function invalidateLibraryCaches(options: { refetch?: boolean } = {}): vo
 	dataCache.invalidatePrefix(['api', 'getHistory'], options);
 	dataCache.invalidatePrefix(['api', 'getAlbums'], options);
 	dataCache.invalidatePrefix(['api', 'getArtists'], options);
+	dataCache.invalidatePrefix(['api', 'getLibraryTopArtists'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistTracks'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistDiscography'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistDiscographyPreview'], options);

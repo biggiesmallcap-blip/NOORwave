@@ -1,22 +1,6 @@
-<script lang="ts" module>
-	import type { Track } from '$lib/api/client';
-	import type { HomeAlbumCard } from './library_murals';
-
-	// The last candidates, kept across visits so returning to Library paints the
-	// murals at once instead of popping them in after the fetch.
-	const muralCandidateCache = {
-		randomTracks: [] as Track[],
-		randomAlbums: [] as HomeAlbumCard[],
-		randomRequestKey: '',
-		suggestionTracks: [] as Track[],
-		suggestionAlbums: [] as HomeAlbumCard[],
-		suggestionRequestKey: '',
-	};
-</script>
-
 <script lang="ts">
 	import { get } from 'svelte/store';
-	import { api } from '$lib/api/client';
+	import { api, type HomeShufflePicksResponse, type HomeSuggestionsResponse, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { lazyTidalArt, composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
@@ -27,15 +11,16 @@
 		HOME_MURAL_ITEM_LIMIT,
 		buildMuralPanels,
 		fallbackLetters,
-		homePanelRefreshBucket,
 		muralItemKey,
 		muralItemLazyQuery,
 		panelQueueTrackIds,
 		toAlbumCard,
 		uniqueById,
+		type HomeAlbumCard,
 		type HomeMuralItem,
 		type HomeMuralPanel,
 	} from './library_murals';
+	import { MURAL_REFRESH_DELAYS_MS, watchMuralQuery } from './mural_query_watch';
 
 	// The Library landing's four suggestion murals: listen-history suggestions
 	// and library shuffle picks, each painted as a collage of the picks. A tile
@@ -52,16 +37,35 @@
 		riseIndex?: number;
 	} = $props();
 
-	let randomTracks = $state<Track[]>(muralCandidateCache.randomTracks);
-	let randomAlbums = $state<HomeAlbumCard[]>(muralCandidateCache.randomAlbums);
-	let randomRequestKey = $state(muralCandidateCache.randomRequestKey);
-	// Server-ranked hidden-gem picks. The server owns seed selection, recency
-	// exclusion and ranking; there is deliberately no client-side fallback. An
-	// empty panel is a correct outcome; a panel full of what was just played is
-	// not.
-	let suggestionTracks = $state<Track[]>(muralCandidateCache.suggestionTracks);
-	let suggestionAlbums = $state<HomeAlbumCard[]>(muralCandidateCache.suggestionAlbums);
-	let suggestionRequestKey = $state(muralCandidateCache.suggestionRequestKey);
+	// Both murals subscribe to reactive cache queries: the last payload paints at
+	// once, and the background refresh replaces it when it lands. Neither waits
+	// on the library store. The server owns seed selection, recency exclusion and
+	// ranking for the suggestions; there is deliberately no client-side fallback.
+	// An empty panel is a correct outcome; a panel full of what was just played
+	// is not.
+	const shuffleQuery = cachedApi.homeShufflePicksQuery(HOME_MURAL_ITEM_LIMIT);
+	const suggestionsQuery = cachedApi.homeSuggestionsQuery(50);
+
+	function shuffleSources(data: HomeShufflePicksResponse | undefined) {
+		return {
+			tracks: uniqueById(data?.tracks ?? []),
+			albums: uniqueById(data?.albums ?? []).map(toAlbumCard),
+		};
+	}
+
+	function suggestionSources(data: HomeSuggestionsResponse | undefined) {
+		return {
+			tracks: data?.tracks ?? [],
+			albums: (data?.albums ?? []).map(toAlbumCard),
+		};
+	}
+
+	const initialShuffle = shuffleSources(shuffleQuery.getSnapshot().data);
+	const initialSuggestions = suggestionSources(suggestionsQuery.getSnapshot().data);
+	let randomTracks = $state<Track[]>(initialShuffle.tracks);
+	let randomAlbums = $state<HomeAlbumCard[]>(initialShuffle.albums);
+	let suggestionTracks = $state<Track[]>(initialSuggestions.tracks);
+	let suggestionAlbums = $state<HomeAlbumCard[]>(initialSuggestions.albums);
 
 	// Per-tile lazy artwork, keyed by `muralItemKey` so tracks and albums with
 	// the same id never collide.
@@ -69,52 +73,34 @@
 
 	let panels = $derived(buildMuralPanels({ suggestionTracks, suggestionAlbums, randomTracks, randomAlbums }));
 
-	// Both random murals come from one server call keyed to a five-minute bucket,
-	// so they stay put across remounts and start in parallel with the library load.
-	async function loadRandomPanelCandidates(requestKey: string) {
-		const result = await cachedApi.getHomeShufflePicks(HOME_MURAL_ITEM_LIMIT).catch((error) => {
-			console.error('Failed to load library shuffle picks:', error);
-			return { tracks: [] as Track[], albums: [] };
-		});
-		if (randomRequestKey !== requestKey) return;
-		randomTracks = uniqueById(result.tracks ?? []);
-		randomAlbums = uniqueById(result.albums ?? []).map(toAlbumCard);
-		muralCandidateCache.randomTracks = randomTracks;
-		muralCandidateCache.randomAlbums = randomAlbums;
-		muralCandidateCache.randomRequestKey = requestKey;
-	}
-
-	// Seedless by design: deriving seeds client-side made the request key churn
-	// as the library paged in during boot, refiring the fetch with a new server
-	// cache key each time. The server seeds itself from listen history.
-	async function loadSuggestionCandidates(requestKey: string) {
-		const result = await cachedApi.getHomeSuggestions([], 50).catch((error) => {
-			console.error('Failed to load home suggestions:', error);
-			return { tracks: [] as Track[], albums: [] };
-		});
-		if (suggestionRequestKey !== requestKey) return;
-		suggestionTracks = result.tracks ?? [];
-		suggestionAlbums = (result.albums ?? []).map(toAlbumCard);
-		muralCandidateCache.suggestionTracks = suggestionTracks;
-		muralCandidateCache.suggestionAlbums = suggestionAlbums;
-		muralCandidateCache.suggestionRequestKey = requestKey;
-	}
-
-	// Each fires once per refresh bucket, immediately on mount. Neither depends on
-	// the library store, which is what used to delay these panels behind the rest
-	// of the page. On failure the last-good candidates stay.
+	// Empty or failed samples keep refreshing on a bounded backoff while the page
+	// stays open; the last-good payload stays on screen meanwhile.
 	$effect(() => {
-		const requestKey = String(homePanelRefreshBucket());
-		if (randomRequestKey === requestKey) return;
-		randomRequestKey = requestKey;
-		void loadRandomPanelCandidates(requestKey);
-	});
-
-	$effect(() => {
-		const requestKey = String(homePanelRefreshBucket());
-		if (suggestionRequestKey === requestKey) return;
-		suggestionRequestKey = requestKey;
-		void loadSuggestionCandidates(requestKey);
+		const stops = [
+			watchMuralQuery(shuffleQuery, {
+				isEmpty: (data) => (data.tracks?.length ?? 0) + (data.albums?.length ?? 0) === 0,
+				onData: (data) => {
+					const next = shuffleSources(data);
+					randomTracks = next.tracks;
+					randomAlbums = next.albums;
+				},
+				onError: (error) => console.error('Failed to load library shuffle picks:', error),
+				delaysMs: MURAL_REFRESH_DELAYS_MS,
+			}),
+			watchMuralQuery(suggestionsQuery, {
+				isEmpty: (data) => (data.tracks?.length ?? 0) + (data.albums?.length ?? 0) === 0,
+				onData: (data) => {
+					const next = suggestionSources(data);
+					suggestionTracks = next.tracks;
+					suggestionAlbums = next.albums;
+				},
+				onError: (error) => console.error('Failed to load home suggestions:', error),
+				delaysMs: MURAL_REFRESH_DELAYS_MS,
+			}),
+		];
+		return () => {
+			for (const stop of stops) stop();
+		};
 	});
 
 	// Baked art, then resolved lazy art, then previously cached art (peek), so a

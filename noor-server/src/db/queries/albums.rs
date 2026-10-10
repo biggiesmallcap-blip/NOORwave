@@ -143,6 +143,74 @@ pub fn get_shuffled_albums(
     Ok(albums)
 }
 
+/// One artist on the Library hero: play totals across every library track by
+/// that artist, not just the ones that make an individual-track cutoff.
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryTopArtist {
+    pub id: i64,
+    pub name: String,
+    pub photo_url: Option<String>,
+    /// Artwork of the artist's most played track that has any.
+    pub fallback_art_url: Option<String>,
+    pub play_count: i64,
+    pub track_count: i64,
+    pub album_count: i64,
+}
+
+/// Library artists ranked by total plays, summed per artist before the cut.
+/// Ranking the most played individual tracks first undercounts an artist whose
+/// plays are spread over many tracks, and can leave them off the hero entirely.
+/// Same library scope as the Library track list (favorites plus library tracks
+/// on favorited albums, minus hidden TIDAL content).
+pub fn get_library_top_artists(conn: &Connection, limit: i64) -> Result<Vec<LibraryTopArtist>> {
+    let mut conditions = vec!["t.artist_id IS NOT NULL".to_string()];
+    if let Some(predicate) = crate::db::tidal_content::browse_predicate(conn)? {
+        conditions.push(predicate.to_string());
+    }
+    if let Some(pred) = favorite_predicate(true, false) {
+        conditions.push(pred.to_string());
+    }
+    let where_clause = conditions.join(" AND ");
+    let sql = format!(
+        "WITH lib AS (
+             SELECT t.artist_id, t.album_id, t.play_count, al.artwork_url,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY t.artist_id
+                        ORDER BY al.artwork_url IS NULL, t.play_count DESC, t.id
+                    ) AS art_rank
+             FROM tracks t
+             LEFT JOIN albums al ON t.album_id = al.id
+             WHERE {where_clause}
+         )
+         SELECT lib.artist_id, a.name, a.photo_url,
+                MAX(CASE WHEN lib.art_rank = 1 THEN lib.artwork_url END),
+                SUM(lib.play_count) AS plays,
+                COUNT(*),
+                COUNT(DISTINCT lib.album_id)
+         FROM lib
+         JOIN artists a ON a.id = lib.artist_id
+         GROUP BY lib.artist_id
+         HAVING plays > 0
+         ORDER BY plays DESC, a.name ASC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let artists = stmt
+        .query_map(params![limit], |row| {
+            Ok(LibraryTopArtist {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                photo_url: row.get(2)?,
+                fallback_art_url: row.get(3)?,
+                play_count: row.get(4)?,
+                track_count: row.get(5)?,
+                album_count: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(artists)
+}
+
 pub fn get_album_count(conn: &Connection, favorite_only: bool, decade: Option<i64>) -> Result<i64> {
     // Count uses the bare `albums` table (no alias), so build the clause without one.
     let filter = album_filter_clause("", favorite_only, decade);

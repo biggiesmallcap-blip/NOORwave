@@ -2,11 +2,9 @@ import { describe, expect, test } from 'vitest';
 import type { Track } from '$lib/api/client';
 import {
 	HOME_MURAL_ITEM_LIMIT,
-	HOME_PANEL_CACHE_REFRESH_MS,
 	buildMuralPanels,
 	capPerArtist,
 	fallbackLetters,
-	homePanelRefreshBucket,
 	muralItemKey,
 	muralItemLazyQuery,
 	panelQueueTrackIds,
@@ -107,11 +105,5 @@ describe('helpers', () => {
 		expect(fallbackLetters('Random albums')).toBe('RA');
 		expect(fallbackLetters('')).toBe('?');
 		expect(uniqueById([{ id: 1 }, { id: 1 }, { id: 2 }]).map((x) => x.id)).toEqual([1, 2]);
-	});
-
-	test('refresh bucket changes every five minutes', () => {
-		expect(homePanelRefreshBucket(0)).toBe(0);
-		expect(homePanelRefreshBucket(HOME_PANEL_CACHE_REFRESH_MS - 1)).toBe(0);
-		expect(homePanelRefreshBucket(HOME_PANEL_CACHE_REFRESH_MS)).toBe(1);
 	});
 });

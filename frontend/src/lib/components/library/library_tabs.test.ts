@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { restoreLibraryTab, LIBRARY_TABS, tabCountLabel, viewCountLabel } from './library_tabs';
+import { cachedTabCounts, rememberTabCounts, restoreLibraryTab, LIBRARY_TABS, tabCountLabel, viewCountLabel } from './library_tabs';
 
 describe('library tabs', () => {
 	test('Liked is no longer a tab; Tracks is called Songs', () => {
@@ -26,5 +26,13 @@ describe('counts', () => {
 		expect(viewCountLabel('tracks', 4538, false)).toBe('4,538 library songs');
 		expect(viewCountLabel('albums', 1, false)).toBe('1 album');
 		expect(viewCountLabel('all', 10, false)).toBeNull();
+	});
+
+	test('tab counts are remembered per Songs scope so the pills paint at full width', () => {
+		expect(cachedTabCounts(true)).toEqual({ tracks: null, albums: null });
+		rememberTabCounts(true, { tracks: 4179, albums: 2400 });
+		rememberTabCounts(false, { tracks: 4538, albums: 2400 });
+		expect(cachedTabCounts(true)).toEqual({ tracks: 4179, albums: 2400 });
+		expect(cachedTabCounts(false)).toEqual({ tracks: 4538, albums: 2400 });
 	});
 });

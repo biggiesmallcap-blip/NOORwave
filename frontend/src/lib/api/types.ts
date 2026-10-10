@@ -1914,6 +1914,18 @@ export interface HomeShufflePicksResponse {
 	albums: Album[];
 }
 
+/// One artist on the Library hero, ranked by total plays across every library
+/// track by that artist (GET /api/library/top-artists).
+export interface LibraryTopArtist {
+	id: number;
+	name: string;
+	photo_url: string | null;
+	fallback_art_url: string | null;
+	play_count: number;
+	track_count: number;
+	album_count: number;
+}
+
 export interface LastfmAuthStartResponse {
 	status: 'awaiting' | 'error';
 	auth_url?: string;

@@ -16,7 +16,10 @@ function countOccurrences(source: string, needle: string): number {
 
 describe('library home hero contract', () => {
 	test('top_artist_hero_uses_a_full_top_20_mural', () => {
-		expect(libraryPage).toContain('played.slice(0, 20)');
+		// Ranked server-side by plays summed per artist (see
+		// get_library_top_artists), not from the shared tracks store.
+		expect(libraryPage).toContain('cachedApi.getLibraryTopArtists(20)');
+		expect(libraryPage).toContain('return topArtists.map((artist) => ({');
 		expect(libraryHero).toContain('YOUR TOP 20 ARTISTS');
 		expect(libraryHero).toContain('hero-bg-mural');
 		expect(libraryHero).toContain('function selectMuralArtist');
@@ -75,7 +78,6 @@ describe('library home hero contract', () => {
 		expect(muralModel).toContain("caption: 'from your listening history'");
 		expect(muralModel).toContain("label: 'Random tracks'");
 		expect(muralModel).toContain("label: 'Random albums'");
-		expect(muralModel).toContain('export const HOME_PANEL_CACHE_REFRESH_MS = 5 * 60 * 1000');
 		expect(muralModel).toContain('export const SUGGESTION_ARTIST_CAP = 2');
 		// The artist cap shapes the head of the mural; it must top up from what
 		// it skipped rather than hand back a short panel (5 of 12 picks).
@@ -86,14 +88,18 @@ describe('library home hero contract', () => {
 		expect(muralModel).toContain('sources.suggestionAlbums.slice(0, HOME_MURAL_ITEM_LIMIT).map(albumToMuralItem)');
 		expect(muralModel).not.toContain('sameArtistExpansion');
 
-		// Both random murals come from one server call fired on mount, and the
-		// suggestions are seedless, so neither waits for the library store.
-		expect(murals).toContain('async function loadRandomPanelCandidates(requestKey: string)');
-		expect(murals).toContain('cachedApi.getHomeShufflePicks(HOME_MURAL_ITEM_LIMIT)');
-		expect(murals).toContain('async function loadSuggestionCandidates(requestKey: string)');
-		expect(murals).toContain('cachedApi.getHomeSuggestions([], 50)');
-		expect(murals).toContain('const requestKey = String(homePanelRefreshBucket())');
-		expect(murals).toContain('const muralCandidateCache = {');
+		// Both murals subscribe to reactive cache queries fired on mount, so the
+		// background refresh replaces a stale (possibly empty boot-time) sample
+		// instead of being dropped, and neither waits for the library store.
+		expect(murals).toContain('cachedApi.homeShufflePicksQuery(HOME_MURAL_ITEM_LIMIT)');
+		expect(murals).toContain('cachedApi.homeSuggestionsQuery(50)');
+		// Empty and failed samples refresh while mounted (behavior covered in
+		// mural_query_watch.test.ts).
+		expect(murals).toContain('watchMuralQuery(shuffleQuery, {');
+		expect(murals).toContain('watchMuralQuery(suggestionsQuery, {');
+		expect(murals).not.toContain('cachedApi.getHomeShufflePicks');
+		expect(murals).not.toContain('cachedApi.getHomeSuggestions');
+		expect(murals).not.toContain('homePanelRefreshBucket');
 		expect(murals).not.toContain('listenHistorySeeds()');
 		expect(murals).not.toContain('stableRandomOffsets');
 
