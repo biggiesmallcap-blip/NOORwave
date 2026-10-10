@@ -79,7 +79,7 @@ pub use tidal_sync_routes::trigger_auto_sync;
 type TidalPlaylistTracksCache = Arc<Mutex<HashMap<String, (Instant, Vec<TidalTrack>)>>>;
 type DropPreviewArmKey = (usize, i64, i64, u64, u64);
 
-const TIDAL_PLAYLIST_TRACKS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+pub(crate) const TIDAL_PLAYLIST_TRACKS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const DJ_LOOKAHEAD_DEADLINE_SAMPLES: u64 = 48_000 * 30;
 const DROP_PREVIEW_DURATION_MS: u32 = 16_000;
 const DROP_PREVIEW_ARM_RETRY_SECS: u64 = 60 * 60;
@@ -163,7 +163,7 @@ pub(crate) async fn start_dj_lookahead_and_queue_profiles_after_pair_change(
     queue_missing_dj_profiles_after_pair_change(state, context).await;
 }
 
-fn spawn_dj_pair_preparation(
+pub(crate) fn spawn_dj_pair_preparation(
     state: SharedState,
     handle: playback_runtime::PlaybackRuntimeHandle,
     lookahead: player::DjLookaheadStart,
@@ -4302,7 +4302,9 @@ fn tidal_playback_error_response(
     }
 }
 
-async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+pub(crate) async fn pause_playback(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     let snapshot = transport_toggle::pause(&state)
         .await
         .map_err(toggle_error_status)?;
@@ -4323,7 +4325,9 @@ async fn release_exclusive_playback(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
+pub(crate) async fn resume_playback(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
     let snapshot = transport_toggle::resume(&state)
         .await
         .map_err(toggle_error_status)?;
@@ -6996,7 +7000,7 @@ async fn tidal_playlist_tracks(
     Ok(Json(json!({ "tracks": playable })))
 }
 
-fn tidal_playlist_tracks_cache_key(
+pub(crate) fn tidal_playlist_tracks_cache_key(
     country_code: &str,
     uuid: &str,
     limit: i32,
@@ -7005,7 +7009,7 @@ fn tidal_playlist_tracks_cache_key(
     format!("{country_code}:{uuid}:{limit}:{offset}")
 }
 
-fn get_cached_tidal_playlist_tracks(
+pub(crate) fn get_cached_tidal_playlist_tracks(
     cache: &TidalPlaylistTracksCache,
     key: &str,
 ) -> Option<Vec<TidalTrack>> {
@@ -7019,7 +7023,7 @@ fn get_cached_tidal_playlist_tracks(
     None
 }
 
-fn put_cached_tidal_playlist_tracks(
+pub(crate) fn put_cached_tidal_playlist_tracks(
     cache: &TidalPlaylistTracksCache,
     key: String,
     tracks: Vec<TidalTrack>,
@@ -7830,7 +7834,7 @@ fn infer_tidal_track_genres(track: &crate::services::tidal::client::TidalTrack) 
     crate::genre::builder::collect_clear_genres(candidates)
 }
 
-fn extract_genre_candidates_from_extra(
+pub(crate) fn extract_genre_candidates_from_extra(
     extra: &std::collections::HashMap<String, Value>,
 ) -> Vec<String> {
     let mut candidates = Vec::new();
