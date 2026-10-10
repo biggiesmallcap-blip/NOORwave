@@ -170,6 +170,53 @@ impl TidalSession {
         }
     }
 
+    /// A completed login: persist, replace tokens, clear the latch.
+    pub async fn login(&self, tokens: TidalTokens) -> Result<()> {
+        let _permit = self.inner.refresh_lock.lock().await;
+        if let Some(store) = &self.inner.store {
+            store.save(&tokens)?;
+        }
+        self.set_tokens_inner(Some(tokens));
+        self.inner.needs_reconnect.store(false, Ordering::SeqCst);
+        self.emit_changed();
+        Ok(())
+    }
+
+    /// Forget the session in memory and on disk.
+    pub async fn logout(&self) -> Result<()> {
+        let _permit = self.inner.refresh_lock.lock().await;
+        self.set_tokens_inner(None);
+        self.inner.needs_reconnect.store(false, Ordering::SeqCst);
+        let cleared = match &self.inner.store {
+            Some(store) => store.clear(),
+            None => Ok(()),
+        };
+        self.emit_changed();
+        cleared
+    }
+
+    /// When memory is empty, rehydrate from the store (login completed by a
+    /// path that only wrote the DB). Returns the tokens now in memory.
+    pub fn reload_from_store(&self) -> Result<Option<TidalTokens>> {
+        if let Some(tokens) = self.tokens() {
+            return Ok(Some(tokens));
+        }
+        let Some(store) = &self.inner.store else {
+            return Ok(None);
+        };
+        let loaded = store.load()?;
+        if loaded.is_some() {
+            self.set_tokens_inner(loaded.clone());
+        }
+        Ok(loaded)
+    }
+
+    /// Test-only: replace tokens without persistence or events.
+    #[cfg(test)]
+    pub(crate) fn set_tokens_for_test(&self, tokens: Option<TidalTokens>) {
+        self.set_tokens_inner(tokens);
+    }
+
     /// Latch needs-reconnect from outside a refresh (stream path: still
     /// rejected right after a successful refresh).
     pub(crate) fn mark_needs_reconnect(&self, reason: &str) {
@@ -216,13 +263,75 @@ fn fill_missing_identity(refreshed: &mut TidalTokens, previous: &TidalTokens) {
     }
 }
 
-/// Placeholder until persistence lands; keeps this step compiling.
+/// Encrypted persistence of the tokens in `service_auth` (service='tidal').
 #[derive(Clone)]
-pub struct TokenStore;
+pub struct TokenStore {
+    db: crate::db::Database,
+    master_key: crate::services::crypto::MasterKey,
+}
 
 impl TokenStore {
-    fn save(&self, _tokens: &TidalTokens) -> Result<()> {
-        Ok(())
+    pub fn new(db: crate::db::Database, master_key: crate::services::crypto::MasterKey) -> Self {
+        Self { db, master_key }
+    }
+
+    /// Load persisted tokens, rewriting legacy plaintext rows encrypted.
+    pub fn load(&self) -> Result<Option<TidalTokens>> {
+        use crate::services::tidal::auth::{
+            decode_persisted_tidal_tokens, encode_persisted_tidal_tokens,
+        };
+        let loaded = self.db.with_conn(|conn| {
+            let result = conn.query_row(
+                "SELECT access_token_enc FROM service_auth WHERE service='tidal'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            );
+            Ok(match result {
+                Ok(bytes) => decode_persisted_tidal_tokens(&self.master_key, &bytes)?,
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => return Err(error.into()),
+            })
+        })?;
+        let Some(loaded) = loaded else {
+            return Ok(None);
+        };
+        let needs_rewrite = loaded.needs_encrypted_rewrite();
+        let tokens = loaded.into_tokens();
+        if needs_rewrite {
+            let blob = encode_persisted_tidal_tokens(&self.master_key, &tokens)?;
+            self.db.with_conn(|conn| {
+                conn.execute(
+                    "UPDATE service_auth SET access_token_enc = ?1 WHERE service = 'tidal'",
+                    rusqlite::params![blob],
+                )?;
+                Ok(())
+            })?;
+        }
+        Ok(Some(tokens))
+    }
+
+    pub fn save(&self, tokens: &TidalTokens) -> Result<()> {
+        let blob =
+            crate::services::tidal::auth::encode_persisted_tidal_tokens(&self.master_key, tokens)?;
+        let token_expiry =
+            (chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in.max(0))).to_rfc3339();
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO service_auth (service, access_token_enc, user_id, token_expiry, connected_at)
+                 VALUES ('tidal', ?1, ?2, ?3, datetime('now'))
+                 ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
+                 user_id=excluded.user_id, token_expiry=excluded.token_expiry, connected_at=excluded.connected_at",
+                rusqlite::params![blob, tokens.user_id, token_expiry],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn clear(&self) -> Result<()> {
+        self.db.with_conn(|conn| {
+            conn.execute("DELETE FROM service_auth WHERE service='tidal'", [])?;
+            Ok(())
+        })
     }
 }
 
@@ -398,5 +507,101 @@ mod tests {
         assert!(is_session_expired(
             &session.access_token_for_request().unwrap_err()
         ));
+    }
+
+    fn migrated_db() -> crate::db::Database {
+        let db = crate::db::Database::open_in_memory().expect("db opened");
+        db.run_migrations().expect("migrations");
+        db.with_conn(crate::db::schema::run_migrations)
+            .expect("schema migrations");
+        db
+    }
+
+    fn stored_session(
+        store: &TokenStore,
+        refresher: Arc<ScriptedRefresher>,
+        events: Option<broadcast::Sender<crate::AppEvent>>,
+    ) -> TidalSession {
+        TidalSession::new(
+            TidalSessionConfig {
+                api_http: reqwest::Client::new(),
+                api_base: "http://127.0.0.1:9".to_string(),
+                refresher,
+                store: Some(store.clone()),
+                events,
+            },
+            store.load().unwrap(),
+        )
+    }
+
+    fn test_store() -> TokenStore {
+        TokenStore::new(
+            migrated_db(),
+            crate::services::crypto::MasterKey::ephemeral(),
+        )
+    }
+
+    #[tokio::test]
+    async fn login_persists_clears_latch_and_emits() {
+        let store = test_store();
+        let (tx, mut rx) = broadcast::channel(8);
+        let session = stored_session(
+            &store,
+            ScriptedRefresher::new(vec![Outcome::Rejected]),
+            Some(tx),
+        );
+        session.login(tokens("a")).await.unwrap();
+        session.refresh_stale("a").await.unwrap_err();
+        assert!(session.needs_reconnect());
+        session.login(tokens("b")).await.unwrap();
+        assert!(!session.needs_reconnect());
+        assert_eq!(store.load().unwrap().unwrap().access_token, "b");
+        let mut changes = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, crate::AppEvent::TidalSessionChanged) {
+                changes += 1;
+            }
+        }
+        assert_eq!(changes, 3, "login, latch, login");
+    }
+
+    #[tokio::test]
+    async fn refresh_persists_rotated_tokens() {
+        let store = test_store();
+        let mut rotated = tokens("new");
+        rotated.refresh_token = "refresh-2".to_string();
+        let session = stored_session(
+            &store,
+            ScriptedRefresher::new(vec![Outcome::Ok(rotated)]),
+            None,
+        );
+        session.login(tokens("old")).await.unwrap();
+        session.refresh_stale("old").await.unwrap();
+        let persisted = store.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token, "new");
+        assert_eq!(persisted.refresh_token, "refresh-2");
+    }
+
+    #[tokio::test]
+    async fn logout_clears_memory_and_store() {
+        let store = test_store();
+        let session = stored_session(&store, ScriptedRefresher::new(vec![]), None);
+        session.login(tokens("a")).await.unwrap();
+        session.logout().await.unwrap();
+        assert!(session.tokens().is_none());
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn reload_from_store_rehydrates_when_memory_is_empty() {
+        let store = test_store();
+        let session = stored_session(&store, ScriptedRefresher::new(vec![]), None);
+        store.save(&tokens("persisted")).unwrap();
+        assert!(session.tokens().is_none());
+        assert_eq!(
+            session.reload_from_store().unwrap().unwrap().access_token,
+            "persisted"
+        );
+        assert_eq!(session.tokens().unwrap().access_token, "persisted");
     }
 }
