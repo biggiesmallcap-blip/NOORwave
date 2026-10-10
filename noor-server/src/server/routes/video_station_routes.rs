@@ -164,6 +164,49 @@ pub(super) async fn post_video_station_next(
     Json(json!({ "exhausted": items.is_empty(), "items": items }))
 }
 
+fn explore_settings_json(explore: &settings::ExploreSettings) -> Value {
+    let scenes: Vec<Value> = Scene::ALL
+        .iter()
+        .map(|scene| {
+            json!({
+                "slug": scene.slug(),
+                "title": scene.title(),
+                "subtitle": scene.subtitle(),
+            })
+        })
+        .collect();
+    json!({ "enabled": explore.enabled, "hidden": explore.hidden, "scenes": scenes })
+}
+
+/// `GET /api/videos/stations/settings`. The Explore scenes and which are on.
+pub(super) async fn get_video_station_settings(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, axum::http::StatusCode> {
+    let db = { state.read().await.db.clone() };
+    let explore = db
+        .with_conn(settings::load)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(explore_settings_json(&explore)))
+}
+
+/// `PUT /api/videos/stations/settings`. Saves the choice and drops today's
+/// lineup, so the next visit rebuilds it with only the scenes left on.
+pub(super) async fn put_video_station_settings(
+    State(state): State<SharedState>,
+    Json(body): Json<settings::ExploreSettings>,
+) -> Result<Json<Value>, axum::http::StatusCode> {
+    let db = { state.read().await.db.clone() };
+    let day = today();
+    let saved = db
+        .with_conn(|conn| {
+            let saved = settings::save(conn, &body)?;
+            lineup::clear_day(conn, &day)?;
+            Ok(saved)
+        })
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(explore_settings_json(&saved)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,47 +297,4 @@ mod tests {
         assert_eq!(response.0["discovery_setting"], json!("full"));
         assert!(response.0["building"].is_boolean());
     }
-}
-
-fn explore_settings_json(explore: &settings::ExploreSettings) -> Value {
-    let scenes: Vec<Value> = Scene::ALL
-        .iter()
-        .map(|scene| {
-            json!({
-                "slug": scene.slug(),
-                "title": scene.title(),
-                "subtitle": scene.subtitle(),
-            })
-        })
-        .collect();
-    json!({ "enabled": explore.enabled, "hidden": explore.hidden, "scenes": scenes })
-}
-
-/// `GET /api/videos/stations/settings`. The Explore scenes and which are on.
-pub(super) async fn get_video_station_settings(
-    State(state): State<SharedState>,
-) -> Result<Json<Value>, axum::http::StatusCode> {
-    let db = { state.read().await.db.clone() };
-    let explore = db
-        .with_conn(settings::load)
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(explore_settings_json(&explore)))
-}
-
-/// `PUT /api/videos/stations/settings`. Saves the choice and drops today's
-/// lineup, so the next visit rebuilds it with only the scenes left on.
-pub(super) async fn put_video_station_settings(
-    State(state): State<SharedState>,
-    Json(body): Json<settings::ExploreSettings>,
-) -> Result<Json<Value>, axum::http::StatusCode> {
-    let db = { state.read().await.db.clone() };
-    let day = today();
-    let saved = db
-        .with_conn(|conn| {
-            let saved = settings::save(conn, &body)?;
-            lineup::clear_day(conn, &day)?;
-            Ok(saved)
-        })
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(explore_settings_json(&saved)))
 }
