@@ -1,3 +1,4 @@
+import { PANEL_LIMIT } from './home_shelves';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,18 +66,17 @@ describe('home recommendations shelf contract', () => {
 		// seeded paint away on every mount and left Home blank for the length of
 		// the request.
 		expect(source).toContain('getSnapshot().data?.shelves');
-		expect(source).toContain("seededCanRecommend && hasItems(seededShelves) ? 'ready' : 'hidden'");
+		expect(source).toContain('seededViewState(seededCanRecommend, seededShelves)');
 		// A shelf that is empty because the server is still building it must not
-		// replace one that has content, and must not render an empty state.
-		expect(source).toContain("shelf.status === 'warming'");
+		// replace one that has content, and must not render an empty state. The
+		// merge and paint rules are behaviour-tested in home_shelves.test.ts.
 		// Merged shelf by shelf, not wholesale. The server publishes one shelf at a
 		// time, so mid-rebuild the rails it has not reached yet come back empty and
 		// warming - taking that payload whole would blank full rails and refill
 		// them seconds later, which is the flicker this whole change removes.
-		expect(source).toContain('function mergeShelves(');
+		expect(source).toContain("from '$lib/components/home/home_shelves'");
 		expect(source).toContain('shelves = mergeShelves(shelves, s.data?.shelves ?? []);');
-		expect(source).toContain("if (shelf.items.length > 0 || shelf.status !== 'warming') return shelf;");
-		expect(source).toContain("isWarming(shelves) ? 'loading' : 'empty'");
+		expect(source).toContain('return paintStateFor(shelves);');
 		expect(client).toContain("'warming'");
 		// Progressive publishes arrive over the socket; without this the rails
 		// would only fill on the next page load.
@@ -103,7 +103,7 @@ describe('home recommendations shelf contract', () => {
 	});
 
 	test('has loading, empty, and error states for provider data', () => {
-		expect(source).toContain("type State = 'hidden' | 'loading' | 'ready' | 'empty' | 'error'");
+		expect(source).toContain('type ShelfViewState as State');
 		expect(source).toContain("viewState === 'hidden'");
 		expect(source).toContain("viewState === 'loading'");
 		expect(source).toContain("viewState === 'empty'");
@@ -115,7 +115,8 @@ describe('home recommendations shelf contract', () => {
 	test('renders Last.fm recommendations through the charts mural carousel', () => {
 		expect(source).toContain('ChartMural');
 		expect(source).toContain('type ChartMuralItem');
-		expect(source).toContain('PANEL_LIMIT = 20');
+		// The mural is a fixed 10x2 grid.
+		expect(PANEL_LIMIT).toBe(20);
 		expect(source).toContain('visibleShelves');
 		expect(source).toContain('shelfMuralItems');
 		expect(serverRoutes).toContain('home_routes::get_home_recommendations');
@@ -136,9 +137,8 @@ describe('home recommendations shelf contract', () => {
 	});
 
 	test('the shelf soft-caps in place and sends the rest to a grid page', () => {
-		expect(source).toContain('PANEL_LIMIT = 20');
-		expect(source).toContain('function hasMoreThanShelf');
-		expect(source).toContain('shelf.items.length > PANEL_LIMIT');
+		// The cap itself is behaviour-tested in home_shelves.test.ts.
+		expect(source).toContain('hasMoreThanShelf');
 		expect(source).toContain('/recommendations/${recommendationShelfSlug(shelf)}');
 	});
 
