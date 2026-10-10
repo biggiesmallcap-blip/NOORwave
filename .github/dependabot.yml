@@ -50,6 +50,11 @@ updates:
         update-types: ["major"]
     ignore:
       - dependency-name: "@tauri-apps/*"
+      # SvelteKit 3 migration is tracked in FOLLOWUPS.md.
+      - dependency-name: "@sveltejs/kit"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@sveltejs/adapter-*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /scripts
