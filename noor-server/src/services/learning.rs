@@ -3311,6 +3311,25 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn background_trainer_threads_really_run_at_low_priority() {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_NORMAL,
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .start_handler(|_| lower_current_thread_priority())
+            .build()
+            .expect("pool");
+        // SAFETY: reads the scheduling priority of the calling pool thread.
+        let priority = pool.install(|| unsafe { GetThreadPriority(GetCurrentThread()) });
+        assert!(
+            priority < THREAD_PRIORITY_NORMAL,
+            "background trainer thread priority was {priority}"
+        );
+    }
+
     #[test]
     fn background_training_stays_on_a_small_thread_budget() {
         assert_eq!(background_training_worker_threads_for_available(1), 1);
