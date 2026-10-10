@@ -26,7 +26,14 @@
 	let tokenVisible = $state(false);
 	let copied = $state(false);
 	let expiresIn = $state(0);
-	let poll: ReturnType<typeof setInterval> | null = null;
+	let pendingHost = $state<boolean | null>(null);
+	let confirmReset = $state(false);
+	let confirmRotate = $state(false);
+	let pendingPinAccess = $state<boolean | null>(null);
+	let confirmRevokeId = $state<string | null>(null);
+	let editingId = $state<string | null>(null);
+	let editName = $state('');
+	let poll: ReturnType<typeof setTimeout> | null = null;
 	let expiryTimer: ReturnType<typeof setInterval> | null = null;
 	let controller: AbortController | null = null;
 	let errorElement = $state<HTMLParagraphElement | null>(null);
@@ -47,6 +54,25 @@
 			: 'Alternate connection address'
 	);
 	let needsLocalRecovery = $derived(nativeState?.phase === 'failed' && nativeState.configured_host_mode === false);
+	let hostChecked = $derived(pendingHost ?? nativeState?.configured_host_mode ?? status?.configured_host_mode ?? false);
+	let pinAccess = $derived(pendingPinAccess ?? status?.pin_access ?? false);
+	let ticketExpired = $derived(ticket !== null && expiresIn === 0);
+	let sortedDevices = $derived([...devices].sort((a, b) => Number(!!b.connected) - Number(!!a.connected) || b.paired_at.localeCompare(a.paired_at)));
+
+	const relative = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+	function ago(iso: string): string {
+		const seconds = Math.round((Date.parse(iso) - Date.now()) / 1000);
+		if (seconds > -60) return 'just now';
+		for (const [unit, size] of [['day', 86400], ['hour', 3600], ['minute', 60]] as const) {
+			if (-seconds >= size) return relative.format(Math.round(seconds / size), unit);
+		}
+		return 'just now';
+	}
+
+	function deviceDetail(device: RemoteDevice): string {
+		if (device.connected) return `Connected now, paired ${ago(device.paired_at)}`;
+		return device.last_seen_at ? `Last seen ${ago(device.last_seen_at)}, paired ${ago(device.paired_at)}` : `Paired ${ago(device.paired_at)}, not seen yet`;
+	}
 
 	function discoveryMessage(nextStatus: RemoteStatus): string {
 		const hostname = nextStatus.discovery.hostname ?? 'your local address';
@@ -90,6 +116,12 @@
 			status = nextStatus;
 			devices = nextDevices.devices;
 			managementAvailable = true;
+			if (ticket && nextStatus.ticket?.id === ticket.id && nextStatus.ticket.state === 'redeemed') {
+				const newest = [...nextDevices.devices].sort((a, b) => b.paired_at.localeCompare(a.paired_at))[0];
+				dropTicket();
+				error = '';
+				message = `${newest?.name ?? 'Your phone'} is paired. It reconnects on its own from now on.`;
+			}
 			if (!selectedAddress || !pairingAddressOptions(nextStatus).some((item) => item.id === selectedAddress)) {
 				selectedAddress = defaultPairingAddress(nextStatus);
 			}
@@ -115,23 +147,33 @@
 				.then((unlisten) => { if (disposed) unlisten(); else unlistenRemote = unlisten; })
 				.catch(() => {});
 		}
-		poll = setInterval(() => void load(controller?.signal), 2000);
+		// Poll quickly while a QR is up so a scan closes it within a second.
+		const schedule = () => {
+			poll = setTimeout(async () => {
+				await load(controller?.signal);
+				if (!disposed) schedule();
+			}, ticket ? 1000 : 3000);
+		};
+		schedule();
 		return () => {
 			disposed = true;
 			unlistenRemote?.();
 			controller?.abort();
-			if (poll) clearInterval(poll);
+			if (poll) clearTimeout(poll);
 			if (expiryTimer) clearInterval(expiryTimer);
 			if (ticket) void remoteApi.cancelPairing(ticket.id).catch(() => {});
 		};
 	});
 
-	async function changeHost(enabled: boolean): Promise<void> {
-		const active = get(isPlaying);
+	function hostImpact(): string {
 		const queueCount = get(playbackQueue).length;
-		const action = enabled ? 'Enable' : 'Disable';
-		if (!confirm(`${action} phone remote and restart NOORwave's server? Playback is ${active ? 'active' : 'not active'} and will stop during the restart. Your ${queueCount} queued track${queueCount === 1 ? '' : 's'} will be kept.`)) return;
-		busy = true; error = ''; message = 'Restarting the local server…';
+		const queue = queueCount ? ` Your ${queueCount} queued track${queueCount === 1 ? '' : 's'} stay.` : '';
+		return `${get(isPlaying) ? 'Playback stops while the server restarts.' : 'The server restarts.'}${queue}`;
+	}
+
+	async function changeHost(enabled: boolean): Promise<void> {
+		pendingHost = null;
+		busy = true; error = ''; message = 'Restarting the local server...';
 		try {
 			await invoke('set_remote_host_mode', { enabled });
 			message = enabled ? 'Phone remote is available while NOORwave is running.' : 'Phone remote is local-only.';
@@ -186,13 +228,18 @@
 		if (ticket) await createQr(selectedAddress);
 	}
 
-	async function closeQr(): Promise<void> {
+	function dropTicket(): PairingTicketResponse | null {
 		pairingOperations.invalidate();
 		busy = false;
 		const old = ticket;
 		ticket = null; qrDataUrl = ''; expiresIn = 0;
 		if (expiryTimer) clearInterval(expiryTimer);
 		expiryTimer = null;
+		return old;
+	}
+
+	async function closeQr(): Promise<void> {
+		const old = dropTicket();
 		if (old) await remoteApi.cancelPairing(old.id).catch(() => {});
 	}
 
@@ -207,21 +254,70 @@
 		}
 	}
 
-	async function renameDevice(device: RemoteDevice): Promise<void> {
-		const name = prompt('Name this phone', device.name)?.trim();
+	function startRename(device: RemoteDevice): void {
+		confirmRevokeId = null;
+		editingId = device.id;
+		editName = device.name;
+	}
+
+	async function saveRename(device: RemoteDevice): Promise<void> {
+		const name = editName.trim();
+		editingId = null;
 		if (!name || name === device.name) return;
 		try { await remoteApi.renameDevice(device.id, name); await load(); }
 		catch (cause) { await reportError(cause, 'Could not rename this phone.'); }
 	}
 
+	function renameKey(event: KeyboardEvent, device: RemoteDevice): void {
+		if (event.key === 'Enter') void saveRename(device);
+		else if (event.key === 'Escape') editingId = null;
+	}
+
+	function focusOnMount(node: HTMLInputElement): void {
+		node.focus();
+		node.select();
+	}
+
 	async function revokeDevice(device: RemoteDevice): Promise<void> {
-		if (!confirm(`Disconnect ${device.name}? It will need a new QR code or the shared PIN.`)) return;
-		try { await remoteApi.revokeDevice(device.id); await load(); }
+		confirmRevokeId = null;
+		try {
+			await remoteApi.revokeDevice(device.id);
+			message = `${device.name} was disconnected. It needs a new QR code to come back.`;
+			await load();
+		}
 		catch (cause) { await reportError(cause, 'Could not disconnect this phone.'); }
 	}
 
+	// This window signs in with the PIN, so a PIN change closes its socket.
+	// Swap it ourselves rather than bouncing through the auth gate.
+	async function swapPin(operation: () => Promise<{ token?: string | null }>, done: string, failed: string): Promise<void> {
+		busy = true; error = ''; message = '';
+		disconnectWebSocket();
+		try {
+			const result = await operation();
+			if (result.token) { setStoredToken(result.token); serverToken = result.token; }
+			message = done;
+			await load();
+		} catch (cause) { await reportError(cause, failed); }
+		finally { pendingPinAccess = null; connectWebSocket(); busy = false; }
+	}
+
+	async function rotatePin(): Promise<void> {
+		confirmRotate = false;
+		await swapPin(() => remoteApi.rotatePin(), 'New PIN is active. Browsers using the old PIN were signed out; paired phones are unaffected.', 'The PIN could not be changed.');
+	}
+
+	async function changePinAccess(enabled: boolean): Promise<void> {
+		pendingPinAccess = enabled;
+		confirmRotate = false;
+		tokenVisible = enabled;
+		await swapPin(() => remoteApi.setPinAccess(enabled),
+			enabled ? 'PIN sign-in is on with a new PIN.' : 'PIN sign-in is off. Browsers using the PIN were signed out.',
+			'PIN sign-in could not be changed.');
+	}
+
 	async function resetAll(): Promise<void> {
-		if (!confirm(`Reset all remote access? ${devices.length} paired device${devices.length === 1 ? '' : 's'} will be disconnected, the shared PIN will change, and every open remote session will close.`)) return;
+		confirmReset = false;
 		busy = true; error = '';
 		disconnectWebSocket();
 		try {
@@ -255,8 +351,14 @@
 
 		<div class="setting-row">
 			<div><strong>Allow phone remote</strong><p>Changing this restarts the server and stops playback. Your queue is kept.</p></div>
-			<Toggle checked={nativeState?.configured_host_mode ?? status.configured_host_mode} disabled={busy || status.control !== 'desktop' || !isTauri()} label="Allow phone remote" onchange={(event) => void changeHost(event.currentTarget.checked)} />
+			<Toggle checked={hostChecked} disabled={busy || status.control !== 'desktop' || !isTauri()} label="Allow phone remote" onchange={(event) => pendingHost = event.currentTarget.checked} />
 		</div>
+		{#if pendingHost !== null}
+			<div class="inline-confirm" role="group" aria-label="Confirm server restart">
+				<p>{pendingHost ? 'Turn on phone remote?' : 'Turn off phone remote?'} {hostImpact()}</p>
+				<div class="actions"><button class="btn btn-primary" type="button" disabled={busy} onclick={() => void changeHost(pendingHost!)}>Restart now</button><button class="btn btn-glass" type="button" onclick={() => pendingHost = null}>Cancel</button></div>
+			</div>
+		{/if}
 		{#if needsLocalRecovery}
 			<div class="recovery-block"><p>Network access is disabled, but the local server did not come back. Restart it locally; this does not enable LAN access.</p><button class="btn btn-primary" type="button" disabled={busy} onclick={() => void restartLocalOnly()}>Restart local-only server</button></div>
 		{/if}
@@ -286,10 +388,15 @@
 				<div class="qr-wrap">
 					<div class="qr-header">
 						<div><strong>Scan to pair</strong><p>Open your iPhone camera and point it at the code.</p></div>
-						<span class="expiry-badge" role="timer">{expiresIn}s</span>
+						<span class="expiry-badge" class:expired={ticketExpired} role="timer">{ticketExpired ? 'Expired' : `${Math.floor(expiresIn / 60)}:${String(expiresIn % 60).padStart(2, '0')}`}</span>
 					</div>
 					<div class="qr-stage">
-						<div class="qr-code-frame"><img src={qrDataUrl} alt="Pair this phone with NOORwave" width="320" height="320" /></div>
+						<div class="qr-code-frame" class:expired={ticketExpired}><img src={qrDataUrl} alt="Pair this phone with NOORwave" width="320" height="320" /></div>
+						{#if ticketExpired}
+							<div class="qr-expired"><p>This code expired.</p><button class="btn btn-primary" type="button" disabled={busy} onclick={() => void createQr()}>New code</button></div>
+						{:else}
+							<p class="qr-waiting" aria-live="polite"><span aria-hidden="true"></span>Waiting for your phone...</p>
+						{/if}
 					</div>
 					<div class="pairing-alternative">
 						<p>Open the installed NOORwave app and enter this one-time code. If you already scanned this QR in Safari, refresh it first:</p>
@@ -313,18 +420,69 @@
 			{/if}
 		</div>
 
-		<details class="manual" data-setting-id="access-pin">
-			<summary>Recovery: use the master PIN</summary>
-			<p>The PIN is an optional fallback for browsers that cannot pair. PIN sessions are shared and cannot be individually listed or revoked; prefer the QR or temporary code for normal use.</p>
-			<div class="pin-row"><code>{tokenVisible ? serverToken : '••••••'}</code><button class="btn btn-glass" type="button" onclick={() => tokenVisible = !tokenVisible}>{tokenVisible ? 'Hide PIN' : 'Show PIN'}</button><button class="btn btn-glass" type="button" onclick={() => void copyText(serverToken)}>Copy PIN</button></div>
-			<button class="btn btn-danger" type="button" disabled={busy} onclick={() => void resetAll()}>Reset all remote access</button>
+		<div class="pin-block" data-setting-id="access-pin">
+			<div class="setting-row">
+				<div>
+					<strong>PIN sign-in</strong>
+					<p>{pinAccess
+						? 'Any browser on your network can sign in with this 6-digit PIN. PIN sessions are shared and cannot be signed out one at a time.'
+						: 'Off. Phones pair with the QR or a one-time code. Turn on only for a browser that cannot pair; a new PIN is created.'}</p>
+				</div>
+				<Toggle checked={pinAccess} disabled={busy} label="PIN sign-in" onchange={(event) => void changePinAccess(event.currentTarget.checked)} />
+			</div>
+			{#if pinAccess && status.pin_access}
+				<div class="pin-row">
+					<code>{tokenVisible ? serverToken : '******'}</code>
+					<button class="btn btn-glass" type="button" onclick={() => tokenVisible = !tokenVisible}>{tokenVisible ? 'Hide PIN' : 'Show PIN'}</button>
+					<button class="btn btn-glass" type="button" onclick={() => void copyText(serverToken)}>Copy PIN</button>
+					{#if !confirmRotate}<button class="btn btn-glass" type="button" disabled={busy} onclick={() => confirmRotate = true}>New PIN</button>{/if}
+				</div>
+				{#if confirmRotate}
+					<div class="inline-confirm" role="group" aria-label="Confirm new PIN">
+						<p>Create a new PIN? Browsers signed in with the current one are signed out. Paired phones stay connected.</p>
+						<div class="actions"><button class="btn btn-primary" type="button" disabled={busy} onclick={() => void rotatePin()}>Create new PIN</button><button class="btn btn-glass" type="button" onclick={() => confirmRotate = false}>Cancel</button></div>
+					</div>
+				{/if}
+			{/if}
+		</div>
+
+		<details class="manual">
+			<summary>Reset all remote access</summary>
+			<p>Disconnects every paired phone, changes the PIN, and closes all open remote sessions. Use this if a phone was lost or you suspect someone else has access.</p>
+			{#if confirmReset}
+				<div class="inline-confirm danger" role="group" aria-label="Confirm reset">
+					<p>Disconnect {devices.length} paired device{devices.length === 1 ? '' : 's'}, change the PIN, and close every open remote session?</p>
+					<div class="actions"><button class="btn btn-danger" type="button" disabled={busy} onclick={() => void resetAll()}>Reset everything</button><button class="btn btn-glass" type="button" onclick={() => confirmReset = false}>Cancel</button></div>
+				</div>
+			{:else}
+				<button class="btn btn-danger" type="button" disabled={busy} onclick={() => confirmReset = true}>Reset all remote access</button>
+			{/if}
 		</details>
 
 		<div class="devices">
 			<h3>Paired devices</h3>
 			{#if devices.length === 0}<p>No individually paired phones yet.</p>{/if}
-			{#each devices as device (device.id)}
-				<div class="device-row"><div><strong>{device.name}</strong><small>Paired {new Date(device.paired_at).toLocaleString()} · {device.last_seen_at ? `Last seen ${new Date(device.last_seen_at).toLocaleString()}` : 'Not seen yet'}</small></div><div class="actions"><button class="btn btn-glass" type="button" onclick={() => void renameDevice(device)}>Rename</button><button class="btn btn-glass" type="button" onclick={() => void revokeDevice(device)}>Revoke</button></div></div>
+			{#each sortedDevices as device (device.id)}
+				<div class="device-row">
+					<span class="device-dot" class:online={device.connected} aria-hidden="true"></span>
+					<div class="device-main">
+						{#if editingId === device.id}
+							<input class="device-name-input" type="text" maxlength="64" aria-label="Phone name" bind:value={editName} use:focusOnMount onkeydown={(event) => renameKey(event, device)} />
+						{:else}
+							<strong>{device.name}</strong>
+						{/if}
+						<small title={`Paired ${new Date(device.paired_at).toLocaleString()}`}>{deviceDetail(device)}</small>
+					</div>
+					<div class="actions">
+						{#if editingId === device.id}
+							<button class="btn btn-primary" type="button" onclick={() => void saveRename(device)}>Save</button><button class="btn btn-glass" type="button" onclick={() => editingId = null}>Cancel</button>
+						{:else if confirmRevokeId === device.id}
+							<button class="btn btn-danger" type="button" onclick={() => void revokeDevice(device)}>Disconnect</button><button class="btn btn-glass" type="button" onclick={() => confirmRevokeId = null}>Keep</button>
+						{:else}
+							<button class="btn btn-glass" type="button" onclick={() => startRename(device)}>Rename</button><button class="btn btn-glass" type="button" onclick={() => { editingId = null; confirmRevokeId = device.id; }}>Revoke</button>
+						{/if}
+					</div>
+				</div>
 			{/each}
 		</div>
 
@@ -347,6 +505,14 @@
 	.status-line strong, .status-line small { display: block; }
 	.status-line small { color: var(--text-secondary); margin-top: 3px; }
 	.setting-row, .device-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 0; border-top: 1px solid var(--border-subtle); }
+	.device-row { gap: 12px; }
+	.device-main { flex: 1 1 auto; min-width: 0; }
+	.device-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); opacity: .5; }
+	.device-dot.online { background: var(--state-success); opacity: 1; box-shadow: 0 0 0 4px color-mix(in srgb, var(--state-success) 14%, transparent); }
+	.device-name-input { width: 100%; max-width: 320px; min-height: 36px; border: 1px solid var(--accent-line); border-radius: 8px; background: var(--bg-surface); color: var(--text-primary); padding: 6px 10px; font: inherit; font-weight: var(--font-weight-semibold); }
+	.inline-confirm { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 14px; margin-bottom: 8px; border: 1px solid var(--accent-line); border-radius: var(--radius-md); background: color-mix(in srgb, var(--accent-soft) 50%, transparent); }
+	.inline-confirm p { margin: 0 !important; color: var(--text-primary) !important; flex: 1 1 240px; }
+	.inline-confirm.danger { border-color: color-mix(in srgb, var(--state-error) 40%, transparent); background: color-mix(in srgb, var(--state-error) 8%, transparent); }
 	.setting-row p, .pairing-block p, .manual p, .devices p, .diagnostics p { color: var(--text-secondary); margin: 4px 0 0; line-height: var(--line-height-normal); }
 	.pairing-block, .devices { display: flex; flex-direction: column; gap: 12px; padding: 18px 0; border-top: 1px solid var(--border-subtle); }
 	.connection-card { display: grid; gap: 10px; padding: 15px; border: 1px solid color-mix(in srgb, var(--accent-line) 68%, var(--border-subtle)); border-radius: var(--radius-md); background: linear-gradient(130deg, color-mix(in srgb, var(--accent-soft) 55%, transparent), transparent 62%), var(--bg-surface); }
@@ -372,8 +538,17 @@
 	.qr-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 	.qr-header p { margin-top: 3px; }
 	.expiry-badge { flex: 0 0 auto; min-width: 58px; padding: 7px 10px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); font-family: var(--font-mono, monospace); text-align: center; }
-	.qr-stage { display: grid; place-items: center; padding: 20px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: radial-gradient(circle at 50% 32%, var(--surface-2), var(--bg-surface) 68%); }
+	.qr-stage { position: relative; display: grid; place-items: center; gap: 12px; padding: 20px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: radial-gradient(circle at 50% 32%, var(--surface-2), var(--bg-surface) 68%); }
 	.qr-code-frame { width: min(100%, 320px); padding: 12px; border-radius: var(--radius-md); background: #fff; box-shadow: 0 14px 36px rgba(0, 0, 0, .28); }
+	.qr-code-frame { transition: opacity .2s ease, filter .2s ease; }
+	.qr-code-frame.expired { opacity: .18; filter: blur(3px); }
+	.qr-expired { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; }
+	.qr-expired p { margin: 0; color: var(--text-primary); font-weight: var(--font-weight-semibold); }
+	.qr-waiting { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
+	.qr-waiting span { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-strong); animation: qr-pulse 1.4s ease-in-out infinite; }
+	@keyframes qr-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+	@media (prefers-reduced-motion: reduce) { .qr-waiting span { animation: none; } }
+	.expiry-badge.expired { border-color: color-mix(in srgb, var(--state-error) 45%, transparent); background: color-mix(in srgb, var(--state-error) 10%, transparent); color: var(--state-error); }
 	.qr-wrap img { display: block; width: 100%; height: auto; image-rendering: pixelated; }
 	.qr-wrap code { max-width: 100%; overflow-wrap: anywhere; }
 	.pairing-alternative { display: grid; justify-items: center; gap: 8px; padding: 13px 16px; border: 1px solid var(--accent-line); border-radius: var(--radius-md); background: color-mix(in srgb, var(--accent-soft) 68%, transparent); text-align: center; }
@@ -391,13 +566,17 @@
 	.troubleshooting-list code { color: var(--accent-strong); font-family: var(--font-mono, monospace); }
 	.diagnostic-note { margin-top: 12px !important; padding: 9px 11px; border-left: 2px solid var(--accent-line); background: color-mix(in srgb, var(--accent-soft) 34%, transparent); }
 	summary { display: flex; align-items: center; cursor: pointer; }
-	.pin-row { margin: 12px 0; }
+	.pin-row { margin: 0 0 14px; }
+	.pin-block { border-top: 1px solid var(--border-subtle); }
+	.pin-block .setting-row { border-top: 0; }
+	.manual > .btn-danger { margin: 12px 0; }
 	.pin-row code { font-size: var(--font-size-xl); letter-spacing: .18em; }
 	.device-row small { display: block; margin-top: 4px; color: var(--text-tertiary); }
 	.btn-danger { color: var(--state-error); }
 	@media (max-width: 560px) {
 		.setting-row, .device-row { align-items: flex-start; }
-		.device-row { flex-direction: column; }
+		.device-row { flex-wrap: wrap; }
+		.device-main { flex-basis: calc(100% - 24px); }
 		.actions, .actions .btn, .pin-row .btn { min-height: 44px; }
 		.connection-actions { align-items: flex-start; }
 		.connection-actions > span { width: 100%; }

@@ -379,20 +379,78 @@ pub fn wait_for_remote_ready(
     Err(last_error)
 }
 
-pub fn fetch_remote_status(state: &Arc<SidecarState>) -> Result<ServerRemoteStatus, String> {
+fn token_from_setup_body(body: &serde_json::Value) -> Option<String> {
+    body["token"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+}
+
+/// The shared PIN rotates under the shell (Settings: New PIN, PIN sign-in,
+/// Reset all). Reacquire it from the loopback setup endpoint and cache it.
+fn reacquire_server_token(state: &SidecarState) -> Option<String> {
+    let body = ready_http_client()?
+        .get(crate::server_url::api("setup/token"))
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<serde_json::Value>()
+        .ok()?;
+    let token = token_from_setup_body(&body)?;
+    *state.server_token.lock().unwrap() = Some(token.clone());
+    Some(token)
+}
+
+pub async fn reacquire_server_token_async(state: &SidecarState) -> Option<String> {
+    let body = reqwest::Client::new()
+        .get(crate::server_url::api("setup/token"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?;
+    let token = token_from_setup_body(&body)?;
+    *state.server_token.lock().unwrap() = Some(token.clone());
+    Some(token)
+}
+
+/// GET with the cached PIN, retrying once with a fresh one on 401.
+fn authorized_get(
+    state: &SidecarState,
+    path: &str,
+    label: &str,
+) -> Result<reqwest::blocking::Response, String> {
     let token = state
         .server_token
         .lock()
         .unwrap()
         .clone()
         .ok_or_else(|| "server setup PIN is unavailable".to_owned())?;
-    let client =
-        ready_http_client().ok_or_else(|| "failed to create readiness client".to_owned())?;
-    let response = client
-        .get(crate::server_url::api("server/remote"))
-        .bearer_auth(token)
-        .send()
-        .map_err(|error| format!("remote status request failed: {error}"))?;
+    let client = ready_http_client().ok_or_else(|| format!("failed to create {label} client"))?;
+    let send = |token: &str| {
+        client
+            .get(crate::server_url::api(path))
+            .bearer_auth(token)
+            .send()
+            .map_err(|error| format!("{label} request failed: {error}"))
+    };
+    let response = send(&token)?;
+    if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(response);
+    }
+    match reacquire_server_token(state) {
+        Some(fresh) => send(&fresh),
+        None => Ok(response),
+    }
+}
+
+pub fn fetch_remote_status(state: &Arc<SidecarState>) -> Result<ServerRemoteStatus, String> {
+    let response = authorized_get(state, "server/remote", "remote status")?;
     if !response.status().is_success() {
         return Err(format!("remote status returned HTTP {}", response.status()));
     }
@@ -404,19 +462,7 @@ pub fn fetch_remote_status(state: &Arc<SidecarState>) -> Result<ServerRemoteStat
 pub fn fetch_playback_restart_impact(
     state: &Arc<SidecarState>,
 ) -> Result<PlaybackRestartImpact, String> {
-    let token = state
-        .server_token
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "server setup PIN is unavailable".to_owned())?;
-    let client =
-        ready_http_client().ok_or_else(|| "failed to create playback client".to_owned())?;
-    let response = client
-        .get(crate::server_url::api("playback/state"))
-        .bearer_auth(token)
-        .send()
-        .map_err(|error| format!("playback snapshot request failed: {error}"))?;
+    let response = authorized_get(state, "playback/state", "playback snapshot")?;
     if !response.status().is_success() {
         return Err(format!(
             "playback snapshot returned HTTP {}",
@@ -438,6 +484,19 @@ mod tests {
         assert!(should_shutdown_stale_server_before_spawn(false, true));
         assert!(!should_shutdown_stale_server_before_spawn(true, true));
         assert!(!should_shutdown_stale_server_before_spawn(false, false));
+    }
+
+    #[test]
+    fn setup_token_body_yields_only_a_non_empty_token() {
+        assert_eq!(
+            token_from_setup_body(&serde_json::json!({"token": "654321"})).as_deref(),
+            Some("654321")
+        );
+        assert_eq!(
+            token_from_setup_body(&serde_json::json!({"token": ""})),
+            None
+        );
+        assert_eq!(token_from_setup_body(&serde_json::json!({})), None);
     }
 
     #[test]

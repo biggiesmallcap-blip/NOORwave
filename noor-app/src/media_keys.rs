@@ -1,7 +1,31 @@
 use crate::sidecar::SidecarState;
+use reqwest::Method;
 use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+/// Send with the cached PIN; on 401 (the PIN was rotated in Settings) fetch
+/// the current one from the loopback setup endpoint and retry once.
+async fn send(state: &SidecarState, method: Method, path: &str) -> Option<reqwest::Response> {
+    let client = reqwest::Client::new();
+    let token = state.server_token.lock().unwrap().clone()?;
+    let response = client
+        .request(method.clone(), crate::server_url::api(path))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .ok()?;
+    if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return Some(response);
+    }
+    let fresh = crate::sidecar::reacquire_server_token_async(state).await?;
+    client
+        .request(method, crate::server_url::api(path))
+        .bearer_auth(fresh)
+        .send()
+        .await
+        .ok()
+}
 
 pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let state: Arc<SidecarState> = app.state::<Arc<SidecarState>>().inner().clone();
@@ -13,18 +37,8 @@ pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             if event.state() == ShortcutState::Pressed {
                 let state = s1.clone();
                 tauri::async_runtime::spawn(async move {
-                    let token = state.server_token.lock().unwrap().clone();
-                    let Some(token) = token else { return };
-                    let client = reqwest::Client::new();
-                    let auth = format!("Bearer {token}");
-
                     // Determine current play state
-                    let Ok(resp) = client
-                        .get(crate::server_url::api("playback/state"))
-                        .header("authorization", &auth)
-                        .send()
-                        .await
-                    else {
+                    let Some(resp) = send(&state, Method::GET, "playback/state").await else {
                         return;
                     };
                     let Ok(body) = resp.json::<serde_json::Value>().await else {
@@ -33,11 +47,7 @@ pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     let is_playing = body["state"]["is_playing"].as_bool().unwrap_or(false);
 
                     let endpoint = if is_playing { "pause" } else { "resume" };
-                    let _ = client
-                        .post(crate::server_url::api(&format!("playback/{endpoint}")))
-                        .header("authorization", &auth)
-                        .send()
-                        .await;
+                    let _ = send(&state, Method::POST, &format!("playback/{endpoint}")).await;
                 });
             }
         })?;
@@ -49,13 +59,7 @@ pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             if event.state() == ShortcutState::Pressed {
                 let state = s2.clone();
                 tauri::async_runtime::spawn(async move {
-                    let token = state.server_token.lock().unwrap().clone();
-                    let Some(token) = token else { return };
-                    let _ = reqwest::Client::new()
-                        .post(crate::server_url::api("playback/next"))
-                        .header("authorization", format!("Bearer {token}"))
-                        .send()
-                        .await;
+                    let _ = send(&state, Method::POST, "playback/next").await;
                 });
             }
         })?;
@@ -67,13 +71,7 @@ pub fn register(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             if event.state() == ShortcutState::Pressed {
                 let state = s3.clone();
                 tauri::async_runtime::spawn(async move {
-                    let token = state.server_token.lock().unwrap().clone();
-                    let Some(token) = token else { return };
-                    let _ = reqwest::Client::new()
-                        .post(crate::server_url::api("playback/previous"))
-                        .header("authorization", format!("Bearer {token}"))
-                        .send()
-                        .await;
+                    let _ = send(&state, Method::POST, "playback/previous").await;
                 });
             }
         })?;

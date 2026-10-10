@@ -55,4 +55,34 @@ describe('Phone Remote panel accessibility contract', () => {
 		expect(source).toContain("invoke('restart_managed_server')");
 		expect(source).toContain('Restart local-only server');
 	});
+
+	it('confirms inline instead of with native browser dialogs', () => {
+		expect(source).not.toMatch(/\b(confirm|prompt)\(/);
+		expect(source).toContain('class="inline-confirm"');
+		expect(source).toContain('Restart now');
+		expect(source).toContain('class="device-name-input"');
+	});
+
+	it('closes the QR when the phone redeems it and offers a new code on expiry', () => {
+		expect(source).toContain("nextStatus.ticket.state === 'redeemed'");
+		expect(source).toContain('is paired. It reconnects on its own');
+		expect(source).toContain('This code expired.');
+		expect(source).toContain('ticket ? 1000 : 3000');
+	});
+
+	it('shows live connection state per paired device', () => {
+		expect(source).toContain('class:online={device.connected}');
+		expect(source).toContain('Connected now');
+	});
+
+	it('keeps PIN sign-in opt-in, rotatable, and swaps this window onto a new PIN', () => {
+		expect(source).toContain('label="PIN sign-in"');
+		expect(source).toContain('remoteApi.setPinAccess(enabled)');
+		expect(source).toContain('remoteApi.rotatePin()');
+		expect(source).toContain('{#if pinAccess && status.pin_access}');
+		const swap = source.slice(source.indexOf('async function swapPin'), source.indexOf('async function rotatePin'));
+		expect(swap).toContain('disconnectWebSocket()');
+		expect(swap).toContain('setStoredToken(result.token)');
+		expect(swap).toContain('connectWebSocket()');
+	});
 });

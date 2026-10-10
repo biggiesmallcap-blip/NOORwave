@@ -135,6 +135,9 @@ struct CachedDevice {
 struct CredentialState {
     pin: String,
     pin_generation: u64,
+    /// Accept the PIN from non-loopback peers; None = never chosen. The
+    /// desktop app on this computer always signs in with it.
+    pin_lan_access: Option<bool>,
     devices: Vec<([u8; 32], CachedDevice)>,
 }
 
@@ -211,6 +214,9 @@ struct RemoteInner {
     mutation: Mutex<()>,
     limiter: Mutex<InvalidAttemptLimiter>,
     global_revocation: broadcast::Sender<()>,
+    /// Closes sockets signed in with the PIN when it rotates or LAN PIN
+    /// access is turned off; paired devices stay connected.
+    pin_revocation: broadcast::Sender<()>,
     device_revocations: std::sync::Mutex<HashMap<String, broadcast::Sender<()>>>,
     last_seen_writes: std::sync::Mutex<HashMap<String, Instant>>,
     clock: Arc<dyn Clock>,
@@ -251,6 +257,7 @@ impl RemoteService {
 
     fn new_with_clock(db: Database, pin: String, clock: Arc<dyn Clock>) -> anyhow::Result<Self> {
         let config = remote_db::initialize(&db)?;
+        let pin_lan_access = remote_db::load_pin_access(&db)?;
         let devices = remote_db::load_devices(&db)?
             .into_iter()
             .map(|row| {
@@ -267,6 +274,7 @@ impl RemoteService {
             })
             .collect();
         let (global_revocation, _) = broadcast::channel(64);
+        let (pin_revocation, _) = broadcast::channel(16);
         Ok(Self(Arc::new(RemoteInner {
             db,
             server_id: config.server_id,
@@ -274,6 +282,7 @@ impl RemoteService {
             credentials: RwLock::new(CredentialState {
                 pin,
                 pin_generation: 1,
+                pin_lan_access,
                 devices,
             }),
             runtime: RwLock::new(RuntimeFacts::default()),
@@ -281,6 +290,7 @@ impl RemoteService {
             mutation: Mutex::new(()),
             limiter: Mutex::new(InvalidAttemptLimiter::default()),
             global_revocation,
+            pin_revocation,
             device_revocations: std::sync::Mutex::new(HashMap::new()),
             last_seen_writes: std::sync::Mutex::new(HashMap::new()),
             clock,
@@ -297,6 +307,20 @@ impl RemoteService {
 
     pub async fn shared_pin(&self) -> String {
         self.0.credentials.read().await.pin.clone()
+    }
+
+    /// Unchosen defaults to off under the desktop app, which pairs phones by
+    /// QR/code (a 6-digit secret that never changes is guessable over time
+    /// even rate limited), and on for a standalone server, whose only
+    /// LAN sign-in is the PIN because pairing is managed from loopback.
+    pub async fn pin_lan_access(&self) -> bool {
+        let control = self.0.runtime.read().await.control;
+        self.0
+            .credentials
+            .read()
+            .await
+            .pin_lan_access
+            .unwrap_or(control != HostControl::Desktop)
     }
 
     pub async fn set_bound_listener(
@@ -412,9 +436,11 @@ impl RemoteService {
         let _mutation = self.0.mutation.lock().await;
         let token = token.ok_or(AuthError::Invalid)?;
         let digest = hash_secret(token);
+        let source_ip = normalize_ip(source_ip);
+        let pin_allowed = source_ip.is_loopback() || self.pin_lan_access().await;
         let credential = {
             let credentials = self.0.credentials.read().await;
-            if fixed_time_eq(token.as_bytes(), credentials.pin.as_bytes()) {
+            if fixed_time_eq(token.as_bytes(), credentials.pin.as_bytes()) && pin_allowed {
                 Some(Principal::SharedPin {
                     generation: credentials.pin_generation,
                 })
@@ -433,7 +459,7 @@ impl RemoteService {
             }
             return Ok(principal);
         }
-        self.record_invalid(normalize_ip(source_ip)).await?;
+        self.record_invalid(source_ip).await?;
         Err(AuthError::Invalid)
     }
 
@@ -487,7 +513,7 @@ impl RemoteService {
     ) -> (broadcast::Receiver<()>, Option<broadcast::Receiver<()>>) {
         let global = self.0.global_revocation.subscribe();
         let device = match principal {
-            Principal::SharedPin { .. } => None,
+            Principal::SharedPin { .. } => Some(self.0.pin_revocation.subscribe()),
             Principal::PairedDevice { id, .. } => {
                 let mut channels = self
                     .0
@@ -645,13 +671,17 @@ struct RemoteIdentity {
     name: &'static str,
     protocol: u8,
     pairing_available: bool,
+    /// Whether the connect screen should offer the shared PIN at all.
+    pin_login: bool,
 }
 
 async fn info_handler(State(remote): State<RemoteService>) -> impl IntoResponse {
+    let pin_login = remote.pin_lan_access().await;
     let runtime = remote.0.runtime.read().await;
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(RemoteIdentity {
+            pin_login,
             server_id: remote.server_id().to_string(),
             name: "NOORwave",
             protocol: 1,
@@ -797,6 +827,8 @@ pub struct RemoteDevice {
     name: String,
     paired_at: String,
     last_seen_at: Option<String>,
+    /// True while the device holds at least one live WebSocket.
+    connected: bool,
 }
 
 impl From<&CachedDevice> for RemoteDevice {
@@ -806,6 +838,7 @@ impl From<&CachedDevice> for RemoteDevice {
             name: device.name.clone(),
             paired_at: device.paired_at.to_rfc3339(),
             last_seen_at: device.last_seen_at.map(|value| value.to_rfc3339()),
+            connected: false,
         }
     }
 }
@@ -1106,6 +1139,7 @@ struct RemoteStatus {
     addresses: Vec<RemoteAddress>,
     remote_assets_available: bool,
     phone_reachability: &'static str,
+    pin_access: bool,
     ticket: Option<serde_json::Value>,
     diagnostics: Vec<serde_json::Value>,
 }
@@ -1168,6 +1202,7 @@ async fn status_handler(State(remote): State<RemoteService>) -> impl IntoRespons
             addresses: runtime.addresses,
             remote_assets_available: runtime.remote_assets_available,
             phone_reachability: "unverified",
+            pin_access: remote.pin_lan_access().await,
             ticket,
             diagnostics,
         }),
@@ -1184,6 +1219,21 @@ async fn list_devices_handler(State(remote): State<RemoteService>) -> impl IntoR
         .iter()
         .map(|(_, device)| RemoteDevice::from(device))
         .collect();
+    {
+        // Each open WebSocket holds a receiver on its device's revocation
+        // channel for the socket's lifetime, so a live receiver means the
+        // phone is connected right now.
+        let channels = remote
+            .0
+            .device_revocations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for device in &mut devices {
+            device.connected = channels
+                .get(&device.id)
+                .is_some_and(|sender| sender.receiver_count() > 0);
+        }
+    }
     devices.sort_by(|left, right| right.paired_at.cmp(&left.paired_at));
     (
         [(header::CACHE_CONTROL, "no-store")],
@@ -1281,6 +1331,91 @@ async fn revoke_device_handler(
     StatusCode::NO_CONTENT.into_response()
 }
 
+async fn fresh_pin(remote: &RemoteService) -> Result<String, ()> {
+    let old_pin = remote.0.credentials.read().await.pin.clone();
+    loop {
+        let candidate = random_pin().map_err(|_| ())?;
+        if candidate != old_pin {
+            return Ok(candidate);
+        }
+    }
+}
+
+/// Install a new PIN that `persist` has already written, ending every
+/// session signed in with the old one. Caller holds the mutation lock.
+async fn install_pin(remote: &RemoteService, new_pin: &str) {
+    {
+        let mut credentials = remote.0.credentials.write().await;
+        credentials.pin = new_pin.to_string();
+        credentials.pin_generation = credentials.pin_generation.wrapping_add(1);
+    }
+    let _ = remote.0.pin_revocation.send(());
+}
+
+/// Replace the shared PIN only. Paired phones keep their own credentials.
+pub async fn rotate_pin(remote: &RemoteService) -> Result<String, ()> {
+    let _mutation = remote.0.mutation.lock().await;
+    let new_pin = fresh_pin(remote).await?;
+    remote_db::set_pin(&remote.0.db, &new_pin).map_err(|_| ())?;
+    install_pin(remote, &new_pin).await;
+    Ok(new_pin)
+}
+
+/// Turn LAN PIN access on (with a fresh PIN, returned) or off (ending PIN
+/// sessions so no phone keeps riding the old grant).
+pub async fn set_pin_access(remote: &RemoteService, enabled: bool) -> Result<Option<String>, ()> {
+    let _mutation = remote.0.mutation.lock().await;
+    let new_pin = if enabled {
+        Some(fresh_pin(remote).await?)
+    } else {
+        None
+    };
+    remote_db::set_pin_access(&remote.0.db, enabled, new_pin.as_deref()).map_err(|_| ())?;
+    remote.0.credentials.write().await.pin_lan_access = Some(enabled);
+    match &new_pin {
+        Some(pin) => install_pin(remote, pin).await,
+        None => {
+            remote.0.credentials.write().await.pin_generation += 1;
+            let _ = remote.0.pin_revocation.send(());
+        }
+    }
+    Ok(new_pin)
+}
+
+#[derive(Debug, Deserialize)]
+struct PinAccessRequest {
+    enabled: bool,
+}
+
+async fn rotate_pin_handler(State(remote): State<RemoteService>) -> Response {
+    match rotate_pin(&remote).await {
+        Ok(token) => Json(json!({ "token": token })).into_response(),
+        Err(()) => remote_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STORAGE_UNAVAILABLE",
+            "The PIN could not be changed.",
+        ),
+    }
+}
+
+async fn pin_access_handler(
+    State(remote): State<RemoteService>,
+    request: Result<Json<PinAccessRequest>, JsonRejection>,
+) -> Response {
+    let request = match request {
+        Ok(Json(request)) => request,
+        Err(rejection) => return invalid_json(rejection),
+    };
+    match set_pin_access(&remote, request.enabled).await {
+        Ok(token) => Json(json!({ "enabled": request.enabled, "token": token })).into_response(),
+        Err(()) => remote_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STORAGE_UNAVAILABLE",
+            "PIN access could not be changed.",
+        ),
+    }
+}
+
 pub async fn reset_all(remote: &RemoteService) -> Result<(String, usize), ()> {
     let _mutation = remote.0.mutation.lock().await;
     let old_pin = remote.0.credentials.read().await.pin.clone();
@@ -1331,6 +1466,11 @@ pub fn management_routes(remote: RemoteService) -> Router {
             delete(cancel_ticket_handler),
         )
         .route("/api/server/remote/devices", get(list_devices_handler))
+        .route("/api/server/remote/pin/rotate", post(rotate_pin_handler))
+        .route(
+            "/api/server/remote/pin/access",
+            axum::routing::put(pin_access_handler).layer(DefaultBodyLimit::max(2048)),
+        )
         .route(
             "/api/server/remote/devices/{id}",
             patch(rename_device_handler)
@@ -1389,12 +1529,15 @@ mod tests {
     fn service(pin: &str) -> RemoteService {
         let db = Database::open_in_memory().unwrap();
         db.with_conn(schema::run_migrations).unwrap();
+        // Most tests exercise the shared PIN from LAN peers.
+        remote_db::set_pin_access(&db, true, None).unwrap();
         RemoteService::new(db, pin.to_string()).unwrap()
     }
 
     async fn ready_service_with_clock(pin: &str, clock: Arc<dyn Clock>) -> RemoteService {
         let db = Database::open_in_memory().unwrap();
         db.with_conn(schema::run_migrations).unwrap();
+        remote_db::set_pin_access(&db, true, None).unwrap();
         let remote = RemoteService::new_with_clock(db, pin.to_string(), clock).unwrap();
         remote
             .set_bound_listener(
@@ -2002,6 +2145,141 @@ mod tests {
         .await
         .expect("device revocation signal")
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pin_is_loopback_only_until_lan_access_is_enabled() {
+        let db = Database::open_in_memory().unwrap();
+        db.with_conn(schema::run_migrations).unwrap();
+        let remote = RemoteService::new(db, "123456".into()).unwrap();
+        remote
+            .set_bound_listener(
+                "0.0.0.0:17600".parse().unwrap(),
+                HostControl::Desktop,
+                true,
+                true,
+            )
+            .await;
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+
+        assert!(!remote.pin_lan_access().await);
+        assert!(remote.authenticate(Some("123456"), lan).await.is_err());
+        assert!(matches!(
+            remote.authenticate(Some("123456"), loopback).await,
+            Ok(Principal::SharedPin { .. })
+        ));
+
+        let new_pin = set_pin_access(&remote, true).await.unwrap().unwrap();
+        assert_ne!(new_pin, "123456");
+        assert!(remote.authenticate(Some("123456"), loopback).await.is_err());
+        assert!(matches!(
+            remote.authenticate(Some(&new_pin), lan).await,
+            Ok(Principal::SharedPin { .. })
+        ));
+
+        let restarted = RemoteService::new(remote.0.db.clone(), new_pin.clone()).unwrap();
+        assert!(restarted.pin_lan_access().await);
+    }
+
+    #[tokio::test]
+    async fn standalone_server_keeps_lan_pin_until_turned_off() {
+        let db = Database::open_in_memory().unwrap();
+        db.with_conn(schema::run_migrations).unwrap();
+        let remote = RemoteService::new(db, "123456".into()).unwrap();
+        remote
+            .set_bound_listener(
+                "0.0.0.0:17600".parse().unwrap(),
+                HostControl::CommandLine,
+                true,
+                true,
+            )
+            .await;
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        assert!(remote.authenticate(Some("123456"), lan).await.is_ok());
+        set_pin_access(&remote, false).await.unwrap();
+        assert!(remote.authenticate(Some("123456"), lan).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn turning_pin_access_off_ends_pin_sessions_but_keeps_paired_phones() {
+        let remote = ready_service_with_clock("123456", Arc::new(SystemClock)).await;
+        let (_, device_token) = paired_token(&remote, "Phone").await;
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        let pin_principal = remote.authenticate(Some("123456"), lan).await.unwrap();
+        let device_principal = remote.authenticate(Some(&device_token), lan).await.unwrap();
+        let (_, mut pin_socket) = remote.subscribe_revocation(&pin_principal);
+        let (_, mut device_socket) = remote.subscribe_revocation(&device_principal);
+
+        assert_eq!(set_pin_access(&remote, false).await.unwrap(), None);
+        tokio::time::timeout(Duration::from_secs(1), pin_socket.as_mut().unwrap().recv())
+            .await
+            .expect("PIN socket revoked")
+            .unwrap();
+        assert!(device_socket.as_mut().unwrap().try_recv().is_err());
+        assert!(!remote.principal_is_current(&pin_principal).await);
+        assert!(remote.principal_is_current(&device_principal).await);
+        assert!(remote.authenticate(Some("123456"), lan).await.is_err());
+        assert!(remote.authenticate(Some(&device_token), lan).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rotating_the_pin_keeps_paired_phones() {
+        let remote = ready_service_with_clock("123456", Arc::new(SystemClock)).await;
+        let (_, device_token) = paired_token(&remote, "Phone").await;
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        let old_pin = remote.authenticate(Some("123456"), lan).await.unwrap();
+        let (_, mut old_pin_socket) = remote.subscribe_revocation(&old_pin);
+
+        let new_pin = rotate_pin(&remote).await.unwrap();
+        assert_ne!(new_pin, "123456");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            old_pin_socket.as_mut().unwrap().recv(),
+        )
+        .await
+        .expect("old PIN socket revoked")
+        .unwrap();
+        assert!(remote.authenticate(Some("123456"), lan).await.is_err());
+        assert!(remote.authenticate(Some(&new_pin), lan).await.is_ok());
+        assert!(remote.authenticate(Some(&device_token), lan).await.is_ok());
+        assert_eq!(remote_db::load_devices(&remote.0.db).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn device_list_reports_live_socket_connections() {
+        let remote = ready_service_with_clock("123456", Arc::new(SystemClock)).await;
+        let (online_id, online_token) = paired_token(&remote, "Online").await;
+        let (offline_id, _) = paired_token(&remote, "Offline").await;
+        let principal = remote
+            .authenticate(Some(&online_token), "192.168.1.20".parse().unwrap())
+            .await
+            .unwrap();
+
+        async fn connected_ids(remote: &RemoteService) -> Vec<String> {
+            let response = list_devices_handler(State(remote.clone()))
+                .await
+                .into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            value["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|device| device["connected"] == true)
+                .map(|device| device["id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        let socket = remote.subscribe_revocation(&principal);
+        let connected = connected_ids(&remote).await;
+        assert_eq!(connected, vec![online_id.clone()]);
+        assert!(!connected.contains(&offline_id));
+
+        drop(socket);
+        assert!(connected_ids(&remote).await.is_empty());
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ export type RemoteErrorCode =
 	| 'RATE_LIMITED' | 'STORAGE_UNAVAILABLE' | 'DESKTOP_MANAGED' | 'EXTERNAL_BIND_OVERRIDE';
 
 export interface RemoteError { error: RemoteErrorCode; message: string; retry_after_seconds?: number }
-export interface RemoteIdentity { server_id: string; name: 'NOORwave'; protocol: 1; pairing_available: boolean }
+export interface RemoteIdentity { server_id: string; name: 'NOORwave'; protocol: 1; pairing_available: boolean; pin_login?: boolean }
 export interface RemoteAddress { id: string; label: string; url: string; kind: 'lan' | 'other'; recommended: boolean }
 export interface RemoteDiagnostic { code: string; message: string }
 export interface RemoteStatus {
@@ -22,10 +22,11 @@ export interface RemoteStatus {
 	addresses: RemoteAddress[];
 	remote_assets_available: boolean;
 	phone_reachability: 'unverified';
+	pin_access?: boolean;
 	ticket: { id: string; state: 'pending' | 'redeemed' | 'expired'; expires_at: string } | null;
 	diagnostics: RemoteDiagnostic[];
 }
-export interface RemoteDevice { id: string; name: string; paired_at: string; last_seen_at: string | null }
+export interface RemoteDevice { id: string; name: string; paired_at: string; last_seen_at: string | null; connected?: boolean }
 export interface PairingTicketResponse { id: string; pairing_url: string; pairing_code: string; expires_at: string; expires_in_seconds: 120 }
 export interface PairingResponse { token: string; token_type: 'Bearer'; server_id: string; device: RemoteDevice }
 
@@ -83,4 +84,8 @@ export const remoteApi = {
 		method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name })
 	}),
 	revokeDevice: (id: string) => management<void>(`/api/server/remote/devices/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+	rotatePin: () => management<{ token: string }>('/api/server/remote/pin/rotate', { method: 'POST' }),
+	setPinAccess: (enabled: boolean) => management<{ enabled: boolean; token: string | null }>('/api/server/remote/pin/access', {
+		method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled })
+	}),
 };

@@ -224,6 +224,52 @@ pub fn touch_last_seen(db: &Database, id: &str, now: DateTime<Utc>) -> Result<()
     })
 }
 
+/// Whether the shared PIN is accepted from other devices, or None when the
+/// listener never chose (see `RemoteService::pin_lan_access` for the default).
+pub fn load_pin_access(db: &Database) -> Result<Option<bool>> {
+    db.with_conn(|conn| {
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'remote.pin_access'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.map(|value| value == "1"))
+    })
+}
+
+/// Persist the PIN-access flag, and the new PIN when one is supplied, in one
+/// transaction so a crash never leaves access on with the old PIN.
+pub fn set_pin_access(db: &Database, enabled: bool, new_pin: Option<&str>) -> Result<()> {
+    db.with_conn(|conn| {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO server_config (key, value) VALUES ('remote.pin_access', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [if enabled { "1" } else { "0" }],
+        )?;
+        if let Some(pin) = new_pin {
+            set_pin_in(&tx, pin)?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+pub fn set_pin(db: &Database, new_pin: &str) -> Result<()> {
+    db.with_conn(|conn| set_pin_in(conn, new_pin))
+}
+
+fn set_pin_in(conn: &rusqlite::Connection, new_pin: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO server_config (key, value) VALUES ('server_token', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [new_pin],
+    )?;
+    Ok(())
+}
+
 pub fn reset_all(db: &Database, new_pin: &str) -> Result<usize> {
     db.with_conn(|conn| {
         let tx = conn.unchecked_transaction()?;

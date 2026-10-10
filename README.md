@@ -210,7 +210,7 @@ For the full desktop shell, which launches the server for you and adds the tray,
 cargo run -p noor-app
 ```
 
-On first run the server prints its master access PIN in the startup banner. On loopback the desktop UI fetches it automatically. Normal phone setup uses the QR flow in **Settings -> Remote -> Phone remote**; the master PIN remains available there under **Recovery: use the master PIN** for browsers that cannot pair.
+On first run the server prints its master access PIN in the startup banner. On loopback the desktop UI fetches it automatically. Normal phone setup uses the QR flow in **Settings -> Remote -> Phone remote**. Under the desktop app the PIN only works on this computer until you turn on **PIN sign-in** there (which also creates a new PIN) for a browser that cannot pair; **New PIN** rotates it without unpairing phones.
 
 ## The Phone Remote, Set Up
 
@@ -218,13 +218,13 @@ In the installed desktop app:
 
 1. Open **Settings -> Remote -> Phone remote** and enable **Allow phone remote**. Use this only on a trusted local network.
 2. Optional: enable **Start NOORwave in the tray when I sign in** so the remote is available without opening the main window first.
-3. Select **Show pairing QR**, then scan it with the phone's camera. If NOORwave is already installed on the phone's home screen, enter the temporary six-digit code instead. The QR and code expire after two minutes and work once.
+3. Select **Pair phone**, then scan it with the phone's camera. If NOORwave is already installed on the phone's home screen, enter the temporary six-digit code instead. The QR and code expire after two minutes and work once.
 4. Open the paired remote and optionally add it to the phone's home screen. The device receives its own persistent credential; the permanent master PIN is not embedded in the QR.
 5. Back on the desktop, use **Paired devices** to rename or revoke individual phones. **Reset all remote access** rotates the master PIN and disconnects every remote session.
 
 If the friendly `.local` address does not open, choose the direct Wi-Fi address under **Use a different connection address**, refresh the QR, and pair that origin separately. Windows may show a firewall prompt the first time LAN access is enabled; allow NOORwave on private networks. Guest Wi-Fi/client isolation and VPNs can prevent local devices from seeing one another.
 
-For a standalone `noor-server`, run with `--host`, open `http://<LAN-IP>:17600/remote`, and use the master PIN. QR generation and paired-device management are deliberately restricted to the local desktop settings surface. Phone Remote is same-LAN only: it does not use a cloud relay, port forwarding, or internet discovery.
+For a standalone `noor-server`, run with `--host`, open `http://<LAN-IP>:17600/remote`, and use the master PIN (a standalone server accepts it from the LAN unless PIN sign-in was turned off). QR generation and paired-device management are deliberately restricted to the local desktop settings surface. Phone Remote is same-LAN only: it does not use a cloud relay, port forwarding, or internet discovery.
 
 ## Configuration
 

@@ -61,6 +61,7 @@
 	import { getApiBase } from '$lib/api/client';
 	import { remoteApi, RemoteRequestError } from '$lib/api/remote';
 	import { bootstrapRemoteConnection, BoundedRetry, clearRemoteSession, manualPinResponseError, storePairedSession } from '$lib/remote/connection';
+	import { currentDeviceName } from '$lib/remote/device_name';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
@@ -148,6 +149,16 @@
 	let showConnect = $state(false);
 	let connectTokenInput = $state('');
 	let connectMethod = $state<'pairing' | 'pin'>('pairing');
+	// The server refuses the shared PIN from other devices unless the listener
+	// turned PIN sign-in on, so only offer it when it can work.
+	let pinLoginAvailable = $state(false);
+	$effect(() => {
+		if (!showConnect) return;
+		remoteApi.identity().then((identity) => {
+			pinLoginAvailable = identity.pin_login === true;
+			if (!pinLoginAvailable && connectMethod === 'pin') { connectMethod = 'pairing'; connectTokenInput = ''; }
+		}).catch(() => {});
+	});
 	let connectError = $state('');
 	let connectBusy = $state(false);
 	let networkUnavailable = $state(false);
@@ -181,7 +192,7 @@
 				url: new URL(window.location.href),
 				replaceUrl: (clean) => window.history.replaceState(window.history.state, '', clean),
 				identity: (signal) => remoteApi.identity(signal),
-				redeem: (ticket, signal) => remoteApi.redeem(ticket, undefined, signal),
+				redeem: (ticket, signal) => remoteApi.redeem(ticket, currentDeviceName(), signal),
 				probe: (token, signal) => fetch(`${getApiBase()}/api/status`, { signal, headers: { authorization: `Bearer ${token}` } }),
 			});
 			networkUnavailable = result.phase === 'network-unavailable';
@@ -195,8 +206,8 @@
 				return;
 			}
 			if (result.phase === 'pairing-error' || result.phase === 'network-unavailable') connectError = result.message;
-			else if (result.reason === 'identity-mismatch') connectError = 'This address now belongs to a different NOORwave server. Scan its QR or enter its PIN.';
-			else if (result.reason === 'credential-rejected') connectError = 'This phone connection was revoked. Scan a new QR or enter the PIN.';
+			else if (result.reason === 'identity-mismatch') connectError = 'This address now belongs to a different NOORwave server. Pair again from its Settings.';
+			else if (result.reason === 'credential-rejected') connectError = 'This phone was signed out. Pair again from Settings > Phone remote on the computer.';
 			if (result.phase === 'needs-auth') await tryAutoSetup();
 			else {
 				showConnect = true;
@@ -249,7 +260,7 @@
 		connectBusy = true;
 		try {
 			if (connectMethod === 'pairing') {
-				const paired = await remoteApi.redeem(t);
+				const paired = await remoteApi.redeem(t, currentDeviceName());
 				const remembered = storePairedSession(paired);
 				showConnect = false;
 				if (!remembered) showToast('Connected for this session, but this phone could not save the connection.', 'success', 8000);
@@ -1424,9 +1435,11 @@
 				aria-label={connectMethod === 'pairing' ? '6-digit temporary pairing code' : '6-digit master recovery PIN'}
 			/>
 			<button class="btn btn-primary" type="button" disabled={connectBusy || !/^\d{6}$/.test(connectTokenInput)} onclick={() => void submitConnect()}>Connect</button>
-			<button class="btn btn-glass" type="button" disabled={connectBusy} onclick={() => { connectMethod = connectMethod === 'pairing' ? 'pin' : 'pairing'; connectTokenInput = ''; connectError = ''; setTimeout(focusPin, 0); }}>
-				{connectMethod === 'pairing' ? 'Use master PIN instead' : 'Use temporary code instead'}
-			</button>
+			{#if pinLoginAvailable || connectMethod === 'pin'}
+				<button class="btn btn-glass" type="button" disabled={connectBusy} onclick={() => { connectMethod = connectMethod === 'pairing' ? 'pin' : 'pairing'; connectTokenInput = ''; connectError = ''; setTimeout(focusPin, 0); }}>
+					{connectMethod === 'pairing' ? 'Use master PIN instead' : 'Use temporary code instead'}
+				</button>
+			{/if}
 
 			{#if connectError}
 				<p class="connect-error" role="alert" aria-live="assertive">{connectError}</p>
