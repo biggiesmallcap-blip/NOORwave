@@ -1061,6 +1061,40 @@ fn catalogue_unlike_targets_all_aliases_and_rejects_stale_snapshots() {
 }
 
 #[test]
+fn catalogue_delivered_like_is_not_left_unresolved() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        use crate::db::catalogue_favorites as intent;
+        let state = |conn: &rusqlite::Connection, id: i64| {
+            conn.query_row(
+                "SELECT remote_favorite_state FROM tracks WHERE id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+        };
+        let id =
+            insert_tidal_track(conn, &test_tidal_track(10, "Song"), false, true, None)?.unwrap();
+        intent::request(conn, "track", id, true)?;
+        assert_eq!(state(conn, id)?, "unresolved");
+        let op = intent::pending(conn)?.remove(0);
+        intent::finish(conn, &op, Some("offline"))?;
+        assert_eq!(state(conn, id)?, "unresolved");
+        intent::finish(conn, &op, None)?;
+        assert_eq!(state(conn, id)?, "favorite");
+        // Rows stranded by older builds heal on startup.
+        conn.execute(
+            "UPDATE tracks SET remote_favorite_state='unresolved' WHERE id=?1",
+            [id],
+        )?;
+        assert_eq!(intent::settle_delivered(conn, None)?, 1);
+        assert_eq!(state(conn, id)?, "favorite");
+        assert_eq!(intent::settle_delivered(conn, None)?, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn catalogue_reversed_failed_action_keeps_new_revision_and_date() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {

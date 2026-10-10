@@ -520,6 +520,11 @@ async fn main() -> Result<()> {
         Ok(repaired) => info!(repaired, "Artist photos stored as bare TIDAL ids repaired"),
         Err(error) => tracing::warn!(%error, "Artist photo repair failed"),
     }
+    match db.with_conn(|c| db::catalogue_favorites::settle_delivered(c, None)) {
+        Ok(0) => {}
+        Ok(repaired) => info!(repaired, "Delivered favorites no longer marked unresolved"),
+        Err(error) => tracing::warn!(%error, "Favorite state repair failed"),
+    }
     if let Err(error) = db::catalogue_recovery::consume_pending(&db) {
         tracing::warn!(%error,"Reviewed catalogue recovery left pending; ordinary startup continues");
     }
