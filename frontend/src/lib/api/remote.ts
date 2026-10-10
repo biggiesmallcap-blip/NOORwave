@@ -25,7 +25,7 @@ export interface RemoteStatus {
 	ticket: { id: string; state: 'pending' | 'redeemed' | 'expired'; expires_at: string } | null;
 	diagnostics: RemoteDiagnostic[];
 }
-export interface RemoteDevice { id: string; name: string; paired_at: string; last_seen_at: string | null }
+export interface RemoteDevice { id: string; name: string; paired_at: string; last_seen_at: string | null; connected?: boolean }
 export interface PairingTicketResponse { id: string; pairing_url: string; pairing_code: string; expires_at: string; expires_in_seconds: 120 }
 export interface PairingResponse { token: string; token_type: 'Bearer'; server_id: string; device: RemoteDevice }
 

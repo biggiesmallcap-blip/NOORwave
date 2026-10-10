@@ -24,7 +24,8 @@ describe('layout auth gate contract', () => {
 	test('an installed iPhone PWA can redeem a temporary pairing code without the master PIN', () => {
 		expect(source).toContain('temporary 6-digit code');
 		expect(source).toContain("connectMethod === 'pairing'");
-		expect(source).toContain('await remoteApi.redeem(t)');
+		expect(source).toContain('await remoteApi.redeem(t, currentDeviceName())');
+		expect(source).toContain('remoteApi.redeem(ticket, currentDeviceName(), signal)');
 		expect(source).toContain('storePairedSession(paired)');
 		expect(source).toContain('Use master PIN instead');
 	});

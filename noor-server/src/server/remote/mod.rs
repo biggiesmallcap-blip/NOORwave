@@ -797,6 +797,8 @@ pub struct RemoteDevice {
     name: String,
     paired_at: String,
     last_seen_at: Option<String>,
+    /// True while the device holds at least one live WebSocket.
+    connected: bool,
 }
 
 impl From<&CachedDevice> for RemoteDevice {
@@ -806,6 +808,7 @@ impl From<&CachedDevice> for RemoteDevice {
             name: device.name.clone(),
             paired_at: device.paired_at.to_rfc3339(),
             last_seen_at: device.last_seen_at.map(|value| value.to_rfc3339()),
+            connected: false,
         }
     }
 }
@@ -1184,6 +1187,21 @@ async fn list_devices_handler(State(remote): State<RemoteService>) -> impl IntoR
         .iter()
         .map(|(_, device)| RemoteDevice::from(device))
         .collect();
+    {
+        // Each open WebSocket holds a receiver on its device's revocation
+        // channel for the socket's lifetime, so a live receiver means the
+        // phone is connected right now.
+        let channels = remote
+            .0
+            .device_revocations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for device in &mut devices {
+            device.connected = channels
+                .get(&device.id)
+                .is_some_and(|sender| sender.receiver_count() > 0);
+        }
+    }
     devices.sort_by(|left, right| right.paired_at.cmp(&left.paired_at));
     (
         [(header::CACHE_CONTROL, "no-store")],
@@ -2002,6 +2020,42 @@ mod tests {
         .await
         .expect("device revocation signal")
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn device_list_reports_live_socket_connections() {
+        let remote = ready_service_with_clock("123456", Arc::new(SystemClock)).await;
+        let (online_id, online_token) = paired_token(&remote, "Online").await;
+        let (offline_id, _) = paired_token(&remote, "Offline").await;
+        let principal = remote
+            .authenticate(Some(&online_token), "192.168.1.20".parse().unwrap())
+            .await
+            .unwrap();
+
+        async fn connected_ids(remote: &RemoteService) -> Vec<String> {
+            let response = list_devices_handler(State(remote.clone()))
+                .await
+                .into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            value["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|device| device["connected"] == true)
+                .map(|device| device["id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        let socket = remote.subscribe_revocation(&principal);
+        let connected = connected_ids(&remote).await;
+        assert_eq!(connected, vec![online_id.clone()]);
+        assert!(!connected.contains(&offline_id));
+
+        drop(socket);
+        assert!(connected_ids(&remote).await.is_empty());
     }
 
     #[tokio::test]

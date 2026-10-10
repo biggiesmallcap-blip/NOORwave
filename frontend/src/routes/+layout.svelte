@@ -61,6 +61,7 @@
 	import { getApiBase } from '$lib/api/client';
 	import { remoteApi, RemoteRequestError } from '$lib/api/remote';
 	import { bootstrapRemoteConnection, BoundedRetry, clearRemoteSession, manualPinResponseError, storePairedSession } from '$lib/remote/connection';
+	import { currentDeviceName } from '$lib/remote/device_name';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
@@ -181,7 +182,7 @@
 				url: new URL(window.location.href),
 				replaceUrl: (clean) => window.history.replaceState(window.history.state, '', clean),
 				identity: (signal) => remoteApi.identity(signal),
-				redeem: (ticket, signal) => remoteApi.redeem(ticket, undefined, signal),
+				redeem: (ticket, signal) => remoteApi.redeem(ticket, currentDeviceName(), signal),
 				probe: (token, signal) => fetch(`${getApiBase()}/api/status`, { signal, headers: { authorization: `Bearer ${token}` } }),
 			});
 			networkUnavailable = result.phase === 'network-unavailable';
@@ -249,7 +250,7 @@
 		connectBusy = true;
 		try {
 			if (connectMethod === 'pairing') {
-				const paired = await remoteApi.redeem(t);
+				const paired = await remoteApi.redeem(t, currentDeviceName());
 				const remembered = storePairedSession(paired);
 				showConnect = false;
 				if (!remembered) showToast('Connected for this session, but this phone could not save the connection.', 'success', 8000);
