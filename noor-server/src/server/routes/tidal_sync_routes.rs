@@ -204,7 +204,7 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
 
     // Get tokens + reentrancy/cancel flags
     let persisted_tokens = super::load_persisted_tidal_tokens(state).await?;
-    let (tokens, running_flag, cancel_flag, tidal_http_client) = {
+    let (tokens, running_flag, cancel_flag, tidal_session) = {
         let s = state.read().await;
         let tokens = s
             .tidal
@@ -215,7 +215,7 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
             tokens,
             s.tidal_sync_running.clone(),
             s.tidal_sync_cancel.clone(),
-            s.tidal_http_client.clone(),
+            s.tidal.clone(),
         )
     };
 
@@ -230,12 +230,8 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
     cancel_flag.store(false, Ordering::SeqCst);
     let _running = TidalSyncRunningGuard(running_flag);
 
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
 
     let guidance_account = tokens.user_id.to_string();
     // Run sync
@@ -293,7 +289,7 @@ pub(super) async fn tidal_sync_library(
         .map_err(|error| {
             TidalSyncStartError::SessionCheckFailed(error.to_string()).into_response()
         })?;
-    let (tokens, running_flag, cancel_flag, tidal_http_client) = {
+    let (tokens, running_flag, cancel_flag) = {
         let s = state.read().await;
         let tokens = s
             .tidal
@@ -304,7 +300,6 @@ pub(super) async fn tidal_sync_library(
             tokens,
             s.tidal_sync_running.clone(),
             s.tidal_sync_cancel.clone(),
-            s.tidal_http_client.clone(),
         )
     };
 
@@ -323,12 +318,8 @@ pub(super) async fn tidal_sync_library(
     let mut setup_guard = Some(TidalSyncRunningGuard(running_flag.clone()));
 
     // Create TIDAL client
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(state.read().await.tidal.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
 
     let (session, session_state) = ensure_tidal_session(&state, &tokens, &client)
         .await
@@ -347,7 +338,6 @@ pub(super) async fn tidal_sync_library(
     let sync_tokens = session.clone();
     let requested_mode = params.mode.unwrap_or_default();
     let cancel_for_task = cancel_flag.clone();
-    let http_for_task = tidal_http_client;
     tokio::spawn(async move {
         let _running = task_guard; // released on scope exit
         let guidance_account = sync_tokens.user_id.to_string();
@@ -358,12 +348,9 @@ pub(super) async fn tidal_sync_library(
             user_id = %sync_tokens.user_id,
             "TIDAL sync background task started"
         );
-        let client = TidalClient::with_http(
-            http_for_task,
-            sync_tokens.access_token.clone(),
-            sync_tokens.country_code.clone(),
-        )
-        .with_metadata_store(state.read().await.db.clone());
+        let client =
+            TidalClient::for_session(state.read().await.tidal.clone(), &sync_tokens.country_code)
+                .with_metadata_store(state.read().await.db.clone());
         match run_tidal_sync_with_reauth(
             &client,
             &state_clone,

@@ -127,9 +127,9 @@ async fn build_missing_sets(
     state: &SharedState,
     today: chrono::NaiveDate,
 ) -> anyhow::Result<usize> {
-    let (tokens, tidal_http_client, db) = {
+    let (tokens, tidal_session, db) = {
         let s = state.read().await;
-        (s.tidal.tokens(), s.tidal_http_client.clone(), s.db.clone())
+        (s.tidal.tokens(), s.tidal.clone(), s.db.clone())
     };
     let tokens = match tokens {
         Some(t) => Some(t),
@@ -163,11 +163,7 @@ async fn build_missing_sets(
         return Ok(0);
     }
 
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code);
 
     let mut shown_video_ids: HashSet<i64> = HashSet::new();
     let mut artist_exposure: HashMap<String, usize> = HashMap::new();

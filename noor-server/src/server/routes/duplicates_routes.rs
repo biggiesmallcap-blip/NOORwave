@@ -84,10 +84,10 @@ pub(super) async fn resolve_duplicate_group(
     require_positive_id(payload.preferred_track_id)?;
 
     // Get TIDAL tokens for unfavorite calls.
-    let (tokens, tidal_http_client) = {
+    let (tokens, tidal_session) = {
         let s = state.read().await;
         let tokens = s.tidal.tokens();
-        (tokens, s.tidal_http_client.clone())
+        (tokens, s.tidal.clone())
     };
 
     let result = {
@@ -110,12 +110,8 @@ pub(super) async fn resolve_duplicate_group(
 
     // Best-effort unfavorite on TIDAL with session refresh retry.
     if let Some(t) = tokens.clone() {
-        let mut client = TidalClient::with_http(
-            tidal_http_client,
-            t.access_token.clone(),
-            t.country_code.clone(),
-        )
-        .with_metadata_store(state.read().await.db.clone());
+        let mut client = TidalClient::for_session(tidal_session.clone(), &t.country_code)
+            .with_metadata_store(state.read().await.db.clone());
         let mut user_id = t.user_id.clone();
         for tidal_id in &result.tidal_ids_to_unfavorite {
             if let Err(e) = client.remove_favorite_track(&user_id, *tidal_id).await {

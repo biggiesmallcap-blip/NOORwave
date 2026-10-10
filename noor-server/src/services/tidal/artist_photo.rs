@@ -8,7 +8,6 @@
 //! cover, and writes it back. Idempotent: any non-NULL `photo_url` is left
 //! alone.
 
-use super::auth::TidalTokens;
 use super::client::TidalClient;
 use crate::db::Database;
 use rusqlite::OptionalExtension;
@@ -18,8 +17,7 @@ use rusqlite::OptionalExtension;
 /// when the artist already has a photo so re-calls during a hot import burst
 /// are cheap.
 pub async fn ensure_photo_url(
-    http: reqwest::Client,
-    tokens: TidalTokens,
+    client: TidalClient,
     db: Database,
     local_artist_id: i64,
     tidal_artist_id: i64,
@@ -42,7 +40,6 @@ pub async fn ensure_photo_url(
         return;
     }
 
-    let client = TidalClient::with_http(http, tokens.access_token, tokens.country_code);
     let artist = match client.get_artist(tidal_artist_id).await {
         Ok(a) => a,
         Err(e) => {

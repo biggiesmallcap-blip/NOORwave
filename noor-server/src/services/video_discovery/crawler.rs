@@ -682,18 +682,18 @@ fn drain_urgent() {
 }
 
 async fn live_source(state: &SharedState) -> Option<LiveSource> {
-    let (tokens, tidal_http, http, db) = {
+    let (tokens, tidal_session, http, db) = {
         let s = state.read().await;
         (
             s.tidal.tokens(),
-            s.tidal_http_client.clone(),
+            s.tidal.clone(),
             s.http_client.clone(),
             s.db.clone(),
         )
     };
     let tokens = tokens?;
-    let tidal = TidalClient::with_http(tidal_http, tokens.access_token, tokens.country_code)
-        .for_background_work();
+    let tidal =
+        TidalClient::for_session(tidal_session.clone(), &tokens.country_code).for_background_work();
     Some(LiveSource::new(tidal, LastFmClient::load(http, &db)))
 }
 

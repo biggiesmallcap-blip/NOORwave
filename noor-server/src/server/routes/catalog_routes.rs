@@ -488,19 +488,15 @@ pub(super) async fn get_album_credits(
     let mut release_date: Option<String> = None;
     let mut label = label;
     if let (None, Some(tidal_album_id)) = (&label, tidal_id) {
-        let (tokens, tidal_http_client) = {
+        let (tokens, tidal_session) = {
             let persisted = load_persisted_tidal_tokens(&state)
                 .await
                 .unwrap_or_default();
             let s = state.read().await;
-            (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
+            (s.tidal.tokens().or(persisted), s.tidal.clone())
         };
         if let Some(tokens) = tokens {
-            let client = TidalClient::with_http(
-                tidal_http_client,
-                tokens.access_token.clone(),
-                tokens.country_code.clone(),
-            );
+            let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code);
             match client.get_album(tidal_album_id).await {
                 Ok(album) => {
                     let copyright = album.extra.get("copyright").and_then(Value::as_str);
@@ -840,12 +836,12 @@ pub(super) async fn get_album_tracks(
     };
 
     // TIDAL session needed for the catalog fetch - best-effort only.
-    let (tokens, tidal_http_client) = {
+    let (tokens, tidal_session) = {
         let persisted = load_persisted_tidal_tokens(&state)
             .await
             .unwrap_or_default();
         let s = state.read().await;
-        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
+        (s.tidal.tokens().or(persisted), s.tidal.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -856,12 +852,8 @@ pub(super) async fn get_album_tracks(
         })));
     };
 
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
 
     // Pre-fix legacy rows that landed with NULL track_number â€” `TidalTrack`
     // shipped without #[serde(rename = "trackNumber")] for a long time, so
@@ -1852,7 +1844,7 @@ pub(super) async fn get_artist_discography(
         })));
     };
 
-    let (tokens, tidal_http_client) = {
+    let (tokens, tidal_session) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1860,7 +1852,7 @@ pub(super) async fn get_artist_discography(
             )
         })?;
         let s = state.read().await;
-        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
+        (s.tidal.tokens().or(persisted), s.tidal.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -1872,12 +1864,8 @@ pub(super) async fn get_artist_discography(
         })));
     };
 
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
 
     let payload = if query.preview {
         build_tidal_artist_preview_payload(&state, &client, tidal_artist_id, &tokens).await
@@ -1945,7 +1933,7 @@ pub(super) async fn get_tidal_artist_release_page(
             Json(json!({ "error": "Unknown artist release filter" })),
         ));
     };
-    let (tokens, tidal_http_client) = {
+    let (tokens, tidal_session) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1953,7 +1941,7 @@ pub(super) async fn get_tidal_artist_release_page(
             )
         })?;
         let s = state.read().await;
-        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
+        (s.tidal.tokens().or(persisted), s.tidal.clone())
     };
     let Some(tokens) = tokens else {
         return Err((
@@ -1961,13 +1949,9 @@ pub(super) async fn get_tidal_artist_release_page(
             Json(json!({ "error": "TIDAL not connected" })),
         ));
     };
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone())
-    .for_background_work();
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone())
+        .for_background_work();
     let mut page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
         client.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
     })
@@ -2143,7 +2127,7 @@ pub(super) async fn get_tidal_album_tracks(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     require_positive_tidal_album_id(tidal_album_id)?;
 
-    let (tokens, tidal_http_client) = {
+    let (tokens, tidal_session) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2151,7 +2135,7 @@ pub(super) async fn get_tidal_album_tracks(
             )
         })?;
         let s = state.read().await;
-        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
+        (s.tidal.tokens().or(persisted), s.tidal.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -2161,12 +2145,8 @@ pub(super) async fn get_tidal_album_tracks(
         ));
     };
 
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
     let items = match client.get_all_album_tracks(tidal_album_id).await {
         Ok(items) => items,
         Err(error) if error_looks_like_auth(&error) => {
@@ -2222,7 +2202,7 @@ pub(super) async fn import_tidal_album(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     require_positive_tidal_album_id(tidal_album_id)?;
 
-    let (tokens, db, tidal_http_client) = {
+    let (tokens, db, tidal_session) = {
         let persisted = load_persisted_tidal_tokens(&state).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2233,7 +2213,7 @@ pub(super) async fn import_tidal_album(
         (
             s.tidal.tokens().or(persisted),
             s.db.clone(),
-            s.tidal_http_client.clone(),
+            s.tidal.clone(),
         )
     };
 
@@ -2244,12 +2224,8 @@ pub(super) async fn import_tidal_album(
         ));
     };
 
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
     let imported = tidal_import::import_album(&db, &client, tidal_album_id)
         .await
         .map_err(|e| {

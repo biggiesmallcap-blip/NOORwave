@@ -79,6 +79,7 @@ pub struct TidalDiscoveryProvider {
 
 impl TidalDiscoveryProvider {
     pub fn new(
+        session: crate::services::tidal::session::TidalSession,
         access_token: String,
         user_id: String,
         country_code: String,
@@ -86,12 +87,8 @@ impl TidalDiscoveryProvider {
         db: crate::db::Database,
     ) -> Self {
         Self {
-            client: TidalClient::with_http(
-                http.clone(),
-                access_token.clone(),
-                country_code.clone(),
-            )
-            .with_metadata_store(db.clone()),
+            client: TidalClient::for_session(session, &country_code)
+                .with_metadata_store(db.clone()),
             db,
             http,
             access_token,

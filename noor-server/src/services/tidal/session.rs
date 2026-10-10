@@ -227,7 +227,7 @@ impl TidalSession {
         Self::new(
             TidalSessionConfig {
                 api_http: reqwest::Client::new(),
-                api_base: "http://127.0.0.1:9".to_string(),
+                api_base: OFFLINE_TEST_API_BASE.to_string(),
                 refresher: Arc::new(NoRefresh),
                 store: None,
                 events: None,
@@ -351,6 +351,12 @@ impl TidalSessionConfig {
         }
     }
 }
+
+/// API base for test sessions: an unsupported scheme, so any request fails
+/// immediately without touching the network (a closed localhost port can
+/// take seconds to refuse on Windows).
+#[cfg(test)]
+pub(crate) const OFFLINE_TEST_API_BASE: &str = "noor-offline://tidal";
 
 /// Encrypted persistence of the tokens in `service_auth` (service='tidal').
 #[derive(Clone)]
@@ -498,7 +504,7 @@ mod tests {
         TidalSession::new(
             TidalSessionConfig {
                 api_http: reqwest::Client::new(),
-                api_base: "http://127.0.0.1:9".to_string(),
+                api_base: OFFLINE_TEST_API_BASE.to_string(),
                 refresher,
                 store: None,
                 events: None,
@@ -614,7 +620,7 @@ mod tests {
         TidalSession::new(
             TidalSessionConfig {
                 api_http: reqwest::Client::new(),
-                api_base: "http://127.0.0.1:9".to_string(),
+                api_base: OFFLINE_TEST_API_BASE.to_string(),
                 refresher,
                 store: Some(store.clone()),
                 events,

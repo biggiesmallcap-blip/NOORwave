@@ -102,13 +102,13 @@ fn fetch_repair_candidates(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<
 /// there is work to do. Returns immediately after spawning; never blocks the
 /// caller.
 pub async fn run_if_idle(state: SharedState) {
-    let (db, running, tokens, tidal_http, event_tx) = {
+    let (db, running, tokens, tidal_session, event_tx) = {
         let s = state.read().await;
         (
             s.db.clone(),
             s.tidal_repair_running.clone(),
             s.tidal.tokens(),
-            s.tidal_http_client.clone(),
+            s.tidal.clone(),
             s.event_tx.clone(),
         )
     };
@@ -137,11 +137,7 @@ pub async fn run_if_idle(state: SharedState) {
     running.store(true, Ordering::SeqCst);
 
     tokio::spawn(async move {
-        let client = TidalClient::with_http(
-            tidal_http,
-            tokens.access_token.clone(),
-            tokens.country_code.clone(),
-        );
+        let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code);
 
         let candidates = db
             .with_conn(|conn| Ok(fetch_repair_candidates(conn)?))

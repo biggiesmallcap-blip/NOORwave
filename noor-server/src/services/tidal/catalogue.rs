@@ -45,12 +45,8 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
         return Ok(());
     };
     let ids = db.with_conn(|conn| candidate_ids(conn, 24))?;
-    let client = TidalClient::with_http(
-        http.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .for_background_work();
+    let client = TidalClient::for_session(state.read().await.tidal.clone(), &tokens.country_code)
+        .for_background_work();
     let mut any_observed = false;
     let mut any_switched = false;
     for id in ids {

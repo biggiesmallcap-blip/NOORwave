@@ -807,13 +807,13 @@ fn metric_label(value: Option<u64>, label: &str) -> Option<String> {
 }
 
 async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Vec<ChartEntryDto>> {
-    let (tokens_opt, http, db, tidal_http_client) = {
+    let (tokens_opt, http, db, tidal_session) = {
         let s = state.read().await;
         (
             s.tidal.tokens(),
             s.http_client.clone(),
             s.db.clone(),
-            s.tidal_http_client.clone(),
+            s.tidal.clone(),
         )
     };
     let persisted = super::load_persisted_tidal_tokens(state).await?;
@@ -823,12 +823,8 @@ async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Ve
         tracing::warn!("Tidal chart requested but Tidal not connected");
         return Ok(Vec::new());
     };
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
     let tracks = match client.get_editorial_top_tracks(limit).await {
         Ok(t) => t,
         Err(e) if super::error_looks_like_auth(&e) => {

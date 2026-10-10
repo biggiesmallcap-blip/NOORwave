@@ -444,17 +444,16 @@ pub(super) async fn refresh_playlist_route(
             Json(json!({ "message": "This playlist is not synced from TIDAL" })),
         ));
     };
-    let (http, tokens) = tidal_write_context(&state).await.ok_or_else(|| {
+    let (_http, tokens) = tidal_write_context(&state).await.ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "message": "Connect TIDAL to refresh a synced playlist" })),
         )
     })?;
 
-    let client = crate::services::tidal::client::TidalClient::with_http(
-        http,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
+    let client = crate::services::tidal::client::TidalClient::for_session(
+        state.read().await.tidal.clone(),
+        &tokens.country_code,
     )
     .with_metadata_store(state.read().await.db.clone());
     let never_cancelled = || -> anyhow::Result<()> { Ok(()) };
