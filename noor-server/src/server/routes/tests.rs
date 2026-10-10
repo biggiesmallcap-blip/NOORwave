@@ -90,19 +90,6 @@ fn tidal_artist_album_filter_merge_keeps_eps_and_dedupes_by_tidal_id() {
 }
 
 #[test]
-fn error_looks_like_auth_classifies_tidal_401s() {
-    let auth_error = anyhow::anyhow!("TIDAL API error 401 Unauthorized: {{\"status\":401}}");
-    assert!(error_looks_like_auth(&auth_error));
-    let expired_token_error = anyhow::anyhow!(
-        "TIDAL API error 401 Unauthorized: {{\"status\":401,\"subStatus\":11003,\"userMessage\":\"The token has expired. (Expired on time)\"}}"
-    );
-    assert!(error_looks_like_auth(&expired_token_error));
-
-    let rate_error = anyhow::anyhow!("TIDAL API error 429 Too Many Requests: rate limit");
-    assert!(!error_looks_like_auth(&rate_error));
-}
-
-#[test]
 fn lastfm_track_seed_merge_prioritizes_recent_and_loved_context() {
     let seeds = merge_lastfm_track_seeds(
         vec![

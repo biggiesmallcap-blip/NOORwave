@@ -49,8 +49,8 @@ async fn deliver(state: &SharedState) -> anyhow::Result<()> {
                     if error.to_string().contains("401")
                         || error.to_string().contains("unauthorized") =>
                 {
-                    let session =
-                        crate::server::routes::recover_tidal_session(state, http, &session).await?;
+                    let tidal = state.read().await.tidal.clone();
+                    let session = tidal.refresh_stale(&session.access_token).await?;
                     if !db.with_conn(|c| intents::current(c, &op))? {
                         return Ok(());
                     }

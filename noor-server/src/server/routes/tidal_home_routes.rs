@@ -169,15 +169,6 @@ pub(super) async fn get_tidal_mixes(
         .with_metadata_store(state.read().await.db.clone());
     let mixes = match client.get_my_mixes().await {
         Ok(mixes) => mixes,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry = super::recover_tidal_client(&state, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            retry.get_my_mixes().await.map_err(|e| {
-                tracing::warn!("TIDAL get_my_mixes failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_my_mixes failed: {e}");
             return Err(StatusCode::BAD_GATEWAY);
@@ -236,15 +227,6 @@ pub(super) async fn get_tidal_radio_stations(
         .with_metadata_store(state.read().await.db.clone());
     let stations = match client.get_my_radio_stations().await {
         Ok(s) => s,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry = super::recover_tidal_client(&state, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            retry.get_my_radio_stations().await.map_err(|e| {
-                tracing::warn!("TIDAL get_my_radio_stations failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_my_radio_stations failed: {e}");
             return Err(StatusCode::BAD_GATEWAY);
@@ -362,24 +344,6 @@ pub(super) async fn get_tidal_discover_module_items(
             .await
         {
             Ok(items) if !items.is_empty() => items,
-            Err(e) if super::error_looks_like_auth(&e) => {
-                match super::recover_tidal_client(&state, &tokens).await {
-                    Ok(retry_client) => match retry_client
-                        .get_module_items_via_path(path, &module_kind, limit)
-                        .await
-                    {
-                        Ok(items) if !items.is_empty() => items,
-                        _ => module.items,
-                    },
-                    Err(refresh_err) => {
-                        tracing::warn!(
-                            ?refresh_err,
-                            "TIDAL discover module refresh failed; serving preview items"
-                        );
-                        module.items
-                    }
-                }
-            }
             _ => module.items, // fall back to the preview if the show-more call fails or returns 0
         }
     } else {
@@ -456,25 +420,6 @@ pub(super) async fn get_tidal_mix_tracks(
         .with_metadata_store(state.read().await.db.clone());
     let items = match client.get_mix_tracks(mix_id).await {
         Ok(items) => items,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry_client =
-                super::recover_tidal_client(&state, &tokens)
-                    .await
-                    .map_err(|refresh_err| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({
-                                "error": format!("TIDAL session refresh failed: {}", refresh_err)
-                            })),
-                        )
-                    })?;
-            retry_client.get_mix_tracks(mix_id).await.map_err(|e2| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e2.to_string() })),
-                )
-            })?
-        }
         Err(e) => {
             return Err((
                 StatusCode::BAD_GATEWAY,
@@ -633,15 +578,6 @@ async fn fetch_page_modules(
     }
     let modules = match client.get_page_modules(&page_path).await {
         Ok(m) => m,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry = super::recover_tidal_client(&state, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            retry.get_page_modules(&page_path).await.map_err(|e| {
-                tracing::warn!("TIDAL get_page_modules({page_path}) failed after refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_page_modules({page_path}) failed: {e}");
             return Err(StatusCode::BAD_GATEWAY);
@@ -668,15 +604,6 @@ async fn load_tidal_home_modules_cached(
         .with_metadata_store(state.read().await.db.clone());
     let modules = match client.get_home_modules().await {
         Ok(m) => m,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry = super::recover_tidal_client(state, tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            retry.get_home_modules().await.map_err(|e| {
-                tracing::warn!("TIDAL get_home_modules failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_home_modules failed: {e}");
             return Err(StatusCode::BAD_GATEWAY);
@@ -841,32 +768,13 @@ async fn refresh_tidal_moods_cache(
     tokens: crate::services::tidal::auth::TidalTokens,
 ) {
     let started_at = Instant::now();
-    let mut active_client =
+    let active_client =
         TidalClient::for_session(state.read().await.tidal.clone(), &tokens.country_code)
             .with_metadata_store(state.read().await.db.clone());
-    let mut active_country_code = tokens.country_code.clone();
+    let active_country_code = tokens.country_code.clone();
     let db = state.read().await.db.clone();
     let raw = match active_client.get_page_raw("pages/moods").await {
         Ok(r) => r,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let Ok((retry, refreshed)) =
-                super::recover_tidal_client_with_tokens(&state, &tokens).await
-            else {
-                tracing::warn!("TIDAL get_tidal_moods refresh failed");
-                return;
-            };
-            match retry.get_page_raw("pages/moods").await {
-                Ok(r) => {
-                    active_country_code = refreshed.country_code;
-                    active_client = retry;
-                    r
-                }
-                Err(e) => {
-                    tracing::warn!("TIDAL get_tidal_moods failed after refresh: {e}");
-                    return;
-                }
-            }
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_tidal_moods failed: {e}");
             cache_default_moods_with_thumbnails(

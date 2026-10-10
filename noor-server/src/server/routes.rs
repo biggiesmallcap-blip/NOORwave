@@ -4745,12 +4745,7 @@ async fn ensure_tidal_content_allowed(state: &SharedState, tidal_id: i64) -> any
         let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
             .with_metadata_store(db.clone());
         // Unknown labels stay playable; a failed label lookup does not imply AI.
-        if let Err(error) = client.get_track(tidal_id).await
-            && error_looks_like_auth(&error)
-            && let Ok(retry) = recover_tidal_client(state, &tokens).await
-        {
-            let _ = retry.get_track(tidal_id).await;
-        }
+        let _ = client.get_track(tidal_id).await;
     }
     anyhow::ensure!(
         !db.with_conn(|conn| Ok(crate::db::tidal_content::is_blocked(conn, tidal_id)?))?,
@@ -5785,38 +5780,6 @@ async fn resolve_pending_row(
     .await
     {
         Ok(r) => r,
-        Err(e) if error_looks_like_auth(&e) => {
-            // The TIDAL access token expired. A whole radio queue's worth of
-            // resolvers can 401 in the same second, so refresh through the
-            // single-flight helper (it dedupes the stampede and hands back a
-            // token another resolver may have already refreshed) and retry once
-            // with the fresh client. Without this the queue hangs on
-            // "Resolving on TIDAL..." until playback happens to refresh the
-            // session on some other code path.
-            match recover_tidal_client(&state, &tokens).await {
-                Ok(fresh_client) => match find_pending_tidal_match(
-                    &fresh_client,
-                    &db,
-                    &pending_artist,
-                    &pending_title,
-                    tidal_id_hint,
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(e2) => {
-                        tracing::warn!(queue_item_id, error = %e2, "background resolver: Tidal resolve failed after token refresh");
-                        release(&db, queue_item_id);
-                        return false;
-                    }
-                },
-                Err(re) => {
-                    tracing::warn!(queue_item_id, error = %re, "background resolver: TIDAL session refresh failed");
-                    release(&db, queue_item_id);
-                    return false;
-                }
-            }
-        }
         Err(e) => {
             tracing::warn!(queue_item_id, error = %e, "background resolver: Tidal resolve failed");
             release(&db, queue_item_id);
@@ -5975,39 +5938,6 @@ async fn resolve_pending_current_queue_item(
     .await
     {
         Ok(r) => r,
-        Err(error) if error_looks_like_auth(&error) => {
-            // Expired-token recovery, same shape as resolve_pending_row:
-            // this is the row the user is actively waiting on, so it must
-            // not fail on a stale session the single-flight helper can
-            // refresh in one round trip.
-            let retried = match recover_tidal_client(state, &tokens).await {
-                Ok(fresh_client) => {
-                    find_pending_tidal_match(
-                        &fresh_client,
-                        &db,
-                        &pending_artist,
-                        &pending_title,
-                        tidal_id_hint,
-                    )
-                    .await
-                }
-                Err(refresh_error) => Err(refresh_error),
-            };
-            match retried {
-                Ok(r) => r,
-                Err(error) => {
-                    tracing::warn!(
-                        target: "noor.playback.resolve",
-                        event = "pending_current_resolve_api_failed",
-                        queue_item_id,
-                        error = %error,
-                        "TIDAL lookup failed for current pending queue row after token refresh"
-                    );
-                    release_lock(&db, queue_item_id);
-                    return None;
-                }
-            }
-        }
         Err(error) => {
             tracing::warn!(
                 target: "noor.playback.resolve",
@@ -8472,9 +8402,9 @@ async fn tidal_search(
     // share a row; anything larger keeps its own.
     let fetch_limit = limit.max(TIDAL_SEARCH_CACHE_BUCKET);
     // Snapshot what we need from state in one lock acquisition.
-    let (db, http_client, tidal_session) = {
+    let (db, tidal_session) = {
         let s = state.read().await;
-        (s.db.clone(), s.http_client.clone(), s.tidal.clone())
+        (s.db.clone(), s.tidal.clone())
     };
 
     let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
@@ -8519,39 +8449,6 @@ async fn tidal_search(
                     .await
                     {
                         Ok(r) => r,
-                        Err(e) if error_looks_like_auth(&e) => {
-                            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                                .await
-                                .map_err(|re| {
-                                    (
-                                        StatusCode::BAD_GATEWAY,
-                                        Json(json!({
-                                            "error": format!(
-                                                "TIDAL session refresh failed: {}",
-                                                re
-                                            )
-                                        })),
-                                    )
-                                })?;
-                            let retry_client = TidalClient::for_session(
-                                tidal_session.clone(),
-                                &refreshed.country_code,
-                            )
-                            .with_metadata_store(state.read().await.db.clone());
-                            search_tidal_catalog_with_timeout(
-                                &retry_client,
-                                query,
-                                fetch_limit,
-                                offset,
-                            )
-                            .await
-                            .map_err(|e2| {
-                                (
-                                    StatusCode::BAD_GATEWAY,
-                                    Json(json!({ "error": e2.to_string() })),
-                                )
-                            })?
-                        }
                         Err(e) => {
                             return Err((
                                 StatusCode::BAD_GATEWAY,
@@ -8752,36 +8649,11 @@ async fn tidal_video_search(
 
     let limit = normalize_tidal_video_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
-    let (http_client, tidal_session) = {
-        let s = state.read().await;
-        (s.http_client.clone(), s.tidal.clone())
-    };
+    let tidal_session = state.read().await.tidal.clone();
     let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
     let videos = match client.search_videos(query, limit, offset).await {
         Ok(videos) => videos,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|re| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                    )
-                })?;
-            let retry_client =
-                TidalClient::for_session(tidal_session.clone(), &refreshed.country_code)
-                    .with_metadata_store(state.read().await.db.clone());
-            retry_client
-                .search_videos(query, limit, offset)
-                .await
-                .map_err(|e2| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e2.to_string() })),
-                    )
-                })?
-        }
         Err(e) => {
             return Err((
                 StatusCode::BAD_GATEWAY,
@@ -9038,36 +8910,11 @@ async fn tidal_video_mix_items(
         ));
     };
 
-    let (http_client, tidal_session) = {
-        let s = state.read().await;
-        (s.http_client.clone(), s.tidal.clone())
-    };
+    let tidal_session = state.read().await.tidal.clone();
     let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
     let items = match client.get_video_mix_items(mix_id).await {
         Ok(items) => items,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|re| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                    )
-                })?;
-            let retry_client =
-                TidalClient::for_session(tidal_session.clone(), &refreshed.country_code)
-                    .with_metadata_store(state.read().await.db.clone());
-            retry_client
-                .get_video_mix_items(mix_id)
-                .await
-                .map_err(|e2| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e2.to_string() })),
-                    )
-                })?
-        }
         Err(e) => {
             return Err((
                 StatusCode::BAD_GATEWAY,
@@ -9101,36 +8948,11 @@ async fn tidal_video_playlist_items(
         ));
     };
 
-    let (http_client, tidal_session) = {
-        let s = state.read().await;
-        (s.http_client.clone(), s.tidal.clone())
-    };
+    let tidal_session = state.read().await.tidal.clone();
     let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
     let items = match client.get_playlist_video_items(uuid).await {
         Ok(items) => items,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|re| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                    )
-                })?;
-            let retry_client =
-                TidalClient::for_session(tidal_session.clone(), &refreshed.country_code)
-                    .with_metadata_store(state.read().await.db.clone());
-            retry_client
-                .get_playlist_video_items(uuid)
-                .await
-                .map_err(|e2| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e2.to_string() })),
-                    )
-                })?
-        }
         Err(e) => {
             return Err((
                 StatusCode::BAD_GATEWAY,
@@ -9214,36 +9036,11 @@ async fn tidal_playlist_search(
 
     let limit = normalize_tidal_playlist_search_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
-    let (http_client, tidal_session) = {
-        let s = state.read().await;
-        (s.http_client.clone(), s.tidal.clone())
-    };
+    let tidal_session = state.read().await.tidal.clone();
     let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
     let playlists = match client.search_playlists(query, limit, offset).await {
         Ok(r) => r,
-        Err(e) if error_looks_like_auth(&e) => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                .await
-                .map_err(|re| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("TIDAL session refresh failed: {}", re) })),
-                    )
-                })?;
-            let retry_client =
-                TidalClient::for_session(tidal_session.clone(), &refreshed.country_code)
-                    .with_metadata_store(state.read().await.db.clone());
-            retry_client
-                .search_playlists(query, limit, offset)
-                .await
-                .map_err(|e2| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e2.to_string() })),
-                    )
-                })?
-        }
         Err(e) => {
             return Err((
                 StatusCode::BAD_GATEWAY,
@@ -9295,13 +9092,9 @@ async fn tidal_playlist_tracks(
         ));
     };
 
-    let (http_client, tidal_session, playlist_tracks_cache) = {
+    let (tidal_session, playlist_tracks_cache) = {
         let s = state.read().await;
-        (
-            s.http_client.clone(),
-            s.tidal.clone(),
-            s.tidal_playlist_tracks_cache.clone(),
-        )
+        (s.tidal.clone(), s.tidal_playlist_tracks_cache.clone())
     };
     let limit = 100;
     let offset = 0;
@@ -9313,30 +9106,6 @@ async fn tidal_playlist_tracks(
         None => {
             let resp = match client.get_playlist_tracks(uuid, limit, offset).await {
                 Ok(r) => r,
-                Err(e) if error_looks_like_auth(&e) => {
-                    let refreshed = recover_tidal_session(&state, &http_client, &tokens)
-                        .await
-                        .map_err(|re| {
-                            (
-                                StatusCode::BAD_GATEWAY,
-                                Json(json!({
-                                    "error": format!("TIDAL session refresh failed: {}", re)
-                                })),
-                            )
-                        })?;
-                    let retry_client =
-                        TidalClient::for_session(tidal_session.clone(), &refreshed.country_code)
-                            .with_metadata_store(state.read().await.db.clone());
-                    retry_client
-                        .get_playlist_tracks(uuid, limit, offset)
-                        .await
-                        .map_err(|e2| {
-                            (
-                                StatusCode::BAD_GATEWAY,
-                                Json(json!({ "error": e2.to_string() })),
-                            )
-                        })?
-                }
                 Err(e) => {
                     return Err((
                         StatusCode::BAD_GATEWAY,
@@ -9441,15 +9210,9 @@ async fn tidal_artist_profile(
     // bio, similar artists, videos, and categorized releases instead of a bare
     // top-tracks-and-albums stub.
     let payload = if query.preview {
-        catalog_routes::build_tidal_artist_preview_payload(
-            &state,
-            &client,
-            tidal_artist_id,
-            &tokens,
-        )
-        .await
+        catalog_routes::build_tidal_artist_preview_payload(&state, &client, tidal_artist_id).await
     } else {
-        catalog_routes::build_tidal_artist_payload(&state, &client, tidal_artist_id, &tokens).await
+        catalog_routes::build_tidal_artist_payload(&state, &client, tidal_artist_id).await
     };
     Ok(Json(payload))
 }
@@ -9486,8 +9249,7 @@ async fn tidal_artist_core(
     let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
     let payload =
-        catalog_routes::build_tidal_artist_core_payload(&state, &client, tidal_artist_id, &tokens)
-            .await;
+        catalog_routes::build_tidal_artist_core_payload(&state, &client, tidal_artist_id).await;
     Ok(Json(payload))
 }
 
@@ -9499,46 +9261,6 @@ pub(crate) async fn recover_tidal_session(
     let session = state.read().await.tidal.clone();
     session.refresh_stale(&tokens.access_token).await
 }
-
-/// Refresh the TIDAL session and hand back a client primed with the new access
-/// token. Wraps `recover_tidal_session` + the `TidalClient::with_http` rebuild
-/// so the handlers that retry after a 401 don't each re-implement it.
-///
-/// Single-flight re-check: TIDAL can rotate the refresh token on use, so a
-/// burst of requests that all 401 at once must not each fire their own refresh
-/// (the losers would hit `invalid_grant`). Recovery is serialized by an
-/// app-scoped mutex. After acquiring it, each caller re-reads the in-memory
-/// tokens; if the access token changed while it waited, it reuses that fresh
-/// token instead of calling TIDAL again.
-pub(super) async fn recover_tidal_client(
-    state: &SharedState,
-    used_tokens: &tidal_auth::TidalTokens,
-) -> anyhow::Result<TidalClient> {
-    let (client, _) = recover_tidal_client_with_tokens(state, used_tokens).await?;
-    Ok(client)
-}
-
-/// Recover a TIDAL client and return the exact tokens used to construct it.
-/// Callers that need the refreshed user or country metadata (for example sync
-/// and mutations) should use this instead of re-reading shared state after the
-/// single-flight permit has been released.
-pub(super) async fn recover_tidal_client_with_tokens(
-    state: &SharedState,
-    used_tokens: &tidal_auth::TidalTokens,
-) -> anyhow::Result<(TidalClient, tidal_auth::TidalTokens)> {
-    let (session, db) = {
-        let s = state.read().await;
-        (s.tidal.clone(), s.db.clone())
-    };
-    let tokens = session.refresh_stale(&used_tokens.access_token).await?;
-    let client = session
-        .client()
-        .ok_or(crate::services::tidal::session::SessionExpired)?
-        .with_metadata_store(db);
-    Ok((client, tokens))
-}
-
-pub(super) use crate::services::tidal::auth::error_looks_like_auth;
 
 async fn current_playback_runtime(
     state: &SharedState,

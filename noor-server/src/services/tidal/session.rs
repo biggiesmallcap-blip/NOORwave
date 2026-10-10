@@ -30,6 +30,13 @@ pub fn is_session_expired(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| cause.is::<SessionExpired>())
 }
 
+/// The session cannot serve requests right now: it needs reconnect, or TIDAL
+/// still refused the token after the client's own refresh-and-retry. Loops
+/// that make many calls should stop instead of burning quota.
+pub fn session_unusable(err: &anyhow::Error) -> bool {
+    is_session_expired(err) || crate::services::tidal::client::is_auth_failure(err)
+}
+
 pub struct TidalSessionConfig {
     pub api_http: reqwest::Client,
     pub api_base: String,

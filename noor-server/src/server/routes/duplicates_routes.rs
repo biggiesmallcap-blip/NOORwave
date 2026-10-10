@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::{error, warn};
+use tracing::warn;
 
 const DUPLICATE_LIST_LIMIT_MAX: i64 = 100;
 
@@ -108,30 +108,13 @@ pub(super) async fn resolve_duplicate_group(
         let _ = s.event_tx.send(AppEvent::LibrarySynced);
     }
 
-    // Best-effort unfavorite on TIDAL with session refresh retry.
+    // Best-effort unfavorite on TIDAL; the session-bound client refreshes
+    // and retries once on an expired session.
     if let Some(t) = tokens.clone() {
-        let mut client = TidalClient::for_session(tidal_session.clone(), &t.country_code)
+        let client = TidalClient::for_session(tidal_session.clone(), &t.country_code)
             .with_metadata_store(state.read().await.db.clone());
-        let mut user_id = t.user_id.clone();
         for tidal_id in &result.tidal_ids_to_unfavorite {
-            if let Err(e) = client.remove_favorite_track(&user_id, *tidal_id).await {
-                // If it looks like a session expiry, try to refresh and retry once.
-                if super::error_looks_like_auth(&e)
-                    && let Ok((retry_client, refreshed)) =
-                        super::recover_tidal_client_with_tokens(&state, &t).await
-                {
-                    if let Err(e2) = retry_client
-                        .remove_favorite_track(&refreshed.user_id, *tidal_id)
-                        .await
-                    {
-                        error!(
-                            "Failed to unfavorite TIDAL track {tidal_id} after session refresh: {e2}"
-                        );
-                    }
-                    client = retry_client;
-                    user_id = refreshed.user_id;
-                    continue;
-                }
+            if let Err(e) = client.remove_favorite_track(&t.user_id, *tidal_id).await {
                 warn!("Failed to unfavorite TIDAL track {tidal_id}: {e}");
             }
         }

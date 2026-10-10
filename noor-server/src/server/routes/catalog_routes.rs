@@ -1,11 +1,7 @@
-use super::{
-    error_looks_like_auth, load_persisted_tidal_tokens, recover_tidal_client,
-    tidal_track_playable_json,
-};
+use super::{load_persisted_tidal_tokens, tidal_track_playable_json};
 use crate::SharedState;
 use crate::db::queries;
 use crate::services::tidal::{
-    auth::TidalTokens,
     client::{
         TidalAlbum, TidalArtist, TidalArtistBio, TidalArtistVideo, TidalClient,
         TidalPaginatedResponse, TidalTrack,
@@ -237,7 +233,8 @@ where
         match attempt().await {
             Ok(value) => Ok(value),
             Err(error)
-                if error_looks_like_auth(&error)
+                if crate::services::tidal::client::is_auth_failure(&error)
+                    || crate::services::tidal::session::is_session_expired(&error)
                     || error.to_string().contains("404 Not Found")
                     || crate::services::tidal::backoff::global().state().active =>
             {
@@ -632,14 +629,21 @@ mod tests {
         let calls = AtomicU32::new(0);
         let result = bounded_artist_fetch("test", Duration::from_secs(5), || {
             calls.fetch_add(1, AtomicOrdering::SeqCst);
-            async { Err::<i32, _>(anyhow::anyhow!("TIDAL API error 401 Unauthorized: expired")) }
+            async {
+                Err::<i32, _>(anyhow::Error::new(
+                    crate::services::tidal::client::TidalApiError::from_response_parts(
+                        reqwest::StatusCode::UNAUTHORIZED,
+                        "expired".to_string(),
+                    ),
+                ))
+            }
         })
         .await;
         assert!(result.is_err());
         assert_eq!(
             calls.load(AtomicOrdering::SeqCst),
             1,
-            "auth errors must go straight to batch-level session recovery"
+            "the client already refreshed once; a remaining auth failure must not be retried"
         );
     }
 
@@ -869,25 +873,6 @@ pub(super) async fn get_album_tracks(
     // dropping to library-only.
     let tidal_tracks_result = match client.get_all_album_tracks(tidal_album_id).await {
         Ok(t) => Some(t),
-        Err(e) if error_looks_like_auth(&e) => match recover_tidal_client(&state, &tokens).await {
-            Ok(retry_client) => match retry_client.get_all_album_tracks(tidal_album_id).await {
-                Ok(t) => Some(t),
-                Err(retry_err) => {
-                    tracing::warn!(
-                        ?retry_err,
-                        "TIDAL get_all_album_tracks retry failed; serving library only"
-                    );
-                    None
-                }
-            },
-            Err(refresh_err) => {
-                tracing::warn!(
-                    ?refresh_err,
-                    "TIDAL session refresh failed; serving library only"
-                );
-                None
-            }
-        },
         Err(e) => {
             tracing::warn!(
                 ?e,
@@ -1181,23 +1166,6 @@ impl TidalArtistBatch {
             || self.similar.is_ok()
             || self.profile.is_ok()
     }
-
-    /// Any error in the batch that smells like an expired/invalid session.
-    fn looks_like_auth(&self) -> bool {
-        [
-            self.albums.as_ref().err(),
-            self.eps.as_ref().err(),
-            self.comps.as_ref().err(),
-            self.top.as_ref().err(),
-            self.videos.as_ref().err(),
-            self.similar.as_ref().err(),
-            self.bio.as_ref().err(),
-            self.profile.as_ref().err(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(error_looks_like_auth)
-    }
 }
 
 async fn fetch_tidal_artist_batch(
@@ -1274,7 +1242,6 @@ pub(super) async fn build_tidal_artist_core_payload(
     state: &SharedState,
     client: &TidalClient,
     tidal_artist_id: i64,
-    tokens: &TidalTokens,
 ) -> Value {
     if let Some(hit) = cached_artist_core_payload(tidal_artist_id, ARTIST_PAYLOAD_CACHE_TTL) {
         return hit;
@@ -1285,13 +1252,8 @@ pub(super) async fn build_tidal_artist_core_payload(
             tidal_artist_id,
             || cached_artist_core_payload(tidal_artist_id, ARTIST_PAYLOAD_CACHE_TTL),
             || async {
-                let payload = build_uncached_tidal_artist_core_payload(
-                    state,
-                    client,
-                    tidal_artist_id,
-                    tokens,
-                )
-                .await;
+                let payload =
+                    build_uncached_tidal_artist_core_payload(state, client, tidal_artist_id).await;
                 if payload["available"].as_bool().unwrap_or(false) {
                     store_artist_core_payload(tidal_artist_id, payload.clone());
                 }
@@ -1306,7 +1268,6 @@ async fn build_uncached_tidal_artist_core_payload(
     state: &SharedState,
     client: &TidalClient,
     tidal_artist_id: i64,
-    tokens: &TidalTokens,
 ) -> Value {
     async fn fetch_core(
         client: &TidalClient,
@@ -1325,20 +1286,7 @@ async fn build_uncached_tidal_artist_core_payload(
         )
     }
 
-    let (mut top_res, mut profile_res) = fetch_core(client, tidal_artist_id).await;
-    let all_failed = top_res.is_err() && profile_res.is_err();
-    let looks_like_auth = top_res.as_ref().err().is_some_and(error_looks_like_auth)
-        && profile_res
-            .as_ref()
-            .err()
-            .is_some_and(error_looks_like_auth);
-    if all_failed
-        && looks_like_auth
-        && let Ok(retry_client) = recover_tidal_client(state, tokens).await
-    {
-        (top_res, profile_res) = fetch_core(&retry_client, tidal_artist_id).await;
-    }
-
+    let (top_res, profile_res) = fetch_core(client, tidal_artist_id).await;
     let available = top_res.is_ok() || profile_res.is_ok();
     let sections_failed: Vec<&str> = [
         ("top_tracks", top_res.is_err()),
@@ -1432,25 +1380,22 @@ pub(super) async fn build_tidal_artist_payload(
     state: &SharedState,
     client: &TidalClient,
     tidal_artist_id: i64,
-    tokens: &TidalTokens,
 ) -> Value {
-    build_tidal_artist_payload_with_depth(state, client, tidal_artist_id, tokens, false).await
+    build_tidal_artist_payload_with_depth(state, client, tidal_artist_id, false).await
 }
 
 pub(super) async fn build_tidal_artist_preview_payload(
     state: &SharedState,
     client: &TidalClient,
     tidal_artist_id: i64,
-    tokens: &TidalTokens,
 ) -> Value {
-    build_tidal_artist_payload_with_depth(state, client, tidal_artist_id, tokens, true).await
+    build_tidal_artist_payload_with_depth(state, client, tidal_artist_id, true).await
 }
 
 async fn build_tidal_artist_payload_with_depth(
     state: &SharedState,
     client: &TidalClient,
     tidal_artist_id: i64,
-    tokens: &TidalTokens,
     preview: bool,
 ) -> Value {
     // Warm-cache fast path: a fresh payload skips the nine-call TIDAL
@@ -1476,34 +1421,8 @@ async fn build_tidal_artist_payload_with_depth(
     let started = Instant::now();
     let background_client = client.for_background_work();
     let max_album_pages = if preview { 1 } else { 20 };
-    let mut batch =
+    let batch =
         fetch_tidal_artist_batch(&background_client, tidal_artist_id, max_album_pages).await;
-
-    // When every fetch failed and the errors smell like auth, the session
-    // expired mid-flight. Recover once and refetch with a fresh client - the
-    // same self-heal `get_tidal_album_tracks` already does. Without this an
-    // expired token silently produced empty shelves with `available: true`.
-    if !batch.any_ok() && batch.looks_like_auth() {
-        match recover_tidal_client(state, tokens).await {
-            Ok(retry_client) => {
-                let background_retry_client = retry_client.for_background_work();
-                batch = fetch_tidal_artist_batch(
-                    &background_retry_client,
-                    tidal_artist_id,
-                    max_album_pages,
-                )
-                .await;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "noor.sync.tidal",
-                    "TIDAL artist {} discography auth recovery failed: {}",
-                    tidal_artist_id,
-                    e
-                );
-            }
-        }
-    }
 
     let available = batch.any_ok();
     let TidalArtistBatch {
@@ -1868,9 +1787,9 @@ pub(super) async fn get_artist_discography(
         .with_metadata_store(state.read().await.db.clone());
 
     let payload = if query.preview {
-        build_tidal_artist_preview_payload(&state, &client, tidal_artist_id, &tokens).await
+        build_tidal_artist_preview_payload(&state, &client, tidal_artist_id).await
     } else {
-        build_tidal_artist_payload(&state, &client, tidal_artist_id, &tokens).await
+        build_tidal_artist_payload(&state, &client, tidal_artist_id).await
     };
 
     // Best-effort persistence of bio text to the local artists row so the
@@ -1952,19 +1871,10 @@ pub(super) async fn get_tidal_artist_release_page(
     let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone())
         .for_background_work();
-    let mut page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
+    let page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
         client.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
     })
     .await;
-    if page.as_ref().err().is_some_and(error_looks_like_auth)
-        && let Ok(recovered) = recover_tidal_client(&state, &tokens).await
-    {
-        let recovered = recovered.for_background_work();
-        page = bounded_artist_fetch("release-page", ARTIST_ALBUM_GROUP_TIMEOUT, || {
-            recovered.get_artist_albums(tidal_artist_id, 50, query.offset, Some(filter))
-        })
-        .await;
-    }
     match page {
         Ok(page) => {
             let collected = query.offset as usize + page.items.len();
@@ -2149,28 +2059,6 @@ pub(super) async fn get_tidal_album_tracks(
         .with_metadata_store(state.read().await.db.clone());
     let items = match client.get_all_album_tracks(tidal_album_id).await {
         Ok(items) => items,
-        Err(error) if error_looks_like_auth(&error) => {
-            let retry_client =
-                recover_tidal_client(&state, &tokens)
-                    .await
-                    .map_err(|refresh_error| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({
-                                "error": format!("TIDAL session refresh failed: {}", refresh_error)
-                            })),
-                        )
-                    })?;
-            retry_client
-                .get_all_album_tracks(tidal_album_id)
-                .await
-                .map_err(|retry_error| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": retry_error.to_string() })),
-                    )
-                })?
-        }
         Err(error) => {
             return Err((
                 StatusCode::BAD_GATEWAY,

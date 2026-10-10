@@ -23,8 +23,8 @@ use super::{expand, graph, names, roots};
 use crate::SharedState;
 use crate::db::Database;
 use crate::metadata::lastfm::LastFmClient;
-use crate::services::tidal::auth::error_looks_like_auth;
 use crate::services::tidal::client::TidalClient;
+use crate::services::tidal::session::session_unusable;
 use crate::services::video_sets::VideoCandidate;
 use crate::services::{library_videos, video_radio};
 
@@ -219,7 +219,7 @@ pub async fn execute<S: DiscoverySource>(db: &Database, src: &S, job: &Job) -> J
         JobReport {
             calls: job.estimated_calls(),
             failed: true,
-            auth_failed: error_looks_like_auth(&error),
+            auth_failed: session_unusable(&error),
             ..Default::default()
         }
     })
@@ -234,7 +234,7 @@ async fn catalog_page<S: DiscoverySource>(
     let id = job.artist_id;
     let page = match src.artist_videos(id, offset).await {
         Ok(page) => page,
-        Err(error) if error_looks_like_auth(&error) => return Err(error),
+        Err(error) if session_unusable(&error) => return Err(error),
         Err(_) => {
             if offset == 0 {
                 db.with_conn(|conn| artist_state::record_check(conn, id, CheckResult::Failed))?;

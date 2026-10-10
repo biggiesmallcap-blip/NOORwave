@@ -1104,54 +1104,6 @@ async fn run_tidal_sync_with_reauth(
 ) -> anyhow::Result<SyncStats> {
     match do_tidal_sync(client, state, &tokens.user_id, cancel, requested_mode).await {
         Ok(stats) => Ok(stats),
-        Err(err) if super::error_looks_like_auth(&err) => {
-            tracing::warn!(
-                target: "noor.sync.tidal",
-                event = "sync_auth_failure",
-                user_id = %tokens.user_id,
-                error = %err,
-                "TIDAL sync hit an auth error; trying refresh-token recovery"
-            );
-
-            let (retry_client, refreshed) = match super::recover_tidal_client_with_tokens(
-                state, &tokens,
-            )
-            .await
-            {
-                Ok(recovered) => recovered,
-                Err(recover_err) => {
-                    // Do NOT clear the session. A transient network error during refresh
-                    // should not permanently log the user out.
-                    tracing::error!(
-                        target: "noor.sync.tidal",
-                        event = "sync_recovery_failed",
-                        user_id = %tokens.user_id,
-                        error = %recover_err,
-                        original_error = %err,
-                        "TIDAL sync recovery failed; keeping stored tokens"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "TIDAL session recovery failed after auth error: {}; original sync error: {}",
-                        recover_err,
-                        err
-                    ));
-                }
-            };
-            tracing::info!(
-                target: "noor.sync.tidal",
-                event = "sync_recovered",
-                user_id = %refreshed.user_id,
-                "TIDAL sync session recovered; retrying sync"
-            );
-            do_tidal_sync(
-                &retry_client,
-                state,
-                &refreshed.user_id,
-                cancel,
-                requested_mode,
-            )
-            .await
-        }
         Err(err) => Err(err),
     }
 }
@@ -1237,32 +1189,26 @@ async fn ensure_tidal_session(
     client: &TidalClient,
 ) -> std::result::Result<(tidal_auth::TidalTokens, TidalSyncSessionState), TidalSyncStartError> {
     match client.validate_session(&tokens.user_id).await {
-        Ok(()) => Ok((tokens.clone(), TidalSyncSessionState::Valid)),
-        Err(err) if super::error_looks_like_auth(&err) => {
-            tracing::warn!(
+        Ok(()) => {
+            // The session-bound client refreshes on an auth failure; report
+            // that as Recovered and hand back the refreshed tokens.
+            let current = state.read().await.tidal.tokens();
+            match current {
+                Some(current) if current.access_token != tokens.access_token => {
+                    Ok((current, TidalSyncSessionState::Recovered))
+                }
+                _ => Ok((tokens.clone(), TidalSyncSessionState::Valid)),
+            }
+        }
+        Err(err) if crate::services::tidal::session::is_session_expired(&err) => {
+            tracing::error!(
                 target: "noor.sync.tidal",
-                event = "preflight_stale_session",
+                event = "preflight_refresh_failed",
                 user_id = %tokens.user_id,
                 error = %err,
-                "TIDAL session looks stale before sync"
+                "TIDAL session needs reconnect before sync"
             );
-            match super::recover_tidal_client_with_tokens(state, tokens).await {
-                Ok((_, tokens)) => Ok((tokens, TidalSyncSessionState::Recovered)),
-                Err(recover_err) => {
-                    // Do NOT clear. A transient refresh failure should not log the user out.
-                    tracing::error!(
-                        target: "noor.sync.tidal",
-                        event = "preflight_refresh_failed",
-                        user_id = %tokens.user_id,
-                        error = %recover_err,
-                        original_error = %err,
-                        "TIDAL preflight refresh failed; keeping stored tokens"
-                    );
-                    Err(TidalSyncStartError::PreflightRefreshFailed(
-                        recover_err.to_string(),
-                    ))
-                }
-            }
+            Err(TidalSyncStartError::PreflightRefreshFailed(err.to_string()))
         }
         Err(err) => {
             tracing::error!(

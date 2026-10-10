@@ -101,8 +101,7 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
             }
             Ok(Err(error)) => {
                 let message = error.to_string().to_lowercase();
-                if message.contains("401")
-                    || message.contains("unauthorized")
+                if crate::services::tidal::session::session_unusable(&error)
                     || message.contains("429")
                 {
                     break;
