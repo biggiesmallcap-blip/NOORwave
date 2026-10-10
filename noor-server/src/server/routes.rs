@@ -6466,22 +6466,29 @@ async fn previous_via_persisted_queue(
     let play_track = snapshot.state.current_track.as_ref();
 
     if let Some(track) = play_track {
-        let user_quality = current_user_audio_quality(state).await;
-        let Some(stream_request) = player::build_tidal_stream_request(track, user_quality.clone())
-        else {
-            restore_after_previous_failure(state, saved_anchor, popped_entry, playback_generation)
-                .await;
-            return Err((
-                StatusCode::NOT_IMPLEMENTED,
-                Json(json!({
-                    "status": "local_playback_not_supported",
-                    "message": "Local-library playback is not wired into the host audio runtime yet.",
-                    "track_id": track.id,
-                })),
-            ));
-        };
-        let stream_info = match resolve_tidal_playback_stream(state, track, &stream_request).await {
-            Ok(info) => info,
+        {
+            // Back-navigation: the incoming Started event must not push the
+            // track being navigated away from onto play history, or two prev
+            // presses would ping-pong between the same two tracks.
+            let mut state_guard = state.write().await;
+            state_guard
+                .play_history
+                .suppress_push_for_generation(playback_generation);
+        }
+        let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
+        match start_track(
+            state,
+            StartRequest {
+                track,
+                generation: playback_generation,
+                dispatch: Dispatch::Switch,
+                crossfade_ms,
+            },
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(StartError::Superseded) => return current_playback_snapshot_json(state).await,
             Err(error) => {
                 // The anchor moved but the audio did not: roll back so state
                 // and audio agree instead of leaving the DB pointing at a
@@ -6493,75 +6500,14 @@ async fn previous_via_persisted_queue(
                     playback_generation,
                 )
                 .await;
-                return Err(tidal_playback_error_response(
-                    track.id,
-                    error,
-                    "TIDAL stream could not be resolved while moving to the previous track.",
-                ));
-            }
-        };
-        if !playback_generation_is_current(state, playback_generation).await {
-            return current_playback_snapshot_json(state).await;
-        }
-        let runtime_handle = match ensure_playback_runtime_for_track(state, track).await {
-            Ok(handle) => handle,
-            Err(_) => {
-                restore_after_previous_failure(
+                return Err(start_error_response(
                     state,
-                    saved_anchor,
-                    popped_entry,
-                    playback_generation,
-                )
-                .await;
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({
-                        "status": "playback_runtime_unavailable",
-                        "message": "Playback runtime was not available for moving to the previous track.",
-                        "track_id": track.id,
-                    })),
+                    error,
+                    track.id,
+                    "TIDAL stream could not be resolved while moving to the previous track.",
+                    Some("Playback runtime was not available for moving to the previous track."),
                 ));
             }
-        };
-        let job = player::build_playback_preparation(
-            track,
-            Some(&stream_info),
-            effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
-            user_quality,
-        )
-        .with_generation(playback_generation)
-        .with_start_paused(!transport_intent_is_playing(state).await);
-        {
-            // Back-navigation: the incoming Started event must not push the
-            // track being navigated away from onto play history, or two prev
-            // presses would ping-pong between the same two tracks.
-            let mut state_guard = state.write().await;
-            state_guard
-                .play_history
-                .suppress_push_for_generation(playback_generation);
-        }
-        if let Err(error) = runtime_handle.switch_to(job) {
-            restore_after_previous_failure(state, saved_anchor, popped_entry, playback_generation)
-                .await;
-            let message = format!("Failed to switch host audio playback: {error}");
-            report_playback_failure(state, &message);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "playback_runtime_failed",
-                    "message": message,
-                    "track_id": track.id,
-                })),
-            ));
-        }
-        {
-            let mut state_guard = state.write().await;
-            state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
-                audio_quality: stream_info.audio_quality.clone(),
-                sample_rate: stream_info.sample_rate,
-                bit_depth: stream_info.bit_depth,
-            });
-            state_guard.pending_stream_display = None;
         }
     }
 
