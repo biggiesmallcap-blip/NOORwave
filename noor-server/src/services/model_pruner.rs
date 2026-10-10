@@ -26,9 +26,9 @@ use std::time::Duration;
 /// Pause between delete batches so the shared connection stays available to
 /// request handlers. The repair is never urgent; staying invisible matters more.
 const BATCH_PAUSE: Duration = Duration::from_millis(150);
-/// Safety stop so a bug can never spin forever. At 20k rows per batch this
+/// Safety stop so a bug can never spin forever. At 2k rows per batch this
 /// covers ~40M neighbour rows, well past anything observed.
-const MAX_BATCHES: usize = 2_000;
+const MAX_BATCHES: usize = 20_000;
 /// Batches the startup repair will do before leaving the rest alone.
 ///
 /// Row-by-row deletion is bound by index maintenance (~5k rows/sec measured), so
@@ -37,7 +37,7 @@ const MAX_BATCHES: usize = 2_000;
 /// the indexes first. The startup pass therefore only nibbles - enough to keep an
 /// ordinary install tidy over a few launches, while a big backlog waits for the
 /// user to press Compact (the Settings panel reports how much is pending).
-const STARTUP_MAX_BATCHES: usize = 25;
+const STARTUP_MAX_BATCHES: usize = 250;
 
 /// Outcome of a prune pass.
 #[derive(Debug, Default, PartialEq, Eq)]
