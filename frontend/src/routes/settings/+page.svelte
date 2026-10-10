@@ -2855,25 +2855,25 @@
 				</div>
 			</section><details data-setting-id="discovery-engine" class="glass-tile section-panel" open={discoveryIsRunning}><summary>Discovery<span class="disclosure-status">{discoveryIsRunning ? "Training - " + Math.round((discoveryStatus?.latest_run?.progress ?? 0) * 100) + "%" : discoveryUpgrade?.pending ? "Upgrade pending" : discoveryStatus ? Math.round(discoveryStatus.coverage_ratio * 100) + "% coverage" : "Status unavailable"}</span></summary><p class="setting-status">Manual runs can use substantial CPU: check the estimate and safety profile first. You can stop any run. After an update that changes how recommendations learn, NOOR relearns once on its own at low priority.</p>
 
-				<details class="discovery-guide"><summary>About discovery training</summary><p class="setting-status">Training finds connections across your library. Refresh after adding music or listening history; a full retrain also rebuilds cached audio features.</p><p class="setting-status">Training completion and model activation are separate. Recommendations use the existing fallback until a model meets the activation criteria.</p></details>
+				<details class="discovery-guide"><summary>About discovery training</summary><p class="setting-status">Training finds connections across your library. Refresh after adding music or listening history; a full retrain also rebuilds cached audio features.</p><p class="setting-status">A finished run replaces the active model only if it predicts your listening at least as well; otherwise the current model stays in use.</p></details>
 
 				<div class="stat-grid inner-metrics">
 					<div class="info-row"><span>Coverage</span><strong>{discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '-'}</strong></div>
-					<div class="info-row"><span>Embedded</span><strong>{discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'}</strong></div>
+					<div class="info-row"><span>Tracks learned</span><strong>{discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'}</strong></div>
 				</div>
 
 				<div class="portable-card">
 					<div class="info-list">
 						<div class="info-row">
 							<span>Active model</span>
-							<strong title={discoveryStatus?.active_model?.model_key}>{discoveryModelLabel(discoveryStatus?.active_model ?? null)}</strong>
+							<strong title={discoveryStatus?.active_model?.model_key}>{discoveryModelLabel(discoveryStatus?.active_model ?? null, discoveryUpgrade)}</strong>
 						</div>
 						<div class="info-row">
 							<span>Last trained</span>
 							<strong>{discoveryStatusLastTrainedAt ? new Date(discoveryStatusLastTrainedAt + 'Z').toLocaleString() : 'Never'}</strong>
 						</div>
 						<div class="info-row">
-							<span>Clip features</span>
+							<span>Audio features</span>
 							<strong>{discoveryStatus?.clip_cache_tracks?.toLocaleString() ?? '0'}</strong>
 						</div>
 						<div class="info-row">
@@ -2882,7 +2882,7 @@
 						</div>
 						{#if discoveryUpgradeText}
 							<div class="info-row">
-								<span>Upgrade</span>
+								<span>Update</span>
 								<strong>{discoveryUpgradeText}</strong>
 							</div>
 						{/if}

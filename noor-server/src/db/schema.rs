@@ -76,7 +76,25 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_072,
     MIGRATION_073,
     MIGRATION_074,
+    MIGRATION_075,
 ];
+
+// Radio continuation and one queue-source switch.
+// - radio_seed_*: the seed and blend of the radio that built the queue, so
+//   topping it up continues that radio instead of switching to automix.
+// - "Include new" and "External picks" ran the same lane; they fold into
+//   automix_discover_new. Learned ranking is always on (it falls back by
+//   itself when no model exists).
+// Runs inside the >= 69 migration transaction: no BEGIN/COMMIT here.
+const MIGRATION_075: &str = r#"
+ALTER TABLE playback_state ADD COLUMN radio_seed_kind TEXT;
+ALTER TABLE playback_state ADD COLUMN radio_seed_id INTEGER;
+ALTER TABLE playback_state ADD COLUMN radio_blend TEXT;
+UPDATE playback_state
+SET automix_discover_new = MAX(automix_discover_new, automix_allow_external),
+    automix_allow_external = 0,
+    automix_use_learning = 1;
+"#;
 
 // Global "Not for me" feedback: a track or artist the listener never wants
 // suggested again. Read by the candidate gate for every recommendation source.

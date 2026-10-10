@@ -273,6 +273,11 @@ pub fn ensure_automix_queue_depth(
     if upcoming_count >= target_upcoming {
         return Ok(queue_items);
     }
+    // A radio's queue tops up from its own seed (server::radio_continuation).
+    // Automix only steps in if the radio has run dry, so playback never stops.
+    if upcoming_count > 0 && crate::server::radio_continuation::radio_queue_active(conn) {
+        return Ok(queue_items);
+    }
 
     let needed = (target_upcoming - upcoming_count).max(AUTOMIX_BATCH_SIZE);
     let shuffle_mode = ShuffleMode::parse(&state.shuffle_mode);
@@ -286,43 +291,65 @@ pub fn ensure_automix_queue_depth(
         None
     };
 
-    let extension = build_automix_extension_with_reasons(
-        conn,
-        current_track,
-        &queue_items,
-        shuffle_mode,
-        shuffle_seed,
-        needed,
-        state.automix_use_learning,
-    )?;
-
-    let mut appended = false;
-    if !extension.is_empty() {
-        let extension = extension
-            .into_iter()
-            .map(AutomixSelection::into_queue_pair)
-            .collect::<Vec<_>>();
-        queue::append_tracks_with_reasons(conn, &extension, "automix")?;
-        appended = true;
-    }
-
-    // External picks ("Allow external" or "Include New"): tracks Last.fm
-    // linked to this seed or its learned neighbors, gated like every other
-    // source, filling up to a quarter of the batch when good ones exist.
-    if state.automix_allow_external || state.automix_discover_new {
-        let model_id = queries::get_selected_discovery_embedding_model(conn)
-            .ok()
-            .flatten()
-            .map(|model| model.id);
-        let external_slots = (needed / 4).max(1);
-        // External picks are optional; a failure here must never fail the
-        // refill that next_track and peek_next_track depend on.
-        match append_automix_external_candidates(conn, model_id, current_track.id, external_slots) {
-            Ok(appended_external) => appended |= appended_external > 0,
+    // External picks ("Include new"): tracks Last.fm linked to this seed or
+    // its learned neighbors, gated like every other source. Their share
+    // follows how much the library knows about the playing track: a quarter of
+    // the batch when its learned neighbors are well supported, three quarters
+    // and first in line when they are not, since Last.fm is what knows the
+    // tracks the library does not.
+    let external_on = state.automix_allow_external || state.automix_discover_new;
+    let model_id = queries::get_selected_discovery_embedding_model(conn)
+        .ok()
+        .flatten()
+        .map(|model| model.id);
+    let little_evidence = external_on && has_little_evidence(conn, model_id, current_track.id);
+    let external_slots = if little_evidence {
+        (needed * 3 / 4).max(1)
+    } else {
+        (needed / 4).max(1)
+    };
+    // External picks are optional; a failure here must never fail the refill
+    // that next_track and peek_next_track depend on.
+    let append_external = |slots: usize| -> usize {
+        match append_automix_external_candidates(conn, model_id, current_track.id, slots) {
+            Ok(appended) => appended,
             Err(error) => {
-                tracing::warn!(target: "noor.automix", %error, "external automix refill failed")
+                tracing::warn!(target: "noor.automix", %error, "external automix refill failed");
+                0
             }
         }
+    };
+
+    let mut appended = false;
+    let mut library_needed = needed;
+    if little_evidence {
+        let added = append_external(external_slots);
+        appended |= added > 0;
+        library_needed = needed.saturating_sub(added);
+    }
+
+    if library_needed > 0 {
+        let extension = build_automix_extension_with_reasons(
+            conn,
+            current_track,
+            &queue_items,
+            shuffle_mode,
+            shuffle_seed,
+            library_needed,
+            state.automix_use_learning,
+        )?;
+        if !extension.is_empty() {
+            let extension = extension
+                .into_iter()
+                .map(AutomixSelection::into_queue_pair)
+                .collect::<Vec<_>>();
+            queue::append_tracks_with_reasons(conn, &extension, "automix")?;
+            appended = true;
+        }
+    }
+
+    if external_on && !little_evidence {
+        appended |= append_external(external_slots) > 0;
     }
 
     if !appended {
@@ -425,6 +452,27 @@ fn anchored_neighbors(
 
 /// Last.fm match (after neighbor weighting) an external pick needs.
 const EXTERNAL_MIN_SCORE: f64 = 0.15;
+/// Fewer well-supported learned neighbors than this (listening, genre or
+/// metadata evidence behind them) and the library knows little about a track.
+const WELL_SUPPORTED_NEIGHBORS: i64 = 8;
+
+/// The library knows little about this track: an active model gives it fewer
+/// than `WELL_SUPPORTED_NEIGHBORS` neighbors with evidence behind them. With
+/// no model at all the scored fallback decides, so that is not "little".
+fn has_little_evidence(conn: &Connection, model_id: Option<i64>, track_id: i64) -> bool {
+    let Some(model_id) = model_id else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COUNT(*) FROM track_neighbors
+         WHERE model_id = ?1 AND track_id = ?2
+           AND (support_count > 0 OR primary_reason IS NOT NULL)",
+        params![model_id, track_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|supported| supported < WELL_SUPPORTED_NEIGHBORS)
+    .unwrap_or(false)
+}
 /// Learned neighbors whose Last.fm links also count, at this weight.
 const EXTERNAL_NEIGHBOR_SEEDS: i64 = 5;
 const EXTERNAL_NEIGHBOR_WEIGHT: f64 = 0.65;
@@ -2111,6 +2159,41 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn little_evidence_means_few_supported_learned_neighbors() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'A');
+             INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Cold', 1), (2, 'Known', 1);
+             INSERT INTO embedding_models (id, model_key, family, dimension, status, is_active)
+             VALUES (7, 'm', 'discovery-fusion-v2', 8, 'ready', 1);",
+        )
+        .unwrap();
+        for neighbor in 10..20 {
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id) VALUES (?1, 'N', 1)",
+                [neighbor],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score, support_count, primary_reason)
+                 VALUES (2, ?1, 7, ?1, 0.8, 3, 'behavioral'), (1, ?1, 7, ?1, 0.3, 0, NULL)",
+                [neighbor],
+            )
+            .unwrap();
+        }
+        assert!(
+            has_little_evidence(&conn, Some(7), 1),
+            "unsupported rows are not evidence"
+        );
+        assert!(!has_little_evidence(&conn, Some(7), 2));
+        assert!(
+            !has_little_evidence(&conn, None, 1),
+            "no model: the scored fallback decides"
+        );
     }
 
     #[test]

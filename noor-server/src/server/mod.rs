@@ -1,3 +1,4 @@
+pub mod radio_continuation;
 pub mod radio_pipeline;
 pub mod remote;
 pub mod routes;

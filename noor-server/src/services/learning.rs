@@ -25,13 +25,19 @@ use std::time::Duration;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
+/// Stage shown while a finished run writes its results. Reported after the
+/// trainer's own stages so progress never moves backwards.
+pub const SAVING_STAGE: &str = "saving";
+
 const MODEL_FAMILY: &str = queries::DISCOVERY_ENGINE_V2_FAMILY;
 /// Bump when a trainer change makes existing models wrong, not just older.
 /// Installs whose active model predates it retrain once in the background
 /// (services::discovery_retrain), and the activation gate lets the new model
 /// replace the old one at near-parity.
 /// v3: context-only behavior hash, genre-path genre branch, word-free proxy.
-pub const TRAINER_CONFIG_VERSION: i64 = 3;
+/// v4: no proxy vector for tracks with only an artist token (cold tracks got
+/// hash-collision neighbors); coverage counts tracks with evidence.
+pub const TRAINER_CONFIG_VERSION: i64 = 4;
 /// Relative recall dip allowed when replacing a model from an older trainer
 /// version, whose numbers were measured on broken inputs.
 const UPGRADE_RECALL_TOLERANCE: f64 = 0.10;
@@ -758,6 +764,82 @@ fn is_provider_rate_limit_error(error: &anyhow::Error) -> bool {
         let text = cause.to_string().to_ascii_lowercase();
         text.contains("429") || text.contains("rate limit") || text.contains("too many requests")
     })
+}
+
+/// Look up Last.fm matches for one track now (similar artists when the track
+/// itself has none) and store them as sightings, so automix's external lane
+/// has picks for a track the periodic refresh never reached. Skipped while
+/// the track still has unexpired Last.fm sightings.
+pub async fn refresh_lastfm_sightings_for_track(
+    db: &Database,
+    lastfm: &crate::metadata::lastfm::LastFmClient,
+    track_id: i64,
+) -> Result<usize> {
+    let seed = db.with_conn(|conn| {
+        let fresh: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM external_track_candidate_sightings
+             WHERE seed_track_id = ?1 AND source = 'lastfm_similar'
+               AND expires_at > datetime('now'))",
+            [track_id],
+            |row| row.get(0),
+        )?;
+        if fresh {
+            return Ok(None);
+        }
+        Ok(conn
+            .query_row(
+                "SELECT t.title, a.name FROM tracks t
+                 LEFT JOIN artists a ON a.id = t.artist_id
+                 WHERE t.id = ?1",
+                [track_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?)
+    })?;
+    let Some((title, Some(artist))) = seed else {
+        return Ok(0);
+    };
+    let rows = lastfm
+        .track_get_similar_with_artist_fallback(
+            &artist,
+            &title,
+            EXTERNAL_REFRESH_LASTFM_ROWS_PER_SEED,
+        )
+        .await?
+        .into_iter()
+        .map(ExternalLastfmCandidate::from)
+        .collect::<Vec<_>>();
+    let seed_row = EmbeddingTrackRow {
+        track_id,
+        title,
+        artist_name: Some(artist),
+        album_title: None,
+        duration_ms: None,
+        best_quality: None,
+        source: String::new(),
+        play_count: 0,
+        is_favorite: false,
+        playlist_memberships: 0,
+        genre_paths: Vec::new(),
+        bpm: None,
+        energy: None,
+        camelot_key: None,
+        danceability: None,
+        beat_strength: None,
+        loudness_lufs: None,
+    };
+    let by_seed = HashMap::from([(track_id, rows)]);
+    let report = db.with_conn(|conn| {
+        persist_external_provider_refresh(
+            conn,
+            std::slice::from_ref(&seed_row),
+            &by_seed,
+            &[],
+            &HashMap::new(),
+            chrono::Utc::now().naive_utc(),
+        )
+    })?;
+    Ok(report.lastfm_sightings_upserted)
 }
 
 pub fn persist_external_provider_refresh(
@@ -1846,7 +1928,8 @@ pub async fn start_training(
         return Ok(());
     }
     fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "audio", "running", 0.55, None, 0)
+        // The trainer already reported up to 96%; saving only moves forward.
+        queries::update_training_run_progress(conn, run.id, SAVING_STAGE, "running", 0.965, None, 0)
     }));
 
     let audio_features = output
@@ -1870,7 +1953,7 @@ pub async fn start_training(
         db.with_conn(|conn| queries::replace_track_audio_features(conn, &audio_features))
     );
     fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "fusion", "running", 0.72, None, 0)
+        queries::update_training_run_progress(conn, run.id, SAVING_STAGE, "running", 0.975, None, 0)
     }));
 
     let embeddings = output
@@ -1931,7 +2014,15 @@ pub async fn start_training(
         return Ok(());
     }
     fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "neighbors", "running", 0.88, None, 0)?;
+        queries::update_training_run_progress(
+            conn,
+            run.id,
+            SAVING_STAGE,
+            "running",
+            0.985,
+            None,
+            0,
+        )?;
         queries::replace_track_neighbors(conn, model.id, &neighbors)?;
         persist_external_neighbors(conn, model.id, &output.external_neighbors)
     }));
@@ -1978,7 +2069,15 @@ pub async fn start_training(
         return Ok(());
     }
     fail_training_on_err!(db.with_conn(|conn| {
-        queries::update_training_run_progress(conn, run.id, "evaluate", "running", 0.96, None, 0)?;
+        queries::update_training_run_progress(
+            conn,
+            run.id,
+            SAVING_STAGE,
+            "running",
+            0.99,
+            None,
+            0,
+        )?;
         queries::update_embedding_model_metrics(conn, model.id, "ready", Some(&metrics_json))?;
         if should_activate {
             queries::activate_embedding_model(conn, model.id)?;

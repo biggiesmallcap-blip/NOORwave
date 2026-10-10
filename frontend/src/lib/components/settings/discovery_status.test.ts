@@ -294,6 +294,12 @@ describe('trainer panel wording', () => {
 	it('describes the latest run in words', () => {
 		expect(describeDiscoveryRun(null)).toBe('Never run');
 		expect(describeDiscoveryRun(run('running'))).toBe('Computing neighbors - 42%');
+		expect(describeDiscoveryRun(run('running', { stage: 'corpus', progress: 0.08 }))).toBe(
+			'Reading your library - 8%'
+		);
+		expect(describeDiscoveryRun(run('running', { stage: 'saving', progress: 0.975 }))).toBe(
+			'Saving results - 98%'
+		);
 		expect(describeDiscoveryRun(run('completed'))).toBe('Finished');
 		expect(describeDiscoveryRun(run('cancelled'))).toBe('Stopped');
 		expect(describeDiscoveryRun(run('failed', { error_text: 'interrupted by server restart' }))).toBe(
@@ -313,13 +319,15 @@ describe('trainer panel wording', () => {
 		);
 	});
 
-	it('names the active model by id and trainer version', () => {
+	it('names the active model by id and flags it while an upgrade replaces it', () => {
 		const model = discoveryStatus().active_model;
-		expect(discoveryModelLabel(null)).toBe('Fallback only');
+		expect(discoveryModelLabel(null)).toBe('None yet');
 		expect(discoveryModelLabel(model)).toBe('Model 13');
-		expect(
-			discoveryModelLabel(model && { ...model, config_json: '{"trainer_config_version":3}' })
-		).toBe('Model 13 (trainer v3)');
-		expect(discoveryModelLabel(model && { ...model, config_json: 'not json' })).toBe('Model 13');
+		expect(discoveryModelLabel(model, { pending: false, running: false, trainer_version: 3 })).toBe(
+			'Model 13'
+		);
+		expect(discoveryModelLabel(model, { pending: true, running: true, trainer_version: 3 })).toBe(
+			'Model 13 (outdated)'
+		);
 	});
 });

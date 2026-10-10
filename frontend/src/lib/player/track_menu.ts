@@ -226,14 +226,14 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 		items.push(downloadMenuItem((format) => void downloadTrack(track.id, format)));
 	}
 
-	items.push(notForMeMenuItem('track', track.id, 'Not for me'));
-	if (hasArtist) {
-		items.push(
-			notForMeMenuItem('artist', track.artist_id!, `Not for me: ${track.artist_name ?? 'this artist'}`)
-		);
-	}
-
 	if (options.queueItemId != null) {
+		items.push(
+			notForMeMenuItem({
+				id: track.id,
+				artist_id: hasArtist ? track.artist_id : null,
+				artist_name: track.artist_name,
+			})
+		);
 		items.push(removeFromQueueMenuItem(options.queueItemId, options.onRemoved));
 	}
 
