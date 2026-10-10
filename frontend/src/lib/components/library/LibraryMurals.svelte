@@ -20,6 +20,7 @@
 		type HomeMuralItem,
 		type HomeMuralPanel,
 	} from './library_murals';
+	import { MURAL_REFRESH_DELAYS_MS, watchMuralQuery } from './mural_query_watch';
 
 	// The Library landing's four suggestion murals: listen-history suggestions
 	// and library shuffle picks, each painted as a collage of the picks. A tile
@@ -72,49 +73,33 @@
 
 	let panels = $derived(buildMuralPanels({ suggestionTracks, suggestionAlbums, randomTracks, randomAlbums }));
 
-	// A failed first fetch (server still starting) retries a few times instead of
-	// leaving the murals blank until a hard reload. On a later failure the
-	// last-good payload stays on screen.
-	const MURAL_RETRY_DELAYS_MS = [2000, 5000, 15000];
-
+	// Empty or failed samples keep refreshing on a bounded backoff while the page
+	// stays open; the last-good payload stays on screen meanwhile.
 	$effect(() => {
-		const timers: ReturnType<typeof setTimeout>[] = [];
-		function retryOnError(query: { refresh(): Promise<unknown> }, attempt: { n: number }, error: unknown, label: string) {
-			console.error(`Failed to load ${label}:`, error);
-			const delay = MURAL_RETRY_DELAYS_MS[attempt.n++];
-			if (delay !== undefined) timers.push(setTimeout(() => void query.refresh().catch(() => undefined), delay));
-		}
-		const shuffleAttempt = { n: 0 };
-		const suggestionAttempt = { n: 0 };
-		let lastShuffleError: unknown = null;
-		let lastSuggestionError: unknown = null;
-		const unsubscribers = [
-			shuffleQuery.subscribe((state) => {
-				if (state.data) {
-					const next = shuffleSources(state.data);
+		const stops = [
+			watchMuralQuery(shuffleQuery, {
+				isEmpty: (data) => (data.tracks?.length ?? 0) + (data.albums?.length ?? 0) === 0,
+				onData: (data) => {
+					const next = shuffleSources(data);
 					randomTracks = next.tracks;
 					randomAlbums = next.albums;
-				}
-				if (state.error && state.error !== lastShuffleError && !state.loading && !state.refreshing) {
-					lastShuffleError = state.error;
-					retryOnError(shuffleQuery, shuffleAttempt, state.error, 'library shuffle picks');
-				}
+				},
+				onError: (error) => console.error('Failed to load library shuffle picks:', error),
+				delaysMs: MURAL_REFRESH_DELAYS_MS,
 			}),
-			suggestionsQuery.subscribe((state) => {
-				if (state.data) {
-					const next = suggestionSources(state.data);
+			watchMuralQuery(suggestionsQuery, {
+				isEmpty: (data) => (data.tracks?.length ?? 0) + (data.albums?.length ?? 0) === 0,
+				onData: (data) => {
+					const next = suggestionSources(data);
 					suggestionTracks = next.tracks;
 					suggestionAlbums = next.albums;
-				}
-				if (state.error && state.error !== lastSuggestionError && !state.loading && !state.refreshing) {
-					lastSuggestionError = state.error;
-					retryOnError(suggestionsQuery, suggestionAttempt, state.error, 'home suggestions');
-				}
+				},
+				onError: (error) => console.error('Failed to load home suggestions:', error),
+				delaysMs: MURAL_REFRESH_DELAYS_MS,
 			}),
 		];
 		return () => {
-			for (const unsubscribe of unsubscribers) unsubscribe();
-			for (const timer of timers) clearTimeout(timer);
+			for (const stop of stops) stop();
 		};
 	});
 

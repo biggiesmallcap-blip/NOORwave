@@ -24,6 +24,7 @@ import {
 	type HomeRecommendationsResponse,
 	type HomeShufflePicksResponse,
 	type HomeSuggestionsResponse,
+	type LibraryTopArtist,
 	type LastfmStatus,
 	type ListenBrainzStatus,
 	type MusicBrainzStatus,
@@ -187,6 +188,7 @@ export const cacheKeys = {
 	homeRecommendations: () => ['api', 'getHomeRecommendations'] as const,
 	homeSuggestions: (seedKey: string) => ['api', 'getHomeSuggestions', { seedKey }] as const,
 	homeShufflePicks: (limit: number) => ['api', 'getHomeShufflePicks', { limit }] as const,
+	libraryTopArtists: (limit: number) => ['api', 'getLibraryTopArtists', { limit }] as const,
 	tidalMixes: () => ['api', 'getTidalMixes'] as const,
 	tidalRadioStations: () => ['api', 'getTidalRadioStations'] as const,
 	tidalHomeModules: () => ['api', 'getTidalHomeModules'] as const,
@@ -530,6 +532,13 @@ export const cachedApi = {
 			{ staleMs: 5 * MINUTE, staleMsForData: homeMuralStaleMs(5 * MINUTE) },
 		);
 	},
+	getLibraryTopArtists(limit = 20) {
+		return fetchCached<{ artists: LibraryTopArtist[] }>(
+			cacheKeys.libraryTopArtists(limit),
+			() => api.getLibraryTopArtists(limit),
+			mediumOptions,
+		);
+	},
 	getTidalMixes() {
 		return fetchCached<TidalMixesResponse>(cacheKeys.tidalMixes(), () => api.getTidalMixes(), staticOptions);
 	},
@@ -745,6 +754,7 @@ export function invalidateLibraryCaches(options: { refetch?: boolean } = {}): vo
 	dataCache.invalidatePrefix(['api', 'getHistory'], options);
 	dataCache.invalidatePrefix(['api', 'getAlbums'], options);
 	dataCache.invalidatePrefix(['api', 'getArtists'], options);
+	dataCache.invalidatePrefix(['api', 'getLibraryTopArtists'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistTracks'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistDiscography'], options);
 	dataCache.invalidatePrefix(['api', 'getArtistDiscographyPreview'], options);

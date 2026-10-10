@@ -2309,6 +2309,18 @@ export interface HomeShufflePicksResponse {
 	albums: Album[];
 }
 
+/// One artist on the Library hero, ranked by total plays across every library
+/// track by that artist (GET /api/library/top-artists).
+export interface LibraryTopArtist {
+	id: number;
+	name: string;
+	photo_url: string | null;
+	fallback_art_url: string | null;
+	play_count: number;
+	track_count: number;
+	album_count: number;
+}
+
 export interface LastfmAuthStartResponse {
 	status: 'awaiting' | 'error';
 	auth_url?: string;
@@ -3981,6 +3993,12 @@ export const api = {
 	// start until the library store had paged in.
 	getHomeShufflePicks(limit = 12) {
 		return fetchApi<HomeShufflePicksResponse>('/api/home/shuffle-picks', { limit: String(limit) });
+	},
+
+	// Library hero: artists ranked by plays summed per artist server-side, so
+	// plays spread over many tracks count in full.
+	getLibraryTopArtists(limit = 20) {
+		return fetchApi<{ artists: LibraryTopArtist[] }>('/api/library/top-artists', { limit: String(limit) });
 	},
 
 	// ─── TIDAL: Your Mixes ────────────────────────────────────────────────
