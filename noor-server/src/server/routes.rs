@@ -10056,105 +10056,104 @@ async fn switch_runtime_to_snapshot_current(
                 "switched runtime to prepared snapshot current track"
             );
         } else {
-            let Some(stream_request) =
-                player::build_tidal_stream_request(&track, user_quality.clone())
-            else {
-                handle_runtime_error(
-                    state.clone(),
-                    "Local library playback is not wired into the host audio runtime yet.",
-                )
-                .await;
-                return Ok(());
-            };
-            let stream_info =
-                match resolve_tidal_playback_stream(state, &track, &stream_request).await {
-                    Ok(info) => info,
-                    Err(err)
-                        if err.is_track_unplayable() && unplayable_skips < MAX_UNPLAYABLE_SKIPS =>
-                    {
-                        unplayable_skips += 1;
-                        dj_routes::record_unavailable_tidal_source(stream_request.track_id);
-                        let reason = if err.is_asset_not_ready() {
-                            "Not available on TIDAL right now"
-                        } else {
-                            "TIDAL wouldn't play this track"
-                        };
-                        tracing::warn!(
-                            target: "noor.playback.advance",
-                            event = "skip_unplayable_track",
-                            generation,
-                            track_id = track.id,
-                            skip = unplayable_skips,
-                            error = %describe_tidal_playback_error(&err),
-                            "skipping unplayable track and advancing to the next queue row"
-                        );
-                        emit_track_skipped(state, track.id, &track.title, reason).await;
-                        if err.is_asset_not_ready() {
-                            spawn_tidal_id_reresolve(state, track.id);
-                        }
-                        // Advance the persisted queue past the dead row and retry.
-                        let cleared = {
-                            let s = state.read().await;
-                            recently_cleared(&s)
-                        };
-                        let advanced = {
-                            let s = state.read().await;
-                            s.db.with_conn(|conn| player::next_track(conn, cleared))
-                        }?;
-                        snapshot = resolve_or_skip_pending_current(
-                            state,
-                            advanced,
-                            generation,
-                            "skip_unplayable",
-                        )
-                        .await?;
-                        if !playback_generation_is_current(state, generation).await {
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                    Err(err) => {
-                        return Err(anyhow::anyhow!(
-                            "playback stream resolve failed: {}",
-                            describe_tidal_playback_error(&err)
-                        ));
-                    }
-                };
-            let job = player::build_playback_preparation(
-                &track,
-                Some(&stream_info),
-                effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
-                user_quality,
-            )
-            .with_generation(generation)
-            .with_start_paused(!transport_intent_is_playing(state).await);
-            runtime_handle.switch_to(job).map_err(|error| {
-                tracing::warn!(
-                    target: "noor.playback.runtime",
-                    event = "runtime_snapshot_switch_failed",
+            let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
+            match start_track(
+                state,
+                StartRequest {
+                    track: &track,
                     generation,
-                    track_id = track.id,
-                    ?current_queue_item_id,
-                    queue_len,
-                    runtime_track_status = ?prepared_status,
-                    stream_resolved = true,
-                    error = %error,
-                    "failed to switch runtime after resolving snapshot stream"
-                );
-                error
-            })?;
+                    dispatch: Dispatch::Switch,
+                    crossfade_ms,
+                },
+            )
+            .await
             {
-                let mut state_guard = state.write().await;
-                if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-                    info.active_track_id = Some(track.id);
-                    info.last_error = None;
+                Ok(_) => {
+                    let mut state_guard = state.write().await;
+                    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                        info.active_track_id = Some(track.id);
+                        info.last_error = None;
+                    }
                 }
-                state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
-                    audio_quality: stream_info.audio_quality.clone(),
-                    sample_rate: stream_info.sample_rate,
-                    bit_depth: stream_info.bit_depth,
-                });
-                state_guard.pending_stream_display = None;
+                Err(StartError::Superseded) => return Ok(()),
+                Err(StartError::LocalUnsupported) => {
+                    handle_runtime_error(
+                        state.clone(),
+                        "Local library playback is not wired into the host audio runtime yet.",
+                    )
+                    .await;
+                    return Ok(());
+                }
+                Err(StartError::Stream(err))
+                    if err.is_track_unplayable() && unplayable_skips < MAX_UNPLAYABLE_SKIPS =>
+                {
+                    unplayable_skips += 1;
+                    if let Some(tidal_id) = track.tidal_id {
+                        dj_routes::record_unavailable_tidal_source(tidal_id);
+                    }
+                    let reason = if err.is_asset_not_ready() {
+                        "Not available on TIDAL right now"
+                    } else {
+                        "TIDAL wouldn't play this track"
+                    };
+                    tracing::warn!(
+                        target: "noor.playback.advance",
+                        event = "skip_unplayable_track",
+                        generation,
+                        track_id = track.id,
+                        skip = unplayable_skips,
+                        error = %describe_tidal_playback_error(&err),
+                        "skipping unplayable track and advancing to the next queue row"
+                    );
+                    emit_track_skipped(state, track.id, &track.title, reason).await;
+                    if err.is_asset_not_ready() {
+                        spawn_tidal_id_reresolve(state, track.id);
+                    }
+                    // Advance the persisted queue past the dead row and retry.
+                    let cleared = {
+                        let s = state.read().await;
+                        recently_cleared(&s)
+                    };
+                    let advanced = {
+                        let s = state.read().await;
+                        s.db.with_conn(|conn| player::next_track(conn, cleared))
+                    }?;
+                    snapshot = resolve_or_skip_pending_current(
+                        state,
+                        advanced,
+                        generation,
+                        "skip_unplayable",
+                    )
+                    .await?;
+                    if !playback_generation_is_current(state, generation).await {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                Err(StartError::Stream(err)) => {
+                    return Err(anyhow::anyhow!(
+                        "playback stream resolve failed: {}",
+                        describe_tidal_playback_error(&err)
+                    ));
+                }
+                Err(StartError::Runtime(error)) => {
+                    return Err(anyhow::anyhow!("playback runtime unavailable: {error:?}"));
+                }
+                Err(StartError::Dispatch { error, .. }) => {
+                    tracing::warn!(
+                        target: "noor.playback.runtime",
+                        event = "runtime_snapshot_switch_failed",
+                        generation,
+                        track_id = track.id,
+                        ?current_queue_item_id,
+                        queue_len,
+                        runtime_track_status = ?prepared_status,
+                        stream_resolved = true,
+                        error = %error,
+                        "failed to switch runtime after resolving snapshot stream"
+                    );
+                    return Err(error);
+                }
             }
             tracing::info!(
                 target: "noor.playback.runtime",
