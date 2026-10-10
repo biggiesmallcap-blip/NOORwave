@@ -38,9 +38,12 @@ describe('search layout contracts', () => {
 		expect(source).toContain('loadingMore = false');
 		expect(source).toContain('const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE, signal)');
 		expect(source).toContain('api.searchTidal(q, INITIAL_SEARCH_PAGE_SIZE, signal, 0, PRIMARY_TIDAL_SEARCH_TIMEOUT_MS)');
-		expect(source).toContain('void localPromise.then((localResults) => {');
+		// The local-first race (hold, merge, stale guard) is behaviour-tested in
+		// $lib/search/primary_search.test.ts; the page hands it both providers.
+		expect(source).toContain('const primary = runPrimarySearch({');
+		expect(source).toContain('local: localPromise,');
+		expect(source).toContain('tidal: tracksPromise,');
 		expect(source).toContain('if (!isCurrentSearch(q, generation, signal)) return');
-		expect(source).toContain('void tracksPromise.then((tidalResults) => {');
 		expect(source).toContain('secondarySpotifyQueued = true');
 		expect(source).toContain('secondarySpotifyTimer = scheduleSearchIdleTask(() => {');
 		expect(source).toContain('}, SECONDARY_PROVIDER_DELAY_MS)');
@@ -148,7 +151,6 @@ describe('search layout contracts', () => {
 		// The previous results stay, dimmed, until the new query's first results.
 		expect(source).toContain("const q = query.trim()\n      activeQuery = q\n      loading = true\n      resultsStale = results !== null || audioResults !== null\n      if (!resultsStale) clearVisibleSearchResults()");
 		expect(source).toContain('function takeFreshResults(q: string)');
-		expect(source).toContain('LOCAL_RESULTS_HOLD_MS');
 		expect(source).toContain("lastQuery = ''");
 		expect(source).toContain('vibeTrack = null');
 		expect(source).toContain('underratedTracks = null');

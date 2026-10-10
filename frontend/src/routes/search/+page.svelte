@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { runPrimarySearch } from '$lib/search/primary_search'
   import {
     appendUnique,
     focusedViewNeedsPrefetch,
@@ -60,7 +61,6 @@
   const SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS = 8000
   // Enough to fill the rail on wide windows and at reduced interface size;
   // the rails scroll, so extra items cost nothing on narrow ones.
-  const EMPTY_TIDAL_RESULTS: TidalSearchResults = { tracks: [], albums: [], artists: [], videos: [] }
 
   function loadRecent(): string[] {
     const stored = readPersistedJson<unknown>(RECENT_KEY, [])
@@ -95,7 +95,6 @@
   let shownQuery = $state('')
   // Library results usually beat TIDAL by a few hundred ms. Holding them this
   // long lets both paint together instead of the page re-shuffling twice.
-  const LOCAL_RESULTS_HOLD_MS = 300
   let audioResults = $state<AudioSearchResult[] | null>(null)
   // Full matching-set size + unknown genre tokens for filtered (audio)
   // searches, so a capped list reads "top 50 of N" and a typo'd genre is
@@ -579,49 +578,39 @@
           let tidalPlaylistPromise: Promise<{ playlists: TidalSearchPlaylist[] }> | null = null
           let spotifyPlaylistPromise: Promise<SpotifyPlaylistSearchItem[]> | null = null
 
-          let localSnapshot: SearchResults | null = null
-          let tidalSnapshot: TidalSearchResults | null = cached ?? null
-
-          void localPromise.then((localResults) => {
-            if (!isCurrentSearch(q, generation, signal)) return
-            localSnapshot = localResults
-            const apply = () => {
-              if (!isCurrentSearch(q, generation, signal)) return
+          const primary = runPrimarySearch({
+            local: localPromise,
+            tidal: tracksPromise,
+            isCurrent: () => isCurrentSearch(q, generation, signal),
+            show: (merged) => {
               takeFreshResults(q)
-              results = mergeLocalIntoTidal(localResults, tidalSnapshot ?? EMPTY_TIDAL_RESULTS)
-            }
-            if (tidalSnapshot) apply()
-            else setTimeout(() => { if (!tidalSnapshot) apply() }, LOCAL_RESULTS_HOLD_MS)
-          }).catch(() => undefined).finally(() => {
-            if (!isCurrentSearch(q, generation, signal)) return
-            loadingLocal = false
-          })
-
-          void tracksPromise.then((tidalResults) => {
-            if (!isCurrentSearch(q, generation, signal)) return
-            tidalSnapshot = tidalResults
-            takeFreshResults(q)
-            results = localSnapshot ? mergeLocalIntoTidal(localSnapshot, tidalResults) : tidalResults
-            if (!cached) {
-              // Cache only the raw TIDAL response so later hits can re-merge
-              // a fresh local snapshot.
-              resultCache.set(cacheKey, tidalResults)
-              if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
-            }
-            tidalOffset = INITIAL_SEARCH_PAGE_SIZE
-            if (
-              tidalResults.tracks.length < INITIAL_SEARCH_PAGE_SIZE &&
-              tidalResults.albums.length < INITIAL_SEARCH_PAGE_SIZE &&
-              tidalResults.artists.length < INITIAL_SEARCH_PAGE_SIZE
-            ) {
-              hasMoreTidal = false
-            }
-          }).catch((e) => {
-            if (!isCurrentSearch(q, generation, signal)) return
-            if (!localSnapshot) error = String(e)
-          }).finally(() => {
-            if (!isCurrentSearch(q, generation, signal)) return
-            loadingTidal = false
+              results = merged
+            },
+            onTidal: (tidalResults) => {
+              if (!cached) {
+                // Cache only the raw TIDAL response so later hits can re-merge
+                // a fresh local snapshot.
+                resultCache.set(cacheKey, tidalResults)
+                if (resultCache.size > 5) resultCache.delete(resultCache.keys().next().value!)
+              }
+              tidalOffset = INITIAL_SEARCH_PAGE_SIZE
+              if (
+                tidalResults.tracks.length < INITIAL_SEARCH_PAGE_SIZE &&
+                tidalResults.albums.length < INITIAL_SEARCH_PAGE_SIZE &&
+                tidalResults.artists.length < INITIAL_SEARCH_PAGE_SIZE
+              ) {
+                hasMoreTidal = false
+              }
+            },
+            onTidalError: (e, hadLocal) => {
+              if (!hadLocal) error = String(e)
+            },
+            onLocalSettled: () => {
+              loadingLocal = false
+            },
+            onTidalSettled: () => {
+              loadingTidal = false
+            },
           })
 
           secondarySpotifyQueued = true
@@ -669,10 +658,7 @@
             })
           }, SECONDARY_PROVIDER_DELAY_MS)
 
-          await Promise.allSettled([
-            localPromise,
-            tracksPromise,
-          ])
+          await primary
         }
         if (isCurrentSearch(q, generation, signal)) {
           error = null
