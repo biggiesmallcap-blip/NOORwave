@@ -3607,7 +3607,7 @@ dependencies = [
  "tempfile",
  "webview2-com",
  "windows 0.62.2",
- "winreg 0.10.1",
+ "winreg 0.55.0",
 ]
 
 [[package]]
