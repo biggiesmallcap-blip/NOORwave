@@ -1,4 +1,4 @@
-import type { DiscoveryStatus } from '$lib/api/client';
+import type { DiscoveryStatus, DiscoveryTrainingRun } from '$lib/api/client';
 
 export function discoveryLastTrainedAt(status: DiscoveryStatus | null): string | null {
 	const completedRunAt =
@@ -84,4 +84,66 @@ export function discoveryModelHeldBack(status: DiscoveryStatus | null): boolean 
 		active != null &&
 		run.model_id !== active.id
 	);
+}
+
+const STAGE_LABELS: Record<string, string> = {
+	behavioral: 'Learning listening patterns',
+	audio: 'Processing audio features',
+	fusion: 'Blending features',
+	neighbors: 'Computing neighbors',
+	in_degree: 'Ranking connections',
+	evaluate: 'Evaluating',
+};
+
+export function discoveryStageLabel(stage: string | undefined): string {
+	return (stage && STAGE_LABELS[stage]) || 'Computing';
+}
+
+/** The latest run in words: what it is doing now, or how it ended. */
+export function describeDiscoveryRun(run: DiscoveryTrainingRun | null | undefined): string {
+	if (!run) return 'Never run';
+	switch (run.status) {
+		case 'running':
+			return `${discoveryStageLabel(run.stage)} - ${Math.round((run.progress ?? 0) * 100)}%`;
+		case 'completed':
+			return 'Finished';
+		case 'cancelled':
+			return 'Stopped';
+		case 'failed':
+			return run.error_text === 'interrupted by server restart'
+				? 'Interrupted when NOOR closed'
+				: 'Failed';
+		default:
+			return run.status;
+	}
+}
+
+export interface DiscoveryUpgrade {
+	pending: boolean;
+	running: boolean;
+	trainer_version: number;
+}
+
+/**
+ * What the one-time upgrade retrain is doing, or null when there is none. It
+ * runs on its own at low priority; Full retrain starts it at full speed.
+ */
+export function describeDiscoveryUpgrade(upgrade: DiscoveryUpgrade | null): string | null {
+	if (!upgrade?.pending) return null;
+	return upgrade.running
+		? 'Relearning in the background at low priority'
+		: 'Waiting for idle time (Full retrain runs it now)';
+}
+
+/** "Model 21 (trainer v3)" rather than the internal model key. */
+export function discoveryModelLabel(model: DiscoveryStatus['active_model']): string {
+	if (!model) return 'Fallback only';
+	let version: number | null = null;
+	try {
+		const parsed = model.config_json ? JSON.parse(model.config_json) : null;
+		if (typeof parsed?.trainer_config_version === 'number') version = parsed.trainer_config_version;
+	} catch {
+		// Older models may carry no or malformed config; the id still identifies them.
+	}
+	return version === null ? `Model ${model.id}` : `Model ${model.id} (trainer v${version})`;
 }
