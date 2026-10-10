@@ -24,6 +24,9 @@
 //!     `LibrarySynced`, unconditionally and before any other check. The rebuild
 //!     records the counter value it observed at start as `radio_similarity_
 //!     built_gen`; `dirty` is `change_gen > built_gen`.
+//!   - `radio_similarity_built_version` below `SIMILARITY_BUILD_VERSION` reads
+//!     as never built, so a change to what the rebuild stores reaches every
+//!     install once.
 //!
 //! A monotonic counter, not a timestamp comparison: a `LibrarySynced` that
 //! lands in the same wall-clock second as the rebuild's start still bumps
@@ -62,6 +65,13 @@ const BUILT_AT_KEY: &str = "radio_similarity_built_at";
 const BUILT_GEN_KEY: &str = "radio_similarity_built_gen";
 /// `server_config` key: monotonic counter, bumped on every `LibrarySynced`.
 const CHANGE_GEN_KEY: &str = "radio_similarity_change_gen";
+/// Bump when compute_track_similarity changes what it stores. An index built
+/// by an older version reads as never built, so every install rebuilds it once.
+/// v2: co-listen pairs (julianday window, recency-weighted PPMI), per-track genre
+/// candidates.
+pub const SIMILARITY_BUILD_VERSION: i64 = 2;
+/// `server_config` key: SIMILARITY_BUILD_VERSION of the last successful rebuild.
+const BUILT_VERSION_KEY: &str = "radio_similarity_built_version";
 
 /// What asked for the rebuild — determines the freshness rule.
 #[derive(Debug, Clone, Copy)]
@@ -237,6 +247,12 @@ fn read_freshness(conn: &Connection) -> anyhow::Result<Freshness> {
     } else {
         None
     };
+    // An index from an older compute_track_similarity counts as never built.
+    let built_age_secs = if read_gen(conn, BUILT_VERSION_KEY)? < SIMILARITY_BUILD_VERSION {
+        None
+    } else {
+        built_age_secs
+    };
 
     // Monotonic counters, not timestamps: a LibrarySynced in the same second as
     // the rebuild's start still bumps change_gen past built_gen.
@@ -311,6 +327,10 @@ pub fn try_spawn_rebuild(
             conn.execute(
                 "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
                 rusqlite::params![BUILT_GEN_KEY, change_gen_at_start.to_string()],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+                rusqlite::params![BUILT_VERSION_KEY, SIMILARITY_BUILD_VERSION.to_string()],
             )?;
             Ok(pairs)
         })();
@@ -421,12 +441,36 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         set_config(&db, BUILT_AT_KEY, "2026-05-14 00:00:00");
+        set_config(
+            &db,
+            BUILT_VERSION_KEY,
+            &SIMILARITY_BUILD_VERSION.to_string(),
+        );
         let f = db.with_conn(read_freshness).unwrap();
         assert!(
             f.built_age_secs.is_some(),
             "built_at must drive freshness, not row count"
         );
         assert!(!f.dirty);
+    }
+
+    #[test]
+    fn freshness_reads_an_old_build_version_as_never_built() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        set_config(&db, BUILT_AT_KEY, "2026-05-14 00:00:00");
+        let f = db.with_conn(read_freshness).unwrap();
+        assert_eq!(
+            f.built_age_secs, None,
+            "an index from an older compute_track_similarity must rebuild"
+        );
+        set_config(
+            &db,
+            BUILT_VERSION_KEY,
+            &SIMILARITY_BUILD_VERSION.to_string(),
+        );
+        let f = db.with_conn(read_freshness).unwrap();
+        assert!(f.built_age_secs.is_some());
     }
 
     #[test]

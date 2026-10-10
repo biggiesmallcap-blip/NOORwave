@@ -48,11 +48,27 @@ pub enum RadioBlend {
 
 impl RadioBlend {
     /// Returns (library_weight, lastfm_weight, engine_weight) summing to 1.0.
+    ///
+    /// Lanes ordered by distance from the seed: engine (album, artist and
+    /// co-listen siblings) is closest, learned neighbors next (their reach set
+    /// by `creativity`), Last.fm furthest. More adventurous blends move weight
+    /// from the closest lane to the furthest; the old Adventurous gave siblings
+    /// half the queue.
     pub fn weights(self) -> (f64, f64, f64) {
         match self {
-            RadioBlend::Familiar => (0.60, 0.30, 0.10),
-            RadioBlend::Mixed => (0.30, 0.40, 0.30),
-            RadioBlend::Adventurous => (0.10, 0.40, 0.50),
+            RadioBlend::Familiar => (0.55, 0.15, 0.30),
+            RadioBlend::Mixed => (0.40, 0.40, 0.20),
+            RadioBlend::Adventurous => (0.40, 0.50, 0.10),
+        }
+    }
+
+    /// How far down the learned neighbor list the library lane reaches
+    /// (see `learning::radio_from_neighbors`).
+    pub fn creativity(self) -> f64 {
+        match self {
+            RadioBlend::Familiar => 0.0,
+            RadioBlend::Mixed => 0.25,
+            RadioBlend::Adventurous => 0.50,
         }
     }
 }
@@ -225,11 +241,7 @@ pub async fn orchestrate_song(
     let library_results: Vec<RadioCandidate> = {
         let mut excl: Vec<i64> = exclude_set.iter().copied().collect();
         excl.push(seed_track_id);
-        let creativity = match blend {
-            RadioBlend::Familiar => 0.15,
-            RadioBlend::Mixed => 0.30,
-            RadioBlend::Adventurous => 0.50,
-        };
+        let creativity = blend.creativity();
         let lib = crate::services::learning::radio_from_neighbors(
             db,
             seed_track_id,
@@ -292,7 +304,7 @@ pub async fn orchestrate_song(
             "orchestrate_song: seed has no artist_name; Last.fm source skipped"
         );
     }
-    let lastfm_results: Vec<RadioCandidate> = if let (Some(client), Some(artist)) =
+    let mut lastfm_results: Vec<RadioCandidate> = if let (Some(client), Some(artist)) =
         (lastfm, seed_meta.artist_name.as_deref())
     {
         let fetch_limit = lfm_target.max(20);
@@ -332,6 +344,13 @@ pub async fn orchestrate_song(
     } else {
         Vec::new()
     };
+
+    // Adventurous reaches one Last.fm hop further: stored Last.fm links of the
+    // seed's learned neighbors, discounted. Familiar and Mixed stay with the
+    // seed's own Last.fm matches.
+    if blend == RadioBlend::Adventurous {
+        lastfm_results.extend(lastfm_two_hop_candidates(db, seed_track_id, lfm_target));
+    }
 
     // ── Engine source ─────────────────────────────────────────────────────────
     // Pre-computed track_similarity table (co-album / co-artist /
@@ -1843,7 +1862,7 @@ fn artist_allowed(candidate_artist: &str, history: &[String]) -> bool {
 /// candidate whose artist would exceed the run or window cap given what came
 /// before it (recently played prefix + picks so far). Skipped candidates stay
 /// eligible for later slots once the window moves past their artist.
-fn enforce_artist_diversity(
+pub(crate) fn enforce_artist_diversity(
     ranked: Vec<RadioCandidate>,
     recent_artists: &[String],
     limit: usize,
@@ -1869,6 +1888,69 @@ fn enforce_artist_diversity(
     out
 }
 
+/// A learned neighbor's own Last.fm links count at this fraction of its score.
+const LASTFM_TWO_HOP_WEIGHT: f64 = 0.65;
+/// Learned neighbors whose Last.fm links are followed.
+const LASTFM_TWO_HOP_SEEDS: i64 = 5;
+/// Weakest 2-hop link worth queueing.
+const LASTFM_TWO_HOP_MIN_SCORE: f64 = 0.10;
+
+/// Two hops through Last.fm: tracks Last.fm linked to the seed's learned
+/// neighbors (stored sightings, no network call), as Last.fm-lane candidates.
+fn lastfm_two_hop_candidates(
+    db: &Database,
+    seed_track_id: i64,
+    limit: usize,
+) -> Vec<RadioCandidate> {
+    let rows = db.with_conn(|conn| {
+        let Some(model) = crate::db::queries::get_selected_discovery_embedding_model(conn)? else {
+            return Ok(Vec::new());
+        };
+        let seeds = crate::db::queries::get_track_neighbors(
+            conn,
+            model.id,
+            seed_track_id,
+            LASTFM_TWO_HOP_SEEDS,
+            &[],
+        )?
+        .into_iter()
+        .map(|row| {
+            (
+                row.track_id,
+                LASTFM_TWO_HOP_WEIGHT * row.score.clamp(0.0, 1.0),
+            )
+        })
+        .collect::<Vec<_>>();
+        crate::db::queries::get_sighted_external_candidates(
+            conn,
+            &seeds,
+            LASTFM_TWO_HOP_MIN_SCORE,
+            limit.max(1) as i64,
+        )
+    });
+    rows.unwrap_or_default()
+        .into_iter()
+        .map(|row| RadioCandidate {
+            track_id: 0,
+            tidal_track_id: row.tidal_id,
+            title: row.title,
+            artist_name: row.artist_name,
+            album_title: None,
+            artwork_url: None,
+            duration_ms: row.duration_ms,
+            isrc: None,
+            is_in_library: false,
+            source: RadioSource::Lastfm,
+            reason: format!("Last.fm 2-hop {:.2}", row.score),
+            similarity_score: row.score.clamp(0.0, 1.0),
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        })
+        .collect()
+}
+
 /// Most recent artists from listen history (chronological, oldest first),
 /// bounded by ARTIST_HISTORY_MAX_AGE_HOURS so stale sessions do not leak in.
 fn recent_played_artist_names(db: &Database, limit: usize) -> Vec<String> {
@@ -1879,8 +1961,8 @@ fn recent_played_artist_names(db: &Database, limit: usize) -> Vec<String> {
                  FROM listen_history lh
                  JOIN tracks t ON t.id = lh.track_id
                  LEFT JOIN artists ar ON ar.id = t.artist_id
-                 WHERE lh.started_at >= datetime('now', printf('-%d hours', ?1))
-                 ORDER BY lh.started_at DESC
+                 WHERE julianday(lh.started_at) >= julianday('now', printf('-%d hours', ?1))
+                 ORDER BY julianday(lh.started_at) DESC
                  LIMIT ?2",
             )?;
             let rows = stmt
@@ -1899,6 +1981,110 @@ fn recent_played_artist_names(db: &Database, limit: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn recent_played_artist_names_keep_to_the_hour_window_for_rfc3339_rows() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        db.run_migrations().expect("run migrations");
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (1, 'Recent'), (2, 'Stale')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, album_id, source)
+                 VALUES (1, 'Now', 1, NULL, 'tidal'), (2, 'Earlier', 2, NULL, 'tidal')",
+                [],
+            )?;
+            // RFC 3339, the way the player writes listen_history.
+            conn.execute(
+                "INSERT INTO listen_history (track_id, started_at) VALUES
+                    (1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-30 minutes')),
+                    (2, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-5 hours'))",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+        assert_eq!(
+            recent_played_artist_names(&db, 10),
+            vec!["Recent".to_string()]
+        );
+    }
+
+    #[test]
+    fn lastfm_two_hop_follows_the_learned_neighbors_links() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        db.run_migrations().expect("run migrations");
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Neighbor', 1)",
+                [],
+            )?;
+            let model = crate::db::queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:two-hop",
+                crate::db::queries::DISCOVERY_ENGINE_V2_FAMILY,
+                8,
+                "ready",
+                None,
+            )?;
+            crate::db::queries::activate_embedding_model(conn, model.id)?;
+            conn.execute(
+                "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score)
+                 VALUES (1, 2, ?1, 1, 0.9)",
+                rusqlite::params![model.id],
+            )?;
+            let candidate = crate::db::queries::upsert_external_track_candidate(
+                conn,
+                &crate::db::queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(7001),
+                    mbid: None,
+                    dedupe_key: "tidal:7001".to_string(),
+                    title: "Far Song".to_string(),
+                    artist_name: "Far Artist".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(200_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            crate::db::queries::upsert_external_candidate_sighting(
+                conn,
+                &crate::db::queries::ExternalCandidateSightingUpsert {
+                    candidate_id: candidate.id,
+                    seed_track_id: 2,
+                    source: "lastfm_similar".to_string(),
+                    source_payload_json: None,
+                    similarity: Some(0.6),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+
+        let hops = lastfm_two_hop_candidates(&db, 1, 10);
+
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].title, "Far Song");
+        assert_eq!(hops[0].tidal_track_id, Some(7001));
+        assert_eq!(hops[0].source, RadioSource::Lastfm);
+        // 0.6 similarity x 0.65 hop weight x 0.9 neighbor score.
+        assert!((hops[0].similarity_score - 0.351).abs() < 1e-9);
+    }
+
+    #[test]
+    fn blends_get_further_from_the_seed_as_they_get_more_adventurous() {
+        // The engine lane is album, artist and co-listen siblings: the closest
+        // source. Last.fm reaches furthest. Adventurous must lean away from
+        // siblings, not toward them.
+        let (_, fam_lfm, fam_eng) = RadioBlend::Familiar.weights();
+        let (_, mix_lfm, mix_eng) = RadioBlend::Mixed.weights();
+        let (_, adv_lfm, adv_eng) = RadioBlend::Adventurous.weights();
+        assert!(fam_eng > mix_eng && mix_eng > adv_eng);
+        assert!(fam_lfm < mix_lfm && mix_lfm < adv_lfm);
+    }
 
     #[test]
     fn weights_sum_to_one() {
@@ -3496,11 +3682,7 @@ mod radio_diagnostic_harness {
         let library_results: Vec<RadioCandidate> = {
             let mut excl: Vec<i64> = exclude_set.iter().copied().collect();
             excl.push(seed_id);
-            let creativity = match blend {
-                RadioBlend::Familiar => 0.15,
-                RadioBlend::Mixed => 0.30,
-                RadioBlend::Adventurous => 0.50,
-            };
+            let creativity = blend.creativity();
             crate::services::learning::radio_from_neighbors(
                 &db,
                 seed_id,

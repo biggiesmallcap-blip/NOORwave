@@ -71,7 +71,13 @@
 	import PhoneRemotePanel from '$lib/components/settings/PhoneRemotePanel.svelte';
 	import {
 		applyTrainingProgress,
+		describeDiscoveryRun,
+		describeDiscoveryUpgrade,
 		discoveryLastTrainedAt,
+		discoveryModelHeldBack,
+		discoveryModelLabel,
+		discoveryStageLabel,
+		type DiscoveryUpgrade,
 		shouldContinueDiscoveryCompletionRefresh,
 		shouldRefreshAfterTerminalDiscoveryProgress
 	} from '$lib/components/settings/discovery_status';
@@ -196,6 +202,9 @@
 	let portableSnapshot = $state<PortableMusicBrainzSnapshotStatus | null>(null);
 	let discoveryStatus = $state<DiscoveryStatus | null>(null);
 	let discoveryStatusLastTrainedAt = $derived(discoveryLastTrainedAt(discoveryStatus));
+	let discoveryStatusModelHeldBack = $derived(discoveryModelHeldBack(discoveryStatus));
+	let discoveryUpgrade = $state<DiscoveryUpgrade | null>(null);
+	let discoveryUpgradeText = $derived(describeDiscoveryUpgrade(discoveryUpgrade));
 	let portableAction = $state<'export' | 'import' | null>(null);
 	let portableStatusLabel = $state('');
 	let galaxyRefreshLabel = $state('');
@@ -938,6 +947,10 @@
 	// cache it reported the PREVIOUS run's terminal status right after a start,
 	// which is what hid the Stop button for the whole run.
 	async function loadDiscoveryStatus() {
+		void api
+			.getDiscoveryUpgrade()
+			.then((upgrade) => (discoveryUpgrade = upgrade))
+			.catch(() => (discoveryUpgrade = null));
 		try {
 			const response = await api.getDiscoveryStatus();
 			discoveryStatus = response.status;
@@ -1196,40 +1209,30 @@
 		}
 	}
 
-	function stageLabel(stage: string | undefined): string {
-		switch (stage) {
-			case 'behavioral': return 'Learning listening patterns';
-			case 'audio':      return 'Processing audio features';
-			case 'fusion':     return 'Blending features';
-			case 'neighbors':  return 'Computing neighbors';
-			case 'in_degree':  return 'Ranking connections';
-			case 'evaluate':   return 'Evaluating';
-			default:           return 'Computing';
-		}
-	}
-
 
 	const INTENSITY_PRESETS: Record<
 		'max' | 'medium' | 'low',
-		{ title: string; tagline: string; detail: string }
+		{ title: string; tagline: string; detail: string; spec: string }
 	> = {
 		max: {
 			title: 'Max',
-			tagline: 'Best radio quality. Slowest training.',
+			tagline: 'Best suggestions. Slowest training.',
 			detail:
-				'96-dim model with 64 neighbors per track and an 8-track context window. Cold tracks get full audio + metadata anchoring. Recommended for libraries under ~10k tracks or for overnight runs.',
+				'The most connections per track. Best for libraries under about 10k tracks, or overnight runs.',
+			spec: '96 dimensions, 64 neighbors per track, 8-track listening window.',
 		},
 		medium: {
 			title: 'Medium',
 			tagline: 'Balanced. The default.',
-			detail:
-				'64-dim, 32 neighbors, 5-track window. Audio-proxy stage runs at smaller dimension. Indistinguishable from Max for most listening; ~50% of the wall-clock time.',
+			detail: 'Close to Max for everyday listening, in about half the time.',
+			spec: '64 dimensions, 32 neighbors per track, 5-track listening window.',
 		},
 		low: {
 			title: 'Low',
-			tagline: 'Fastest. Pure behavioral.',
+			tagline: 'Fastest. Listening history only.',
 			detail:
-				'48-dim, 24 neighbors, 3-track window. Skips the audio-proxy stage entirely — cold tracks lose their metadata anchor, but the engine stays usable on modest hardware. Roughly 25% of Max’s time.',
+				'About a quarter of the time of Max. Skips audio matching, so tracks you have never played get weaker suggestions.',
+			spec: '48 dimensions, 24 neighbors per track, 3-track listening window, no audio stage.',
 		},
 	};
 
@@ -2850,12 +2853,12 @@
 
 
 				</div>
-			</section><details data-setting-id="discovery-engine" class="glass-tile section-panel" open={discoveryIsRunning}><summary>Discovery<span class="disclosure-status">{discoveryIsRunning ? "Training · " + Math.round((discoveryStatus?.latest_run?.progress ?? 0) * 100) + "%" : discoveryStatus ? Math.round(discoveryStatus.coverage_ratio * 100) + "% coverage" : "Status unavailable"}</span></summary><p class="setting-status">Training can use substantial CPU. Review the estimate and safety profile; you can stop at any time.</p>
+			</section><details data-setting-id="discovery-engine" class="glass-tile section-panel" open={discoveryIsRunning}><summary>Discovery<span class="disclosure-status">{discoveryIsRunning ? "Training - " + Math.round((discoveryStatus?.latest_run?.progress ?? 0) * 100) + "%" : discoveryUpgrade?.pending ? "Upgrade pending" : discoveryStatus ? Math.round(discoveryStatus.coverage_ratio * 100) + "% coverage" : "Status unavailable"}</span></summary><p class="setting-status">Manual runs can use substantial CPU: check the estimate and safety profile first. You can stop any run. After an update that changes how recommendations learn, NOOR relearns once on its own at low priority.</p>
 
 				<details class="discovery-guide"><summary>About discovery training</summary><p class="setting-status">Training finds connections across your library. Refresh after adding music or listening history; a full retrain also rebuilds cached audio features.</p><p class="setting-status">Training completion and model activation are separate. Recommendations use the existing fallback until a model meets the activation criteria.</p></details>
 
 				<div class="stat-grid inner-metrics">
-					<div class="info-row"><span>Coverage</span><strong>{discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '—'}</strong></div>
+					<div class="info-row"><span>Coverage</span><strong>{discoveryStatus ? `${Math.round(discoveryStatus.coverage_ratio * 100)}%` : '-'}</strong></div>
 					<div class="info-row"><span>Embedded</span><strong>{discoveryStatus?.embedded_tracks?.toLocaleString() ?? '0'}</strong></div>
 				</div>
 
@@ -2863,11 +2866,11 @@
 					<div class="info-list">
 						<div class="info-row">
 							<span>Active model</span>
-							<strong>{discoveryStatus?.active_model?.model_key ?? 'Fallback only'}</strong>
+							<strong title={discoveryStatus?.active_model?.model_key}>{discoveryModelLabel(discoveryStatus?.active_model ?? null)}</strong>
 						</div>
 						<div class="info-row">
 							<span>Last trained</span>
-							<strong>{discoveryStatusLastTrainedAt ? new Date(discoveryStatusLastTrainedAt + 'Z').toLocaleString() : '—'}</strong>
+							<strong>{discoveryStatusLastTrainedAt ? new Date(discoveryStatusLastTrainedAt + 'Z').toLocaleString() : 'Never'}</strong>
 						</div>
 						<div class="info-row">
 							<span>Clip features</span>
@@ -2875,14 +2878,20 @@
 						</div>
 						<div class="info-row">
 							<span>Latest run</span>
-							<strong>
-								{#if discoveryStatus?.latest_run}
-									{discoveryStatus.latest_run.status} · {discoveryStatus.latest_run.stage} · {Math.round(discoveryStatus.latest_run.progress * 100)}%
-								{:else}
-									idle
-								{/if}
-							</strong>
+							<strong title={discoveryStatus?.latest_run?.error_text ?? undefined}>{describeDiscoveryRun(discoveryStatus?.latest_run)}</strong>
 						</div>
+						{#if discoveryUpgradeText}
+							<div class="info-row">
+								<span>Upgrade</span>
+								<strong>{discoveryUpgradeText}</strong>
+							</div>
+						{/if}
+						{#if discoveryStatusModelHeldBack}
+							<div class="info-row">
+								<span>Newer model</span>
+								<strong>Held back: it did not beat the active model</strong>
+							</div>
+						{/if}
 					</div>
 				</div>
 
@@ -2912,10 +2921,6 @@
 				</div>
 
 				<div class="intensity-block">
-					<div class="intensity-header">
-						<span class="intensity-eyebrow">Training intensity</span>
-						<span class="intensity-tagline">{INTENSITY_PRESETS[discoveryIntensity].tagline}</span>
-					</div>
 					<div class="safety-profile-row">
 						<div>
 							<label class="engine-label" for="discovery-safety-profile">CPU safety profile</label>
@@ -2933,12 +2938,17 @@
 							<option value="performance">Performance</option>
 						</select>
 					</div>
+					<div class="intensity-header">
+						<span class="intensity-eyebrow">Training intensity</span>
+						<span class="intensity-tagline">{INTENSITY_PRESETS[discoveryIntensity].tagline}</span>
+					</div>
 					<div class="intensity-grid">
 						{#each (['max', 'medium', 'low'] as const) as tier (tier)}
 							<button
 								type="button"
 								class="intensity-option"
 								class:selected={discoveryIntensity === tier}
+								title={INTENSITY_PRESETS[tier].spec}
 								disabled={discoveryIsRunning || intensityBusy}
 								onclick={() => void changeIntensity(tier)}
 							>
@@ -2957,26 +2967,31 @@
 						>
 							<div class="safety-headline">
 								{#if safety.recommendation === 'safe'}
-									Safe to run — about {formatDurationSeconds(safety.estimated_seconds)} expected.
+									Safe to run - about {formatDurationSeconds(safety.estimated_seconds)} expected.
 								{:else if safety.recommendation === 'moderate'}
-									Moderate cost — about {formatDurationSeconds(safety.estimated_seconds)} expected.
+									Moderate cost - about {formatDurationSeconds(safety.estimated_seconds)} expected.
 								{:else}
-									Heavy run — about {formatDurationSeconds(safety.estimated_seconds)} expected. Consider Medium or Low.
+									Heavy run - about {formatDurationSeconds(safety.estimated_seconds)} expected. Consider Medium or Low.
 								{/if}
 							</div>
 							<div class="safety-detail">
 								<span>{safety.track_count.toLocaleString()} tracks</span>
-								<span>·</span>
+								<span aria-hidden="true">|</span>
 								<span>~{safety.estimated_ram_mb} MB peak RAM</span>
-								<span>·</span>
+								<span aria-hidden="true">|</span>
 								<span>{safety.worker_threads} worker{safety.worker_threads === 1 ? '' : 's'}</span>
-								<span>·</span>
+								<span aria-hidden="true">|</span>
 								<span>{formatDurationSeconds(safety.safety_timeout_seconds)} safety cap</span>
 								{#if safety.last_run_seconds !== null}
-									<span>·</span>
+									<span aria-hidden="true">|</span>
 									<span>last run {formatDurationSeconds(safety.last_run_seconds)}</span>
 								{/if}
 							</div>
+							{#if discoveryIsRunning && discoveryUpgrade?.running}
+								<div class="safety-detail">
+									This automatic run uses fewer threads at low priority, so it can take longer than the estimate.
+								</div>
+							{/if}
 						</div>
 					{/if}
 					{#if discoveryIsRunning && discoveryStatus?.latest_run}
@@ -2987,7 +3002,7 @@
 								<div class="discovery-bar-fill" style:width="{pct}%"></div>
 							</div>
 							<div class="discovery-stage">
-								{stageLabel(run.stage)} <span class="discovery-pct">{pct}%</span>
+								{discoveryStageLabel(run.stage)} <span class="discovery-pct">{pct}%</span>
 							</div>
 						</div>
 					{/if}

@@ -19,9 +19,10 @@ use crate::db::{
     models::{AudioDspFeatures, QueueItem, Track},
     queries,
 };
+use crate::playback::candidate_gate::CandidateGate;
 use crate::playback::dj_queue_ranker::{
-    GeneratedCandidate, GeneratedCandidatePolicy, append_dj_reason, rank_generated_candidates,
-    rank_generated_candidates_chain,
+    GeneratedCandidate, GeneratedCandidatePolicy, append_dj_reason, dj_fit_multiplier,
+    mixing_active, rank_generated_candidates, rank_generated_candidates_chain,
 };
 use crate::playback::player::{
     PlaybackSnapshot, build_session_taste_profile, load_snapshot, load_state, normalize_genre_key,
@@ -296,7 +297,6 @@ pub fn ensure_automix_queue_depth(
     )?;
 
     let mut appended = false;
-    let generated_count = extension.len();
     if !extension.is_empty() {
         let extension = extension
             .into_iter()
@@ -306,15 +306,23 @@ pub fn ensure_automix_queue_depth(
         appended = true;
     }
 
-    if state.automix_allow_external
-        && let Some(model) = queries::get_selected_discovery_embedding_model(conn)
+    // External picks ("Allow external" or "Include New"): tracks Last.fm
+    // linked to this seed or its learned neighbors, gated like every other
+    // source, filling up to a quarter of the batch when good ones exist.
+    if state.automix_allow_external || state.automix_discover_new {
+        let model_id = queries::get_selected_discovery_embedding_model(conn)
             .ok()
             .flatten()
-    {
-        let external_needed = needed.saturating_sub(generated_count).max(1);
-        let appended_external =
-            append_automix_external_candidates(conn, model.id, current_track.id, external_needed)?;
-        appended |= appended_external > 0;
+            .map(|model| model.id);
+        let external_slots = (needed / 4).max(1);
+        // External picks are optional; a failure here must never fail the
+        // refill that next_track and peek_next_track depend on.
+        match append_automix_external_candidates(conn, model_id, current_track.id, external_slots) {
+            Ok(appended_external) => appended |= appended_external > 0,
+            Err(error) => {
+                tracing::warn!(target: "noor.automix", %error, "external automix refill failed")
+            }
+        }
     }
 
     if !appended {
@@ -324,33 +332,144 @@ pub fn ensure_automix_queue_depth(
     queue::load_queue(conn)
 }
 
-fn append_automix_external_candidates(
+/// Where a refill draws from: the session anchor (the station seed or the
+/// last track the listener chose, never an automix pick), the playing track
+/// and the queue tail, weighted in that order. Anchoring keeps a long session
+/// from drifting one noisy hop at a time away from where it started.
+fn session_seeds(current_track: &Track, queue_items: &[QueueItem]) -> Vec<(i64, f64)> {
+    fn push(seeds: &mut Vec<(i64, f64)>, id: i64, weight: f64) {
+        if id > 0 && !seeds.iter().any(|(seed, _)| *seed == id) {
+            seeds.push((id, weight));
+        }
+    }
+    let playable = |item: &&QueueItem| !item.is_pending && item.track.id > 0;
+    let current_index = queue_items
+        .iter()
+        .position(|item| item.track.id == current_track.id);
+    let anchor = current_index.and_then(|index| {
+        queue_items[..=index]
+            .iter()
+            .rev()
+            .filter(playable)
+            .find(|item| !item.source.starts_with("automix"))
+            .map(|item| item.track.id)
+    });
+    let tail = queue_items
+        .iter()
+        .rev()
+        .find(playable)
+        .map(|item| item.track.id);
+
+    let mut seeds = Vec::new();
+    if let Some(anchor) = anchor {
+        push(&mut seeds, anchor, SESSION_ANCHOR_WEIGHT);
+    }
+    push(&mut seeds, current_track.id, SESSION_CURRENT_WEIGHT);
+    if let Some(tail) = tail {
+        push(&mut seeds, tail, SESSION_TAIL_WEIGHT);
+    }
+    seeds
+}
+
+const SESSION_ANCHOR_WEIGHT: f64 = 1.0;
+const SESSION_CURRENT_WEIGHT: f64 = 0.8;
+const SESSION_TAIL_WEIGHT: f64 = 0.6;
+
+/// Learned neighbors of several weighted seeds, merged: a candidate scores the
+/// weighted sum over the seeds that list it (agreement between anchor and
+/// current track counts), and keeps the row of its strongest seed for reasons.
+fn anchored_neighbors(
     conn: &Connection,
     model_id: i64,
+    seeds: &[(i64, f64)],
+    limit: i64,
+    excluded: &[i64],
+) -> Result<Vec<queries::EmbeddingNeighborRow>> {
+    let mut excluded = excluded.to_vec();
+    excluded.extend(seeds.iter().map(|(seed, _)| *seed));
+    let mut merged: HashMap<i64, (f64, f64, queries::EmbeddingNeighborRow)> = HashMap::new();
+    for (seed, weight) in seeds {
+        for row in queries::get_track_neighbors(conn, model_id, *seed, limit, &excluded)? {
+            let contribution = weight * row.score;
+            match merged.get_mut(&row.track_id) {
+                Some(entry) => {
+                    entry.0 += contribution;
+                    if contribution > entry.1 {
+                        entry.1 = contribution;
+                        entry.2 = row;
+                    }
+                }
+                None => {
+                    merged.insert(row.track_id, (contribution, contribution, row));
+                }
+            }
+        }
+    }
+    let mut rows = merged
+        .into_values()
+        .map(|(sum, _, mut row)| {
+            row.score = sum;
+            row
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.track_id.cmp(&right.track_id))
+    });
+    rows.truncate(limit.max(0) as usize);
+    Ok(rows)
+}
+
+/// Last.fm match (after neighbor weighting) an external pick needs.
+const EXTERNAL_MIN_SCORE: f64 = 0.15;
+/// Learned neighbors whose Last.fm links also count, at this weight.
+const EXTERNAL_NEIGHBOR_SEEDS: i64 = 5;
+const EXTERNAL_NEIGHBOR_WEIGHT: f64 = 0.65;
+
+fn append_automix_external_candidates(
+    conn: &Connection,
+    model_id: Option<i64>,
     seed_track_id: i64,
     limit: usize,
 ) -> Result<usize> {
-    let (queued_tidal_ids, queued_pairs) = load_queued_external_identities(conn)?;
-    let rows = queries::get_external_candidate_neighbors(
-        conn,
-        model_id,
-        seed_track_id,
-        (limit.max(1) * 4).max(12) as i64,
-        true,
-    )?;
-    let mut candidates = Vec::new();
-    for row in rows {
-        if let Some(tidal_id) = row.tidal_id
-            && queued_tidal_ids.contains(&tidal_id)
-        {
-            continue;
+    // Seeds: the playing track, plus its strongest learned neighbors at a
+    // discount, so a seed Last.fm never looked up still reaches its scene.
+    let mut weighted_seeds = vec![(seed_track_id, 1.0)];
+    if let Some(model_id) = model_id {
+        // Best effort: without neighbors the seed's own links still count.
+        let neighbors = queries::get_track_neighbors(
+            conn,
+            model_id,
+            seed_track_id,
+            EXTERNAL_NEIGHBOR_SEEDS,
+            &[],
+        )
+        .unwrap_or_default();
+        for row in neighbors {
+            weighted_seeds.push((
+                row.track_id,
+                EXTERNAL_NEIGHBOR_WEIGHT * row.score.clamp(0.0, 1.0),
+            ));
         }
-        let pair = normalize_external_pair(&row.artist_name, &row.title);
-        if queued_pairs.contains(&pair) {
-            continue;
-        }
-        candidates.push(row);
     }
+    let rows = queries::get_sighted_external_candidates(
+        conn,
+        &weighted_seeds,
+        EXTERNAL_MIN_SCORE,
+        (limit.max(1) * 4).max(12) as i64,
+    )?;
+    // Hidden content, Not for me, recent plays and anything already queued
+    // (any version) stay out; hidden rows never reach the insert, where they
+    // would bail.
+    let queue_items = queue::load_queue(conn)?;
+    let mut gate = CandidateGate::load(conn, &queue_items, None);
+    let candidates = rows
+        .into_iter()
+        .filter(|row| gate.admit_candidate(None, row.tidal_id, None, &row.artist_name, &row.title))
+        .collect::<Vec<_>>();
 
     let generated = candidates
         .into_iter()
@@ -369,7 +488,7 @@ fn append_automix_external_candidates(
             reasons: Vec::new(),
         })
         .collect::<Vec<_>>();
-    let ranked = rank_generated_candidates(conn, seed_track_id, generated)
+    let ranked = rank_generated_candidates(conn, seed_track_id, generated, mixing_active(conn))
         .map(|ranked| {
             ranked
                 .into_iter()
@@ -384,8 +503,8 @@ fn append_automix_external_candidates(
     let mut appended = 0usize;
     for ranked in ranked {
         let row = ranked.row;
-        let reason = append_dj_reason("external similarity", ranked.score, &ranked.reasons);
-        queue::append_external_track(
+        let reason = append_dj_reason("Last.fm similar", ranked.score, &ranked.reasons);
+        if let Err(error) = queue::append_external_track(
             conn,
             &queue::ExternalTrackInsert {
                 artist: &row.artist_name,
@@ -395,7 +514,16 @@ fn append_automix_external_candidates(
                 tidal_id_hint: row.tidal_id,
                 ..Default::default()
             },
-        )?;
+        ) {
+            tracing::warn!(
+                target: "noor.automix",
+                %error,
+                artist = %row.artist_name,
+                title = %row.title,
+                "skipping external automix pick"
+            );
+            continue;
+        }
         appended += 1;
         if appended >= limit {
             break;
@@ -428,7 +556,7 @@ fn rank_automix_selections(
         .iter()
         .map(|candidate| candidate.item.clone())
         .collect::<Vec<_>>();
-    rank_generated_candidates_chain(conn, seed_track_id, generated)
+    rank_generated_candidates_chain(conn, seed_track_id, generated, mixing_active(conn))
         .map(|ranked| {
             ranked
                 .into_iter()
@@ -443,45 +571,6 @@ fn rank_automix_selections(
                 .collect()
         })
         .unwrap_or(fallback)
-}
-
-fn load_queued_external_identities(
-    conn: &Connection,
-) -> Result<(HashSet<i64>, HashSet<(String, String)>)> {
-    let mut stmt = conn.prepare(
-        "SELECT pending_artist, pending_title, tidal_id_hint
-         FROM queue
-         WHERE source = 'automix-new'
-           AND track_id IS NULL",
-    )?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let mut tidal_ids = HashSet::new();
-    let mut pairs = HashSet::new();
-    for (artist, title, tidal_id) in rows {
-        if let Some(tidal_id) = tidal_id.filter(|id| *id > 0) {
-            tidal_ids.insert(tidal_id);
-        }
-        if let (Some(artist), Some(title)) = (artist, title) {
-            pairs.insert(normalize_external_pair(&artist, &title));
-        }
-    }
-    Ok((tidal_ids, pairs))
-}
-
-fn normalize_external_pair(artist: &str, title: &str) -> (String, String) {
-    (
-        artist.trim().to_ascii_lowercase(),
-        title.trim().to_ascii_lowercase(),
-    )
 }
 
 pub(crate) fn build_automix_extension_with_reasons(
@@ -502,10 +591,11 @@ pub(crate) fn build_automix_extension_with_reasons(
             .iter()
             .map(|item| item.track.id)
             .collect::<Vec<_>>();
-        let neighbors = queries::get_track_neighbors(
+        let seeds = session_seeds(current_track, queue_items);
+        let neighbors = anchored_neighbors(
             conn,
             model.id,
-            current_track.id,
+            &seeds,
             (needed * 4).max(24) as i64,
             &excluded,
         )?;
@@ -543,25 +633,29 @@ pub(crate) fn build_automix_extension_with_reasons(
                     })
                 })
                 .collect::<Vec<_>>();
-            if let Some(seed) = shuffle_seed
-                && mode != ShuffleMode::Off
-            {
-                let tracks = ordered
-                    .iter()
-                    .map(|selection| selection.track.clone())
-                    .collect::<Vec<_>>();
-                let shuffled =
-                    queue::reorder_tracks_with_seed(conn, &tracks, mode, seed, "automix_learned")?;
-                let mut by_track = ordered
-                    .into_iter()
-                    .map(|selection| (selection.track.id, selection))
-                    .collect::<HashMap<_, _>>();
-                ordered = shuffled
-                    .into_iter()
-                    .filter_map(|track| by_track.remove(&track.id))
-                    .collect();
+            // One gate for every source: recent plays, early skips, Not for me,
+            // hidden content and versions of queued tracks stay out.
+            let mut gate = CandidateGate::load(conn, queue_items, None);
+            ordered.retain(|selection| gate.admit_track(&selection.track));
+            // Taste reaches the learned path too: favorites and artist
+            // affinity scale the lane policy the ranker multiplies in.
+            let (taste, _) =
+                from_session_profile(&build_session_taste_profile(conn, current_track)?);
+            for selection in &mut ordered {
+                selection.ranking_policy.score_multiplier *=
+                    learned_taste_multiplier(&selection.track, &taste);
             }
-            ordered = rank_automix_selections(conn, current_track.id, ordered);
+            // Neighbors arrive in relevance order; the ranker keeps that order
+            // and, while mixing, chains fit from the last track already queued
+            // so the first appended track follows the queue tail, not the
+            // track playing now.
+            let chain_from = queue_items
+                .iter()
+                .rev()
+                .find(|item| !item.is_pending && item.track.id > 0)
+                .map(|item| item.track.id)
+                .unwrap_or(current_track.id);
+            ordered = rank_automix_selections(conn, chain_from, ordered);
             ordered = cap_per_artist(
                 ordered,
                 |selection| selection.track.artist_id,
@@ -626,7 +720,10 @@ pub(crate) fn build_automix_extension_with_reasons(
     // for seeds that haven't been embedded yet (e.g. tracks without a
     // service ID, or library additions since the last training run).
     if similar.is_empty() {
-        let fallback = build_metadata_fallback(conn, current_track, &excluded_track_ids, needed)?;
+        let mut gate = CandidateGate::load(conn, queue_items, None);
+        let mut fallback =
+            build_metadata_fallback(conn, current_track, &excluded_track_ids, needed)?;
+        fallback.retain(|track| gate.admit_track(track));
         if fallback.is_empty() {
             tracing::debug!(
                 seed_track_id = current_track.id,
@@ -693,6 +790,14 @@ pub(crate) fn build_automix_extension_with_reasons(
         }
     }
 
+    // Same gate as every other source; the first version of a recording in
+    // similarity order wins.
+    let mut gate = CandidateGate::load(conn, queue_items, None);
+    candidates.retain(|track| gate.admit_track(track));
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let candidate_genres = queue::get_track_genre_evidence(conn, &candidates)?;
 
     // Artist-level hub-ness for the candidate pool. The scored fallback draws
@@ -722,6 +827,8 @@ pub(crate) fn build_automix_extension_with_reasons(
         }
     }
 
+    // Key and tempo fit only shapes the order while transitions are mixed.
+    let mixing = mixing_active(conn);
     let ordered = order_automix_candidates(
         mode,
         candidates,
@@ -733,6 +840,7 @@ pub(crate) fn build_automix_extension_with_reasons(
         seed_features.as_ref(),
         &candidate_features,
         &artist_hub,
+        mixing,
     );
     let ordered = decluster_by_album(ordered);
     let ordered = cap_per_artist(
@@ -756,6 +864,7 @@ pub(crate) fn build_automix_extension_with_reasons(
                 &seed,
                 seed_features.as_ref(),
                 candidate_features.get(&track.id),
+                mixing,
             );
             // Same hub discount the ordering used, reflected in the score and its
             // "Why" so a hub that got buried can't still claim a clean reason.
@@ -991,8 +1100,10 @@ fn automix_neighbor_policy(row: &queries::EmbeddingNeighborRow) -> GeneratedCand
         policy_reasons.push("lastfm branch");
     }
 
-    let primary_is_texture = row.primary_reason.as_deref() == Some("audio_texture");
-    let has_texture = primary_is_texture || has_tag("audio_texture");
+    // Models before trainer v3 call the metadata proxy "audio_texture".
+    let is_texture = |tag: &str| matches!(tag, "metadata_similarity" | "audio_texture");
+    let primary_is_texture = row.primary_reason.as_deref().is_some_and(is_texture);
+    let has_texture = primary_is_texture || reason_tags.iter().any(|tag| is_texture(tag));
     let has_supporting_reason = reason_tags.iter().any(|tag| {
         matches!(
             tag.as_str(),
@@ -1204,6 +1315,7 @@ fn order_automix_candidates(
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: &HashMap<i64, AudioDspFeatures>,
     artist_hub: &HashMap<i64, f64>,
+    mixing: bool,
 ) -> Vec<Track> {
     let mut scored = candidates
         .into_iter()
@@ -1218,6 +1330,7 @@ fn order_automix_candidates(
                 seed,
                 seed_features,
                 candidate_features.get(&track.id),
+                mixing,
             )
             .value;
             // Discount hub artists so they sink below non-hub matches at the 0.05
@@ -1462,9 +1575,31 @@ pub(crate) fn automix_score(
         seed,
         seed_features,
         candidate_features,
+        true,
     )
 }
 
+/// Taste on the learned path: favorites and artist affinity (the same net the
+/// fallback scorer uses) scale the lane policy, bounded to 0.6..1.4.
+fn learned_taste_multiplier(track: &Track, taste: &TasteVector) -> f64 {
+    let mut multiplier = if track.is_favorite { 1.2 } else { 1.0 };
+    if track.artist_id != 0
+        && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
+    {
+        let net = affinity.pos * 0.5 - affinity.neg * 0.65;
+        multiplier *= (1.0 + 0.1 * net).clamp(0.6, 1.4);
+    }
+    multiplier
+}
+
+/// Full-overlap genre match is worth this much relevance on top of the 1.0 base.
+const AUTOMIX_GENRE_WEIGHT: f64 = 2.5;
+
+/// Relevance first, penalties last: genre overlap (weighted Jaccard, so extra
+/// tags dilute instead of stacking) and taste affinities build relevance;
+/// familiarity boosts scale it; the tamed harmonic fit nudges it while
+/// transitions are mixed; skip, recency and energy-whiplash penalties multiply
+/// the result so a shared genre can no longer cancel a skip.
 fn automix_score_with_genre_confidence(
     track: &Track,
     genres: &[queue::TrackGenreEvidence],
@@ -1472,52 +1607,18 @@ fn automix_score_with_genre_confidence(
     seed: &SeedContext,
     seed_features: Option<&AudioDspFeatures>,
     candidate_features: Option<&AudioDspFeatures>,
+    mixing: bool,
 ) -> AutomixScore {
-    let mut score = 1.0;
     let mut signals = Vec::new();
 
-    // Hard suppression for recently skipped tracks
-    if taste.skipped_track_ids.contains(&track.id) {
-        score *= 0.1;
-        signals.push(AutomixSignal::penalty("recently skipped"));
-    }
-
-    // Same-artist: gentle familiarity boost, not enough to cause artist runs.
-    // Artist spread is handled at the queue level by decluster_by_album.
-    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
-        score *= 1.1;
-        signals.push(AutomixSignal::boost("same artist"));
-    }
-
-    if seed.source.as_deref() == Some(track.source.as_str()) {
-        score *= 1.05;
-        signals.push(AutomixSignal::boost("same source"));
-    }
-
-    if track.is_favorite {
-        score *= 1.2;
-        signals.push(AutomixSignal::boost("favorite"));
-    }
-
-    // Unplayed tracks get a meaningful boost so they surface before heavily-played ones.
-    if track.play_count == 0 {
-        score *= 1.35;
-        signals.push(AutomixSignal::boost("unplayed"));
-    } else if let Some(last_played) = track.last_played_at.as_deref() {
-        // Time-decay penalty: full suppression at <1 day, fades to zero by 14 days.
-        let days_since = parse_days_since_last_played(last_played);
-        if days_since < 14.0 {
-            let penalty = 0.5 + 0.5 * (days_since / 14.0);
-            score *= penalty;
-            signals.push(AutomixSignal::penalty("recently played"));
-        }
-    }
+    // -- Relevance -----------------------------------------------------------
+    let mut relevance = 1.0;
 
     if track.artist_id != 0
         && let Some(affinity) = taste.artist_affinity.get(&track.artist_id)
     {
-        score += affinity.pos * 0.5;
-        score -= affinity.neg * 0.65;
+        relevance += affinity.pos * 0.5;
+        relevance -= affinity.neg * 0.65;
         // Label by the net effect on the score, not the raw counts.
         let net = affinity.pos * 0.5 - affinity.neg * 0.65;
         if net > 0.0 {
@@ -1527,43 +1628,55 @@ fn automix_score_with_genre_confidence(
         }
     }
 
-    let mut shares_seed_genre = false;
+    // Weighted Jaccard between the seed's genres and the candidate's: each
+    // genre weighs by rarity (0.5, the absent-data default, weighs 1.0), and a
+    // shared genre counts only as strongly as the weaker side believes it.
+    let genre_weight = |genre: &str| {
+        let rarity = seed.genre_rarity.get(genre).copied().unwrap_or(0.5);
+        0.7 + 0.6 * rarity
+    };
+    let mut shared_weight = 0.0;
+    let mut candidate_only_weight = 0.0;
     let mut genre_affinity_net = 0.0;
-    let normalized_genres = genres.iter().map(|genre| {
-        (
-            normalize_genre_key(&genre.path),
-            genre.confidence.clamp(0.0, 1.0),
-        )
-    });
-    for (genre, candidate_confidence) in normalized_genres {
-        let seed_confidence = seed
-            .genre_confidence
-            .get(&genre)
-            .copied()
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
-        let match_confidence = candidate_confidence.min(seed_confidence);
-        if seed.genres.contains(&genre) {
-            // Weight the seed-genre match by rarity when automix supplied it: a
-            // niche shared genre is a stronger signal than a library-wide one.
-            // 0.5 (the absent-data default) maps to a 1.0 multiplier, so callers
-            // without rarity data and existing tests keep the original flat +1.8.
-            let rarity = seed.genre_rarity.get(&genre).copied().unwrap_or(0.5);
-            score += 1.8 * (0.7 + 0.6 * rarity) * match_confidence;
-            shares_seed_genre |= match_confidence > 0.0;
+    let mut seen = HashSet::new();
+    for genre in genres {
+        let key = normalize_genre_key(&genre.path);
+        if !seen.insert(key.clone()) {
+            continue;
         }
-        if let Some(affinity) = taste.genre_affinity.get(&genre) {
+        let candidate_confidence = genre.confidence.clamp(0.0, 1.0);
+        let in_seed = seed.genres.contains(&key);
+        let match_confidence = if in_seed {
+            let seed_confidence = seed
+                .genre_confidence
+                .get(&key)
+                .copied()
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            candidate_confidence.min(seed_confidence)
+        } else {
+            0.0
+        };
+        if in_seed {
+            shared_weight += genre_weight(&key) * match_confidence;
+        } else {
+            candidate_only_weight += genre_weight(&key);
+        }
+        if let Some(affinity) = taste.genre_affinity.get(&key) {
             let net = affinity.pos * 0.4 - affinity.neg * 0.5;
-            let affinity_confidence = if seed.genres.contains(&genre) {
+            let affinity_confidence = if in_seed {
                 match_confidence
             } else {
                 candidate_confidence
             };
-            score += net * affinity_confidence;
+            relevance += net * affinity_confidence;
             genre_affinity_net += net * affinity_confidence;
         }
     }
-    if shares_seed_genre {
+    let seed_weight: f64 = seed.genres.iter().map(|genre| genre_weight(genre)).sum();
+    let union_weight = seed_weight + candidate_only_weight;
+    if shared_weight > 0.0 && union_weight > 0.0 {
+        relevance += AUTOMIX_GENRE_WEIGHT * shared_weight / union_weight;
         signals.push(AutomixSignal::boost("shared genres"));
     }
     if genre_affinity_net > 0.0 {
@@ -1572,39 +1685,83 @@ fn automix_score_with_genre_confidence(
         signals.push(AutomixSignal::penalty("genre mismatch"));
     }
 
-    score += (track.fidelity_score.max(0) as f64) * 0.003;
+    relevance += (track.fidelity_score.max(0) as f64) * 0.003;
+    let mut score = relevance.max(0.05);
 
-    // DSP harmonic/BPM/energy scoring - only applied when BOTH tracks have features.
-    // Unanalyzed tracks are never penalised; they simply skip this pass.
+    // -- Familiarity boosts --------------------------------------------------
+    // Same-artist: gentle familiarity boost, not enough to cause artist runs.
+    // Artist spread is handled at the queue level by decluster_by_album.
+    if Some(track.artist_id) == seed.artist_id && track.artist_id != 0 {
+        score *= 1.1;
+        signals.push(AutomixSignal::boost("same artist"));
+    }
+    if seed.source.as_deref() == Some(track.source.as_str()) {
+        score *= 1.05;
+        signals.push(AutomixSignal::boost("same source"));
+    }
+    if track.is_favorite {
+        score *= 1.2;
+        signals.push(AutomixSignal::boost("favorite"));
+    }
+    // Unplayed tracks get a meaningful boost so they surface before heavily-played ones.
+    if track.play_count == 0 {
+        score *= 1.35;
+        signals.push(AutomixSignal::boost("unplayed"));
+    }
+
+    // -- Harmonic fit, tamed -------------------------------------------------
+    // Only while mixing, and only when BOTH tracks have features; unanalyzed
+    // tracks are never penalised. The raw multiplier swings x0.39..x3.96, so it
+    // is tamed with the shared DJ ranker's bounds.
+    let mut whiplash = false;
     if let (Some(seed), Some(cand)) = (seed_features, candidate_features) {
-        // Camelot + BPM multiplier (shared with radio post-scoring).
-        score *= compute_harmonic_multiplier(
-            seed.camelot_key.as_deref(),
-            cand.camelot_key.as_deref(),
-            seed.bpm,
-            cand.bpm,
-        );
+        if mixing {
+            score *= dj_fit_multiplier(compute_harmonic_multiplier(
+                seed.camelot_key.as_deref(),
+                cand.camelot_key.as_deref(),
+                seed.bpm,
+                cand.bpm,
+            ));
+        }
 
         // The multiplier folds Camelot *and* BPM together, so it can read >1.0
         // even on a key clash that happens to share a tempo. Derive the
         // harmonic signal from the Camelot relationship directly - via the same
         // `camelot_relation` the multiplier uses - so the "Why" never claims a
         // fit the keys don't have, and the two can't drift apart.
-        if let (Some(a), Some(b)) = (seed.camelot_key.as_deref(), cand.camelot_key.as_deref()) {
+        if mixing
+            && let (Some(a), Some(b)) = (seed.camelot_key.as_deref(), cand.camelot_key.as_deref())
+        {
             signals.push(match camelot_relation(a, b) {
                 CamelotRelation::Compatible => AutomixSignal::boost("harmonic match"),
                 CamelotRelation::Adjacent => AutomixSignal::boost("adjacent key"),
                 CamelotRelation::Clash => AutomixSignal::penalty("key clash"),
             });
         }
+        whiplash = matches!(
+            (seed.energy, cand.energy),
+            (Some(seed_energy), Some(cand_energy)) if (seed_energy - cand_energy).abs() > 0.5
+        );
+    }
 
-        // Energy whiplash penalty.
-        if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
-            && (seed_energy - cand_energy).abs() > 0.5
-        {
-            score *= 0.7;
-            signals.push(AutomixSignal::penalty("energy whiplash"));
+    // -- Penalties, applied last ---------------------------------------------
+    if taste.skipped_track_ids.contains(&track.id) {
+        score *= 0.1;
+        signals.push(AutomixSignal::penalty("recently skipped"));
+    }
+    if track.play_count > 0
+        && let Some(last_played) = track.last_played_at.as_deref()
+    {
+        // Time-decay penalty: half weight at <1 day, fading to none by 14 days.
+        let days_since = parse_days_since_last_played(last_played);
+        if days_since < 14.0 {
+            score *= 0.5 + 0.5 * (days_since / 14.0);
+            signals.push(AutomixSignal::penalty("recently played"));
         }
+    }
+    if whiplash {
+        score *= 0.7;
+        signals.push(AutomixSignal::penalty("energy whiplash"));
     }
 
     AutomixScore {
@@ -1841,6 +1998,152 @@ mod tests {
         assert!((rare_flat - broad_flat).abs() < 1e-9);
     }
 
+    fn dsp(bpm: f64, key: &str) -> AudioDspFeatures {
+        AudioDspFeatures {
+            track_id: 0,
+            bpm: Some(bpm),
+            key_signature: None,
+            camelot_key: Some(key.to_string()),
+            loudness_lufs: None,
+            energy: None,
+            danceability: None,
+            beat_strength: None,
+            spectral_centroid: None,
+            stereo_width: None,
+            is_instrumental: false,
+            analysis_source: "test".to_string(),
+            analysis_offset_ms: 0,
+            samples_analyzed: None,
+            analyzed_at: "2026-01-01T00:00:00Z".to_string(),
+            analysis_version: "test".to_string(),
+        }
+    }
+
+    fn two_genre_seed() -> crate::smart::taste_vector::SeedContext {
+        crate::smart::taste_vector::SeedContext {
+            genres: ["house".to_string(), "deep house".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scorer_skip_penalty_survives_shared_genres() {
+        use crate::smart::taste_vector::TasteVector;
+        let seed = two_genre_seed();
+        let genres = ["house".to_string(), "deep house".to_string()];
+        let track = track_with_album(7, None);
+        let fresh =
+            automix_score(&track, &genres, &TasteVector::default(), &seed, None, None).value;
+        let mut skipped_taste = TasteVector::default();
+        skipped_taste.skipped_track_ids.insert(7);
+        let skipped = automix_score(&track, &genres, &skipped_taste, &seed, None, None).value;
+        assert!(
+            skipped <= fresh * 0.15,
+            "a skip must stay a strong penalty: {skipped} vs {fresh}"
+        );
+    }
+
+    #[test]
+    fn scorer_prefers_a_closer_genre_match_over_more_tags() {
+        use crate::smart::taste_vector::TasteVector;
+        let seed = two_genre_seed();
+        let track = track_with_album(8, None);
+        let exact = automix_score(
+            &track,
+            &["house".to_string(), "deep house".to_string()],
+            &TasteVector::default(),
+            &seed,
+            None,
+            None,
+        )
+        .value;
+        let sprawling = automix_score(
+            &track,
+            &[
+                "house".to_string(),
+                "deep house".to_string(),
+                "techno".to_string(),
+                "trance".to_string(),
+                "ambient".to_string(),
+            ],
+            &TasteVector::default(),
+            &seed,
+            None,
+            None,
+        )
+        .value;
+        assert!(exact > sprawling, "{exact} vs {sprawling}");
+    }
+
+    #[test]
+    fn fallback_order_ignores_key_and_tempo_while_mixing_is_off() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO artists (id, name) VALUES (1, 'Seed'), (2, 'Two'), (3, 'Three');
+                 INSERT INTO tracks (id, title, artist_id, duration_ms, source, is_library, is_favorite)
+                 VALUES (1, 'Seed', 1, 200000, 'tidal', 1, 0),
+                        (2, 'Preferred', 2, 200000, 'tidal', 1, 1),
+                        (3, 'Other', 3, 200000, 'tidal', 1, 0);
+                 UPDATE playback_state SET crossfade_ms = 0 WHERE id = 1;
+                 INSERT INTO queue (id, track_id, position, source) VALUES (1, 1, 0, 'user');
+                 INSERT INTO track_similarity (track_a, track_b, similarity_score)
+                 VALUES (1, 2, 0.9), (1, 3, 0.8);
+                 INSERT INTO audio_dsp_features (track_id, bpm, camelot_key)
+                 VALUES (1, 124.0, '8A'), (2, 145.0, '3B'), (3, 124.0, '8A');",
+            )?;
+            assert!(!mixing_active(conn));
+            let current = queue::get_track_by_id(conn, 1)?.unwrap();
+            let items = queue::load_queue(conn)?;
+            let ranked = build_automix_extension_with_reasons(
+                conn,
+                &current,
+                &items,
+                ShuffleMode::Off,
+                None,
+                1,
+                false,
+            )?;
+            assert_eq!(ranked[0].track.id, 2, "key and tempo reordered automix with mixing off");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn scorer_keeps_harmonic_swing_within_bounds() {
+        use crate::smart::taste_vector::{SeedContext, TasteVector};
+        let taste = TasteVector::default();
+        let seed = SeedContext::default();
+        let track = track_with_album(9, None);
+        let seed_dsp = dsp(124.0, "8A");
+        let neutral = automix_score(&track, &[], &taste, &seed, None, None).value;
+        let fit = automix_score(
+            &track,
+            &[],
+            &taste,
+            &seed,
+            Some(&seed_dsp),
+            Some(&dsp(124.0, "8A")),
+        )
+        .value;
+        let clash = automix_score(
+            &track,
+            &[],
+            &taste,
+            &seed,
+            Some(&seed_dsp),
+            Some(&dsp(160.0, "2B")),
+        )
+        .value;
+        assert!(fit <= neutral * 1.25 + 1e-9, "{fit} vs {neutral}");
+        assert!(clash >= neutral * 0.8 - 1e-9, "{clash} vs {neutral}");
+        assert!(fit > neutral && clash < neutral);
+    }
+
     #[test]
     fn scorer_caps_shared_genre_signal_at_both_tracks_confidence() {
         use crate::playback::queue::TrackGenreEvidence;
@@ -1864,19 +2167,40 @@ mod tests {
             AffinitySignal { pos: 2.2, neg: 0.0 },
         );
 
-        let strong =
-            automix_score_with_genre_confidence(&track, &strong_genre, &taste, &seed, None, None)
-                .value;
-        let weak_candidate =
-            automix_score_with_genre_confidence(&track, &weak_genre, &taste, &seed, None, None)
-                .value;
+        let strong = automix_score_with_genre_confidence(
+            &track,
+            &strong_genre,
+            &taste,
+            &seed,
+            None,
+            None,
+            false,
+        )
+        .value;
+        let weak_candidate = automix_score_with_genre_confidence(
+            &track,
+            &weak_genre,
+            &taste,
+            &seed,
+            None,
+            None,
+            false,
+        )
+        .value;
         assert!(strong > weak_candidate);
 
         seed.genre_confidence
             .insert("genres > electronic > house".to_string(), 0.1);
-        let weak_seed =
-            automix_score_with_genre_confidence(&track, &strong_genre, &taste, &seed, None, None)
-                .value;
+        let weak_seed = automix_score_with_genre_confidence(
+            &track,
+            &strong_genre,
+            &taste,
+            &seed,
+            None,
+            None,
+            false,
+        )
+        .value;
         assert!((weak_seed - weak_candidate).abs() < 1e-9);
     }
 
@@ -1974,8 +2298,15 @@ mod tests {
         );
         assert_eq!(tied_facts[0].track.id, 2);
 
+        // While mixing, a clearly better transition outweighs a slightly
+        // more trusted lane.
         let conn = Connection::open_in_memory().expect("db");
         create_dsp_schema(&conn);
+        conn.execute_batch(
+            "CREATE TABLE playback_state (id INTEGER PRIMARY KEY, crossfade_ms INTEGER);
+             INSERT INTO playback_state (id, crossfade_ms) VALUES (1, 4000);",
+        )
+        .expect("mixing on");
         insert_dsp(&conn, 1, 120.0, "1A");
         insert_dsp(&conn, 2, 145.0, "6B");
         insert_dsp(&conn, 3, 120.5, "1A");

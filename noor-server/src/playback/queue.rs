@@ -520,6 +520,9 @@ pub fn apply_shuffle_with_seed(
     Ok(ShuffleApplyResult { debug })
 }
 
+// Only the shuffle tests reorder plain track lists now; automix's learned
+// path keeps relevance order instead of shuffling before ranking.
+#[cfg(test)]
 pub(crate) fn reorder_tracks_with_seed(
     conn: &Connection,
     tracks: &[Track],

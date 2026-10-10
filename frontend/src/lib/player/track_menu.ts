@@ -19,6 +19,7 @@ import {
 import type { TidalPlayable } from '$lib/api/client';
 import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
 import { downloadTrack, downloadTidalTrack, type DownloadFormat } from '$lib/stores/downloads';
+import { notForMeMenuItem } from '$lib/player/not_for_me';
 
 // Narrow shape so the builder can accept a Track, a QueueItem.track, or a
 // DiscoveryRadioResult mapped through `mapRadioToMenuTrack`. We avoid a hard
@@ -223,6 +224,13 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 
 	if (!options.remoteRoutes) {
 		items.push(downloadMenuItem((format) => void downloadTrack(track.id, format)));
+	}
+
+	items.push(notForMeMenuItem('track', track.id, 'Not for me'));
+	if (hasArtist) {
+		items.push(
+			notForMeMenuItem('artist', track.artist_id!, `Not for me: ${track.artist_name ?? 'this artist'}`)
+		);
 	}
 
 	if (options.queueItemId != null) {

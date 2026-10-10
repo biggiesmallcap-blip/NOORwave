@@ -9,11 +9,17 @@
 ///
 /// With rayon parallelism: ~10-30s for 32k tracks (was hours in Python).
 use crate::db::queries::EmbeddingTrackRow;
+use crate::genre::jaccard::{weighted_genre_set, weighted_jaccard};
+use crate::services::audio_analysis::tempo_delta;
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+// v5: tokens are the artist (one token), genre path segments and DSP buckets.
+// Title, album, quality, source and duration words matched unrelated tracks
+// through shared words ("simon", "lossless"); the bump makes every install
+// recompute instead of reusing v4 vectors.
 // v4: the stored DSP `energy` was rescaled from RMS/0.7 to a LUFS map
 // (analysis v11), which shifts nearly every track's energy_{N} bucket token.
 // The bump invalidates v3 caches so refreshes recompute against re-analysed
@@ -21,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 // v3: audio-proxy tokens are IDF-weighted (compute_token_idf), so common tokens
 // like broad genres no longer dominate the projection. The bump invalidates v2
 // caches so incremental refreshes recompute rather than mixing weighting schemes.
-pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v4";
+pub const AUDIO_PROXY_FEATURE_VERSION: &str = "metadata-audio-proxy-v5";
 
 // ── Progress update struct ────────────────────────────────────────────────────
 
@@ -236,6 +242,16 @@ pub struct ReasonHitRate {
 // directionally without rare tags ("punk_lullabye") looking miraculous off n=2.
 pub const MIN_REASON_IMPRESSIONS: i64 = 20;
 
+/// Metadata bonus for a full genre match, scaled by weighted Jaccard overlap.
+const GENRE_BRANCH_BONUS: f64 = 0.18;
+
+/// Score multiplier for a neighbor the listener never engaged with.
+const TRANSIENT_NEIGHBOR_WEIGHT: f64 = 0.85;
+
+/// The metadata proxy competes for primary_reason at this fraction of its
+/// cosine, so real listening evidence names the edge when both are present.
+const METADATA_REASON_WEIGHT: f64 = 0.6;
+
 // ── Core math utilities ───────────────────────────────────────────────────────
 
 fn normalize(vec: &[f64]) -> (Vec<f64>, f64) {
@@ -304,26 +320,25 @@ fn hashed_projection_weighted(
     normalize(&vec).0
 }
 
-/// Extract metadata tokens from a track row (mirrors Python's `metadata_tokens`).
+/// Tokens for the metadata proxy vector: the artist as one token, genre path
+/// segments, and DSP buckets. Title, album, quality, source and duration words
+/// are left out on purpose: they matched "Kathy's Song" to Carly Simon through
+/// "simon" and a Debussy piece to rap through "lossless".
 fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
     let mut tokens = Vec::new();
-    let fields: Vec<Option<&str>> = vec![
-        Some(&track.title),
-        track.artist_name.as_deref(),
-        track.album_title.as_deref(),
-        track.best_quality.as_deref(),
-        Some(&track.source),
-    ];
-    for value in fields.into_iter().flatten() {
-        let normalized = value.to_lowercase().replace(['/', '-'], " ");
-        tokens.extend(normalized.split_whitespace().map(String::from));
+    if let Some(artist) = track.artist_name.as_deref() {
+        let artist = artist.trim().to_lowercase();
+        if !artist.is_empty() {
+            tokens.push(format!("artist:{artist}"));
+        }
     }
-    if let Some(duration) = track.duration_ms {
-        tokens.push(format!("dur_{}", duration / 30_000));
-    }
-    for genre in &track.genre_paths {
-        let normalized = genre.to_lowercase().replace('>', " ");
-        tokens.extend(normalized.split_whitespace().map(String::from));
+    for path in &track.genre_paths {
+        for segment in path.split('>') {
+            let segment = segment.trim().to_lowercase();
+            if !segment.is_empty() {
+                tokens.push(format!("genre:{segment}"));
+            }
+        }
     }
     // DSP features — bucketed so nearby values share tokens
     if let Some(bpm) = track.bpm {
@@ -363,17 +378,19 @@ fn metadata_tokens(track: &EmbeddingTrackRow) -> Vec<String> {
             tokens.push(format!("key_{}{}", n, alt));
         }
     }
+    // A genre shared by several paths ("Electronic" under two leaves) counts once.
+    tokens.sort();
+    tokens.dedup();
     tokens
 }
 
+/// Same artist and genre token shapes as `metadata_tokens`, so external
+/// candidates live in the same space as library tracks.
 fn external_candidate_tokens(candidate: &TrainerExternalCandidate) -> Vec<String> {
     let mut tokens = Vec::new();
-    for value in [&candidate.title, &candidate.artist_name] {
-        let normalized = value.to_lowercase().replace(['/', '-'], " ");
-        tokens.extend(normalized.split_whitespace().map(String::from));
-    }
-    if let Some(duration) = candidate.duration_ms {
-        tokens.push(format!("dur_{}", duration / 30_000));
+    let artist = candidate.artist_name.trim().to_lowercase();
+    if !artist.is_empty() {
+        tokens.push(format!("artist:{artist}"));
     }
     if candidate.tidal_id.is_some() {
         tokens.push("tidal_resolved".to_string());
@@ -395,8 +412,12 @@ fn external_candidate_tokens(candidate: &TrainerExternalCandidate) -> Vec<String
         );
     }
     for genre in &candidate.genre_tags {
-        let normalized = genre.to_lowercase().replace('>', " ");
-        tokens.extend(normalized.split_whitespace().map(String::from));
+        for segment in genre.split('>') {
+            let segment = segment.trim().to_lowercase();
+            if !segment.is_empty() {
+                tokens.push(format!("genre:{segment}"));
+            }
+        }
     }
     tokens
 }
@@ -482,6 +503,12 @@ fn build_behavioral_embeddings(
     let mut sequences_seen: usize = 0;
     'outer: for source in &input.sequences {
         let weight = source.weight;
+        // Only real listening is co-listen support; album, artist, genre,
+        // playlist and favorites sequences are library structure.
+        let is_listening = matches!(
+            source.label.as_str(),
+            "listen_history" | "playback_transitions"
+        );
         for sequence in &source.sequences {
             // Cancel check every 64 sequences keeps the atomic-load cost out
             // of the inner triple-nested loop while still feeling responsive
@@ -532,12 +559,16 @@ fn build_behavioral_embeddings(
                     let weighted = weight / (distance as f64).max(1.0);
                     *entry.entry(other).or_default() += weighted;
                     *count_entry.entry(other).or_default() += 1;
-                    support_buckets
+                    let bucket = support_buckets
                         .entry(track_id)
                         .or_default()
                         .entry(other)
-                        .or_default()
-                        .colisten += weighted;
+                        .or_default();
+                    if is_listening {
+                        bucket.colisten += weighted;
+                    } else {
+                        bucket.structure += weighted;
+                    }
                 }
             }
         }
@@ -621,19 +652,16 @@ fn build_behavioral_embeddings(
                 return (track_id, Vec::new());
             }
             let mut vec = vec![0.0f64; dim];
+            // Hash the context track alone, so tracks heard in the same
+            // contexts share buckets and their cosine measures shared context.
+            // Hashing "{track_id}:{other}" gave every track private buckets and
+            // turned this vector into noise. The self term, weighted like the
+            // row's strongest context, lets a direct co-listen (A lists B, B
+            // lists A) count as similarity too.
+            let self_weight = neighbors.values().copied().fold(0.0f64, f64::max);
+            add_hashed_context(&mut vec, track_id, self_weight);
             for (&other, &score) in &neighbors {
-                let key = format!("{track_id}:{other}");
-                let digest = Sha256::digest(key.as_bytes());
-                let limit = usize::min(32, dim * 2);
-                for offset in (0..limit).step_by(2) {
-                    let bucket = digest[offset] as usize % dim;
-                    let sign = if digest[offset + 1] % 2 == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    };
-                    vec[bucket] += sign * score;
-                }
+                add_hashed_context(&mut vec, other, score);
             }
             let done = projected_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if done.is_multiple_of(256)
@@ -655,6 +683,23 @@ fn build_behavioral_embeddings(
         })
         .collect();
     (embeddings, co_score, co_count, support_buckets)
+}
+
+/// Add one context track to a behavioral vector: a signed hashed projection of
+/// the track id, scaled by its co-occurrence weight.
+fn add_hashed_context(vec: &mut [f64], context_track_id: i64, weight: f64) {
+    let dim = vec.len();
+    let digest = Sha256::digest(context_track_id.to_string().as_bytes());
+    let limit = usize::min(32, dim * 2);
+    for offset in (0..limit).step_by(2) {
+        let bucket = digest[offset] as usize % dim;
+        let sign = if digest[offset + 1] % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        vec[bucket] += sign * weight;
+    }
 }
 
 fn add_support_bucket(
@@ -805,7 +850,10 @@ struct TrackMeta {
     track_id: i64,
     artist_lower: Option<String>,
     album: Option<String>,
-    genre_tokens: HashSet<String>,
+    /// Weighted genre set from genre paths only (leaf 1.0, ancestors 0.7).
+    genre_set: HashMap<String, f64>,
+    /// Never played, favorited or playlisted: a catalog row seen in passing.
+    transient: bool,
     bpm: Option<f64>,
     energy: Option<f64>,
     camelot_key: Option<String>,
@@ -844,20 +892,12 @@ fn similarity_neighbors(
         .map(|t| {
             let artist_lower = t.artist_name.as_ref().map(|s| s.to_lowercase());
             let album = t.album_title.clone();
-            let genre_tokens: HashSet<String> = metadata_tokens(t)
-                .into_iter()
-                .filter(|tok| {
-                    !tok.starts_with("dur_")
-                        && !tok.starts_with("bpm")
-                        && !tok.starts_with("energy_")
-                        && !tok.starts_with("key_")
-                })
-                .collect();
             TrackMeta {
                 track_id: t.track_id,
                 artist_lower,
                 album,
-                genre_tokens,
+                genre_set: weighted_genre_set(&t.genre_paths),
+                transient: t.play_count == 0 && !t.is_favorite && t.playlist_memberships == 0,
                 bpm: t.bpm,
                 energy: t.energy,
                 camelot_key: t.camelot_key.clone(),
@@ -987,18 +1027,18 @@ fn similarity_neighbors(
                     contributions.push(("artist_affinity", 0.2));
                 }
 
-                // Genre branch (pre-computed HashSets, no tokenization)
-                if !meta.genre_tokens.is_empty()
-                    && !other_meta.genre_tokens.is_empty()
-                    && meta
-                        .genre_tokens
-                        .intersection(&other_meta.genre_tokens)
-                        .next()
-                        .is_some()
-                {
-                    metadata_score += 0.18;
-                    reason_tags.push("genre_branch".to_string());
-                    contributions.push(("genre_branch", 0.18));
+                // Genre branch: weighted Jaccard over real genre paths, the same
+                // measure radio and Discovery Space use. No genres on either side
+                // is no signal. The old token set matched any shared title,
+                // artist, quality or source word.
+                if !meta.genre_set.is_empty() && !other_meta.genre_set.is_empty() {
+                    let overlap = weighted_jaccard(&meta.genre_set, &other_meta.genre_set);
+                    if overlap > 0.0 {
+                        let bonus = GENRE_BRANCH_BONUS * overlap;
+                        metadata_score += bonus;
+                        reason_tags.push("genre_branch".to_string());
+                        contributions.push(("genre_branch", bonus));
+                    }
                 }
 
                 // Album context
@@ -1010,14 +1050,14 @@ fn similarity_neighbors(
                     contributions.push(("album_context", 0.12));
                 }
 
-                // BPM proximity — scaled bonus: 0.15 within 3 BPM, 0.08 within 8 BPM
-                if let (Some(a_bpm), Some(b_bpm)) = (meta.bpm, other_meta.bpm) {
-                    let diff = (a_bpm - b_bpm).abs();
-                    if diff <= 3.0 {
+                // BPM proximity: 0.15 within 2.5%, 0.08 within 6.5% (about 3 and
+                // 8 BPM at 125), octave-folded so 85 and 170 BPM match.
+                if let Some(diff) = tempo_delta(meta.bpm, other_meta.bpm) {
+                    if diff <= 0.025 {
                         metadata_score += 0.15;
                         reason_tags.push("bpm_match".to_string());
                         contributions.push(("bpm_match", 0.15));
-                    } else if diff <= 8.0 {
+                    } else if diff <= 0.065 {
                         metadata_score += 0.08;
                         reason_tags.push("bpm_match".to_string());
                         contributions.push(("bpm_match", 0.08));
@@ -1070,8 +1110,10 @@ fn similarity_neighbors(
                     contributions.push(("behavioral", behavioral_score));
                 }
                 if audio_score > 0.35 {
-                    reason_tags.push("audio_texture".to_string());
-                    contributions.push(("audio_texture", audio_score));
+                    // Not audio: the proxy is artist, genre and DSP buckets.
+                    reason_tags.push("metadata_similarity".to_string());
+                    contributions
+                        .push(("metadata_similarity", audio_score * METADATA_REASON_WEIGHT));
                 }
 
                 let support_breakdown = seed_support_buckets
@@ -1097,7 +1139,13 @@ fn similarity_neighbors(
                     contributions.push(("lastfm_branch", lastfm_branch_bonus));
                 }
 
-                let total_score = score + metadata_score + directional_behavior_bonus;
+                let mut total_score = score + metadata_score + directional_behavior_bonus;
+                // Transient catalog rows (never played, favorited or playlisted)
+                // were 90% of top-10 neighbors; tracks the listener has engaged
+                // with win close calls.
+                if other_meta.transient {
+                    total_score *= TRANSIENT_NEIGHBOR_WEIGHT;
+                }
                 reason_tags.sort();
                 reason_tags.dedup();
 
@@ -2034,12 +2082,15 @@ mod tests {
         ];
         let idf = compute_token_idf(&tracks);
         assert!(
-            idf["rare"] > idf["common"],
+            idf["genre:rare"] > idf["genre:common"],
             "a rare token must out-weigh a library-wide one"
         );
         // A token present in every track floors at weight 1.0.
-        assert!((idf["common"] - 1.0).abs() < 1e-9);
-        assert!((idf["tidal"] - 1.0).abs() < 1e-9);
+        assert!((idf["genre:common"] - 1.0).abs() < 1e-9);
+        assert!(
+            !idf.contains_key("tidal"),
+            "source words are not metadata tokens"
+        );
 
         // Applying the weights actually moves the projection away from the uniform one.
         let dim = 32;
@@ -2765,5 +2816,177 @@ mod tests {
             .candidate_in_degree;
         assert_eq!(in_a, 1);
         assert_eq!(in_c, 3);
+    }
+
+    fn behavioral_input(sequences: Vec<Vec<i64>>) -> TrainerInput {
+        let (tracks, _, _, _) = make_test_input(25, 96);
+        TrainerInput {
+            seed: 13,
+            dimension: 96,
+            window_size: 1,
+            min_count: 1,
+            top_k: 3,
+            include_audio_proxy: false,
+            tracks,
+            external_candidates: Vec::new(),
+            sequences: vec![TrainerSequenceGroup {
+                label: "listen_history".to_string(),
+                weight: 1.0,
+                sequences,
+            }],
+            evidence_groups: Vec::new(),
+            heldout_pairs: Vec::new(),
+            heldout_examples: Vec::new(),
+            cached_audio_features: None,
+        }
+    }
+
+    #[test]
+    fn behavioral_vectors_match_tracks_heard_in_the_same_contexts() {
+        // 1 and 2 never meet, but both sit between 10 and 11. 3 sits elsewhere.
+        let input = behavioral_input(vec![vec![10, 1, 11], vec![10, 2, 11], vec![20, 3, 21]]);
+        let (embeddings, _, _, _) = build_behavioral_embeddings(&input, None, None);
+        let shared = cosine(&embeddings[&1], &embeddings[&2]);
+        let unrelated = cosine(&embeddings[&1], &embeddings[&3]);
+        assert!(shared > 0.5, "shared-context cosine was {shared}");
+        assert!(unrelated.abs() < 0.3, "unrelated cosine was {unrelated}");
+    }
+
+    #[test]
+    fn behavioral_vectors_match_a_direct_co_listen() {
+        let input = behavioral_input(vec![vec![1, 2]]);
+        let (embeddings, _, _, _) = build_behavioral_embeddings(&input, None, None);
+        let direct = cosine(&embeddings[&1], &embeddings[&2]);
+        assert!(direct > 0.9, "direct co-listen cosine was {direct}");
+    }
+
+    #[test]
+    fn genre_branch_requires_shared_genre_paths() {
+        let (mut tracks, behavioral, audio, fusion) = make_test_input(3, 16);
+        for track in &mut tracks {
+            track.best_quality = Some("LOSSLESS".to_string());
+            track.source = "tidal".to_string();
+        }
+        tracks[0].genre_paths = vec!["Electronic > House".to_string()];
+        tracks[1].genre_paths = vec!["Electronic > House".to_string()];
+        // tracks[2] has no genres; it shares only quality, source and artist words.
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            2,
+            None,
+            None,
+        );
+        let tags = |a: i64, b: i64| {
+            result
+                .iter()
+                .find(|n| n.track_id == a && n.neighbor_track_id == b)
+                .map(|n| n.reason_tags.clone())
+                .expect("edge")
+        };
+        assert!(tags(0, 1).iter().any(|t| t == "genre_branch"));
+        assert!(!tags(0, 2).iter().any(|t| t == "genre_branch"));
+    }
+
+    #[test]
+    fn metadata_tokens_skip_title_album_quality_and_source_words() {
+        let track = EmbeddingTrackRow {
+            track_id: 1,
+            title: "Kathy's Song".to_string(),
+            artist_name: Some("Simon & Garfunkel".to_string()),
+            album_title: Some("Sounds of Silence".to_string()),
+            duration_ms: Some(200_000),
+            best_quality: Some("LOSSLESS".to_string()),
+            source: "tidal".to_string(),
+            play_count: 3,
+            is_favorite: false,
+            playlist_memberships: 0,
+            genre_paths: vec!["Folk > Folk Rock".to_string()],
+            bpm: None,
+            energy: None,
+            camelot_key: None,
+            danceability: None,
+            beat_strength: None,
+            loudness_lufs: None,
+        };
+        let tokens = metadata_tokens(&track);
+        assert!(tokens.contains(&"artist:simon & garfunkel".to_string()));
+        assert!(tokens.contains(&"genre:folk".to_string()));
+        assert!(tokens.contains(&"genre:folk rock".to_string()));
+        for word in [
+            "simon", "song", "kathy's", "silence", "lossless", "tidal", "dur_6",
+        ] {
+            assert!(!tokens.iter().any(|t| t == word), "unexpected token {word}");
+        }
+    }
+
+    #[test]
+    fn primary_reason_prefers_behavior_over_metadata_similarity() {
+        let (tracks, behavioral, audio, fusion) = make_test_input(3, 16);
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            2,
+            None,
+            None,
+        );
+        assert!(!result.is_empty());
+        for row in &result {
+            assert_eq!(row.primary_reason.as_deref(), Some("behavioral"));
+            assert!(row.reason_tags.iter().any(|t| t == "metadata_similarity"));
+            assert!(!row.reason_tags.iter().any(|t| t == "audio_texture"));
+        }
+    }
+
+    #[test]
+    fn library_sequences_count_as_structure_not_co_listen() {
+        let mut input = behavioral_input(vec![vec![1, 2]]);
+        input.sequences[0].label = "album_tracks".to_string();
+        let (_, _, _, support) = build_behavioral_embeddings(&input, None, None);
+        let bucket = support[&1][&2];
+        assert_eq!(bucket.colisten, 0.0);
+        assert!(bucket.structure > 0.0);
+
+        let input = behavioral_input(vec![vec![1, 2]]);
+        let (_, _, _, support) = build_behavioral_embeddings(&input, None, None);
+        assert!(support[&1][&2].colisten > 0.0);
+    }
+
+    #[test]
+    fn engaged_tracks_outrank_transient_catalog_rows_at_equal_similarity() {
+        let (mut tracks, behavioral, audio, fusion) = make_test_input(3, 16);
+        tracks[1].play_count = 4; // engaged
+        // tracks[2] stays transient: never played, favorited or playlisted.
+        let result = similarity_neighbors(
+            &tracks,
+            &behavioral,
+            &audio,
+            &fusion,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            2,
+            None,
+            None,
+        );
+        let ranked = result
+            .iter()
+            .filter(|row| row.track_id == 0)
+            .map(|row| row.neighbor_track_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ranked, vec![1, 2]);
     }
 }

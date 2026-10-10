@@ -54,11 +54,9 @@ pub struct TasteVector {
     /// for this dimension; consumers should treat that as "no preference"
     /// rather than zero. Keeps adapters from lying about absent data.
     pub exploration_bias: Option<f32>,
-    /// Phase 3 — populated when adapters start deriving DSP-preference
-    /// signals. Consumers ignore until then.
-    #[allow(dead_code)]
+    /// Mean energy and tempo of liked tracks (Discovery Space session taste);
+    /// None when nothing liked was analyzed.
     pub energy_pref: Option<f32>,
-    #[allow(dead_code)]
     pub bpm_pref: Option<f32>,
 
     /// Build timestamp for cache invalidation by callers that hold the

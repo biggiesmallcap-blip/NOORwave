@@ -26,6 +26,17 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 
 const MODEL_FAMILY: &str = queries::DISCOVERY_ENGINE_V2_FAMILY;
+/// Bump when a trainer change makes existing models wrong, not just older.
+/// Installs whose active model predates it retrain once in the background
+/// (services::discovery_retrain), and the activation gate lets the new model
+/// replace the old one at near-parity.
+/// v3: context-only behavior hash, genre-path genre branch, word-free proxy.
+pub const TRAINER_CONFIG_VERSION: i64 = 3;
+/// Relative recall dip allowed when replacing a model from an older trainer
+/// version, whose numbers were measured on broken inputs.
+const UPGRADE_RECALL_TOLERANCE: f64 = 0.10;
+/// Coverage may not fall more than this below the active model's.
+const COVERAGE_REGRESSION_TOLERANCE: f64 = 0.02;
 const EXTERNAL_TRAINING_CANDIDATE_LIMIT: i64 = 1_000;
 const EXTERNAL_TRAINING_RESOLVED_LASTFM_LIMIT: i64 = 5_000;
 const LASTFM_DIRECT_EDGE_WEIGHT: f64 = 0.55;
@@ -1278,10 +1289,49 @@ pub fn discovery_training_worker_threads_for_available(
 }
 
 pub fn discovery_training_worker_threads(profile: DiscoveryTrainingSafetyProfile) -> usize {
-    let available_threads = std::thread::available_parallelism()
+    discovery_training_worker_threads_for_available(profile, available_threads())
+}
+
+fn available_threads() -> usize {
+    std::thread::available_parallelism()
         .map(|value| value.get())
-        .unwrap_or(1);
-    discovery_training_worker_threads_for_available(profile, available_threads)
+        .unwrap_or(1)
+}
+
+/// Put the calling thread in Windows background mode: lowest CPU priority and
+/// low disk priority, so the scheduler only runs it when nothing else wants
+/// the machine. Used for the unattended upgrade retrain. No-op elsewhere.
+#[cfg(windows)]
+fn lower_current_thread_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+    };
+    // SAFETY: GetCurrentThread returns a pseudo-handle for the calling thread
+    // that needs no closing; SetThreadPriority only changes its scheduling.
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+
+#[cfg(not(windows))]
+fn lower_current_thread_priority() {}
+
+/// Where thread priority cannot be lowered, a background run uses a quarter
+/// of the threads or fewer, so it gets this
+/// many times the normal safety timeout instead of timing out mid-run.
+const BACKGROUND_TRAINING_TIMEOUT_FACTOR: u32 = 4;
+
+pub fn background_training_safety_timeout(intensity: DiscoveryIntensity) -> Duration {
+    discovery_training_safety_timeout(intensity) * BACKGROUND_TRAINING_TIMEOUT_FACTOR
+}
+
+/// Most worker threads an unattended run (the upgrade retrain) may use.
+const BACKGROUND_TRAINING_MAX_WORKERS: usize = 2;
+
+/// Threads for a run nobody asked for, where priority cannot be lowered: a
+/// quarter of the cores, at most two, so the machine stays responsive.
+pub fn background_training_worker_threads_for_available(available_threads: usize) -> usize {
+    (available_threads / 4).clamp(1, BACKGROUND_TRAINING_MAX_WORKERS)
 }
 
 fn load_external_provider_last_refresh(db: &Database) -> Result<Option<chrono::NaiveDateTime>> {
@@ -1301,8 +1351,6 @@ fn load_external_provider_last_refresh(db: &Database) -> Result<Option<chrono::N
 
 #[derive(Debug, Clone)]
 pub struct ActiveLearningModel {
-    pub model_id: i64,
-    pub model_key: String,
     #[allow(dead_code)]
     pub family: String,
     /// Vector dimension for this trained model. Authoritative for any code
@@ -1322,11 +1370,14 @@ async fn wait_for_cancel(cancel: &AtomicBool) {
     }
 }
 
+/// `background` marks an unattended run (the upgrade retrain): it uses a
+/// small, fixed thread budget instead of the user's safety profile.
 pub async fn start_training(
     db: Database,
     event_tx: Sender<AppEvent>,
     full_mode: bool,
     rebuild_audio: bool,
+    background: bool,
     cancel: Arc<AtomicBool>,
     external_refresh_clients: ExternalProviderRefreshClients,
 ) -> Result<()> {
@@ -1337,8 +1388,20 @@ pub async fn start_training(
     let intensity = load_discovery_intensity(&db);
     let intensity_params = intensity.params();
     let safety_profile = load_discovery_training_safety_profile(&db);
-    let safety_timeout = discovery_training_safety_timeout(intensity);
-    let worker_threads = discovery_training_worker_threads(safety_profile);
+    let safety_timeout = if background && !cfg!(windows) {
+        background_training_safety_timeout(intensity)
+    } else {
+        discovery_training_safety_timeout(intensity)
+    };
+    // An unattended run on Windows keeps the profile's threads but runs them
+    // at background priority (see `lower_current_thread_priority`): full
+    // speed when the machine is idle, out of the way when it is not. Where
+    // priority cannot be lowered it falls back to a small thread budget.
+    let worker_threads = if background && !cfg!(windows) {
+        background_training_worker_threads_for_available(available_threads())
+    } else {
+        discovery_training_worker_threads(safety_profile)
+    };
     let (model, run) = db.with_conn(|conn| {
         let run = queries::create_training_run(conn, None, "corpus", "running")?;
         let model_key = format!("{MODEL_FAMILY}:{}", run.id);
@@ -1353,7 +1416,7 @@ pub async fn start_training(
             "safety_timeout_seconds": safety_timeout.as_secs(),
             "worker_threads": worker_threads,
             "trainer": "rust",
-            "trainer_config_version": 2,
+            "trainer_config_version": TRAINER_CONFIG_VERSION,
             "run_id": run.id,
         })
         .to_string();
@@ -1614,9 +1677,13 @@ pub async fn start_training(
         watchdog_cancel.store(true, Ordering::Relaxed);
     });
     let output_join = tokio::task::spawn_blocking(move || -> Result<_> {
-        let pool = rayon::ThreadPoolBuilder::new()
+        let mut builder = rayon::ThreadPoolBuilder::new()
             .num_threads(worker_threads)
-            .thread_name(|idx| format!("discovery-v2-{idx}"))
+            .thread_name(|idx| format!("discovery-v2-{idx}"));
+        if background {
+            builder = builder.start_handler(|_| lower_current_thread_priority());
+        }
+        let pool = builder
             .build()
             .context("create discovery trainer worker pool")?;
         Ok(pool.install(|| {
@@ -1899,64 +1966,14 @@ pub async fn start_training(
     ));
 
     let metrics_json = fail_training_on_err!(serde_json::to_string(&output.metrics));
-    let coverage = output.metrics.get("coverage_ratio").copied().unwrap_or(0.0);
-    let recall = output
-        .metrics
-        .get("transition_recall_at_10")
-        .or_else(|| output.metrics.get("recall_at_10"))
-        .copied()
-        .unwrap_or(0.0);
-    // Thresholds scale with how much real playback signal exists. The strict
-    // recall@10 gate is only meaningful when the held-out set is big enough
-    // for the metric to be stable: `build_trainer_input` carves held-out
-    // pairs from playback_transitions and playlist sequences, so a user with
-    // a couple of plays has ≤10 held-out pairs and recall@10 collapses to
-    // noise (0% or 14%, neither carries information).
-    //
-    // Three tiers:
-    //   - 0 real plays         → coverage ≥ 0.5 (cold start, recall ignored)
-    //   - 1 ≤ plays < 50       → coverage ≥ 0.7 (warm, recall too noisy to gate on)
-    //   - ≥ 50 real plays      → coverage ≥ 0.85 ∧ recall ≥ 0.15 (full gate)
-    //
-    // 50 is the rough point where held-out has ~10+ pairs and a single hit
-    // no longer flips the metric by 10pp.
-    //
-    // Real-play counts MUST come from playback_transitions / listen_history
-    // only. Library-derived sequences (album / artist / genre / playlist /
-    // favorites) reflect what's been synced, not what's been listened to.
-    let playback_seqs = output
-        .metrics
-        .get("sequence_count.playback_transitions")
-        .copied()
-        .unwrap_or(0.0);
-    let listen_seqs = output
-        .metrics
-        .get("sequence_count.listen_history")
-        .copied()
-        .unwrap_or(0.0);
-    let playback_evidence = output
-        .metrics
-        .get("evidence_count.playback_transitions")
-        .copied()
-        .unwrap_or(0.0);
-    let listen_evidence = output
-        .metrics
-        .get("evidence_count.listen_history")
-        .copied()
-        .unwrap_or(0.0);
-    let real_play_seqs = playback_seqs + listen_seqs + playback_evidence + listen_evidence;
-    let baseline_gate = output
-        .metrics
-        .get("baseline_transition_recall_at_10")
-        .is_none_or(|baseline| recall >= *baseline);
-    let should_activate = baseline_gate
-        && if real_play_seqs >= 50.0 {
-            coverage >= 0.85 && recall >= 0.15
-        } else if real_play_seqs >= 1.0 {
-            coverage >= 0.7
-        } else {
-            coverage >= 0.5
-        };
+    let should_activate = should_activate_model(&output.metrics);
+    tracing::info!(
+        target: "noor.discovery.training",
+        run_id = run.id,
+        model_id = model.id,
+        should_activate,
+        "activation decision"
+    );
     if fail_training_on_err!(bail_if_cancelled("evaluate")) {
         return Ok(());
     }
@@ -2010,14 +2027,15 @@ pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearning
             .map(|row| (row.track_id, unpack_vector_blob(&row.vector_blob)))
             .collect::<HashMap<_, _>>();
         Ok(Some(ActiveLearningModel {
-            model_id: model.id,
-            model_key: model.model_key,
             family: model.family,
             dimension: model.dimension.max(0) as usize,
             vectors,
         }))
     })
 }
+
+/// At creativity 1.0 the nearest neighbor's score is discounted by this much.
+const CREATIVITY_REACH: f64 = 0.6;
 
 pub fn radio_from_neighbors(
     db: &Database,
@@ -2026,25 +2044,29 @@ pub fn radio_from_neighbors(
     limit: i64,
     creativity: f64,
 ) -> Result<Option<Vec<DiscoveryRadioResult>>> {
-    let Some(active) = load_active_learning_model(db)? else {
-        return Ok(None);
-    };
     db.with_conn(|conn| {
-        let neighbors = queries::get_track_neighbors(
-            conn,
-            active.model_id,
-            seed_track_id,
-            limit * 3,
-            exclude_ids,
-        )?;
+        // Only the model id and key are needed here; loading every embedding
+        // (tens of MB) per radio request was pure overhead.
+        let Some(active) = queries::get_selected_discovery_embedding_model(conn)? else {
+            return Ok(None);
+        };
+        let neighbors =
+            queries::get_track_neighbors(conn, active.id, seed_track_id, limit * 3, exclude_ids)?;
         if neighbors.is_empty() {
             return Ok(Some(Vec::new()));
         }
 
+        // Creativity reaches down the neighbor list: it discounts the nearest
+        // ranks most and the furthest not at all, so it changes the order. The
+        // old uniform discount scaled every score alike and changed nothing.
+        let last_rank = neighbors.len().saturating_sub(1).max(1) as f64;
+        let reach = creativity.clamp(0.0, 1.0) * CREATIVITY_REACH;
         let mut rows = neighbors
             .into_iter()
-            .map(|neighbor| {
-                let adjusted = neighbor.score * (1.0 - creativity.clamp(0.0, 1.0) * 0.35);
+            .enumerate()
+            .map(|(position, neighbor)| {
+                let nearness = 1.0 - position as f64 / last_rank;
+                let adjusted = neighbor.score * (1.0 - reach * nearness);
                 let reasons = parse_reason_tags(neighbor.reason_json.as_deref());
                 DiscoveryRadioResult {
                     track_id: neighbor.track_id,
@@ -2057,9 +2079,11 @@ pub fn radio_from_neighbors(
                     similarity_score: neighbor.score,
                     adjusted_score: adjusted,
                     co_listen_score: neighbor.behavioral_score,
-                    co_album_score: neighbor.metadata_score,
-                    co_artist_score: neighbor.audio_score,
-                    genre_proximity: neighbor.metadata_score,
+                    // Learned rows have no album, artist or genre components;
+                    // reporting the proxy and bonus scores here mislabeled them.
+                    co_album_score: 0.0,
+                    co_artist_score: 0.0,
+                    genre_proximity: 0.0,
                     reason_tags: reasons,
                     model_key: Some(active.model_key.clone()),
                     source_mode: "embedding".to_string(),
@@ -2173,33 +2197,6 @@ pub fn compute_external_embedding_scores(
             );
         }
         Ok(scores)
-    })
-}
-
-pub fn inject_query_seeds_from_neighbors(
-    db: &Database,
-    seed_track_id: i64,
-    limit: usize,
-) -> Result<Vec<String>> {
-    let Some(active) = load_active_learning_model(db)? else {
-        return Ok(Vec::new());
-    };
-    db.with_conn(|conn| {
-        let neighbors =
-            queries::get_track_neighbors(conn, active.model_id, seed_track_id, limit as i64, &[])?;
-        let mut queries = Vec::new();
-        for neighbor in neighbors {
-            if let Some(artist) = neighbor.artist_name {
-                queries.push(artist);
-            }
-            queries.push(neighbor.title);
-            if let Some(album) = neighbor.album_title {
-                queries.push(album);
-            }
-        }
-        queries.sort();
-        queries.dedup();
-        Ok(queries)
     })
 }
 
@@ -2891,6 +2888,67 @@ fn evaluate_stored_neighbors_for_heldout(
     metrics
 }
 
+/// Trainer version recorded in a model's config_json. Models from before the
+/// field existed count as version 1.
+pub(crate) fn trainer_config_version_from_json(config_json: Option<&str>) -> i64 {
+    config_json
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| value.get("trainer_config_version").and_then(|v| v.as_i64()))
+        .unwrap_or(1)
+}
+
+/// Decide whether a freshly trained model replaces the active one.
+///
+/// With an active model to compare against (baseline metrics on the same
+/// held-out transitions), the new model must match its recall, within
+/// UPGRADE_RECALL_TOLERANCE when the active model predates
+/// TRAINER_CONFIG_VERSION, and must not lose coverage. The absolute tiers apply
+/// only to a first activation, where there is nothing to compare against; a
+/// fixed floor mostly measured the trainer's own bugs (model 17 beat the active
+/// model 0.131 to 0.116 and was still held back).
+fn should_activate_model(metrics: &HashMap<String, f64>) -> bool {
+    let get = |key: &str| metrics.get(key).copied();
+    let coverage = get("coverage_ratio").unwrap_or(0.0);
+    let recall = get("transition_recall_at_10")
+        .or_else(|| get("recall_at_10"))
+        .unwrap_or(0.0);
+
+    if let Some(baseline_recall) = get("baseline_transition_recall_at_10") {
+        let upgrading =
+            get("baseline_trainer_config_version").unwrap_or(1.0) < TRAINER_CONFIG_VERSION as f64;
+        let tolerance = if upgrading {
+            UPGRADE_RECALL_TOLERANCE
+        } else {
+            0.0
+        };
+        let recall_ok = recall >= baseline_recall * (1.0 - tolerance);
+        let coverage_ok = get("baseline_coverage_ratio")
+            .is_none_or(|baseline| coverage >= baseline - COVERAGE_REGRESSION_TOLERANCE);
+        return recall_ok && coverage_ok;
+    }
+
+    // First activation. Recall@10 only means something once the held-out set
+    // is big enough, so the tiers scale with real plays. Real-play counts come
+    // from playback_transitions / listen_history only; library-derived
+    // sequences reflect what was synced, not what was heard.
+    let real_plays: f64 = [
+        "sequence_count.playback_transitions",
+        "sequence_count.listen_history",
+        "evidence_count.playback_transitions",
+        "evidence_count.listen_history",
+    ]
+    .iter()
+    .filter_map(|key| get(key))
+    .sum();
+    if real_plays >= 50.0 {
+        coverage >= 0.85 && recall >= 0.15
+    } else if real_plays >= 1.0 {
+        coverage >= 0.7
+    } else {
+        coverage >= 0.5
+    }
+}
+
 fn append_active_baseline_metrics(
     db: &Database,
     metrics: &mut HashMap<String, f64>,
@@ -2910,10 +2968,20 @@ fn append_active_baseline_metrics(
             return Ok(None);
         };
         let grouped = queries::get_track_neighbors_for_seeds(conn, active.id, &seed_ids, 20)?;
-        Ok(Some((
-            active.id,
-            evaluate_stored_neighbors_for_heldout(&grouped, heldout_examples),
-        )))
+        let mut metrics = evaluate_stored_neighbors_for_heldout(&grouped, heldout_examples);
+        if let Some(coverage) = active
+            .metrics_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|value| value.get("coverage_ratio").and_then(|v| v.as_f64()))
+        {
+            metrics.insert("baseline_coverage_ratio".to_string(), coverage);
+        }
+        metrics.insert(
+            "baseline_trainer_config_version".to_string(),
+            trainer_config_version_from_json(active.config_json.as_deref()) as f64,
+        );
+        Ok(Some((active.id, metrics)))
     })?;
     let Some((model_id, baseline_metrics)) = baseline else {
         return Ok(());
@@ -2934,7 +3002,7 @@ fn parse_reason_tags(reason_json: Option<&str>) -> Vec<String> {
 fn reason_label(key: &str) -> &'static str {
     match key {
         "behavioral" => "same pocket",
-        "audio_texture" => "audio texture",
+        "metadata_similarity" | "audio_texture" => "similar metadata",
         "album_context" => "album-adjacent",
         "artist_affinity" => "session neighbor",
         "genre_branch" => "genre branch",
@@ -3141,6 +3209,140 @@ mod tests {
     }
 
     #[test]
+    fn radio_from_neighbors_reports_learned_scores_without_mislabeling() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Next', 1)",
+                [],
+            )?;
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:radio-test",
+                MODEL_FAMILY,
+                8,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            conn.execute(
+                "INSERT INTO track_neighbors
+                    (track_id, neighbor_track_id, model_id, rank, score, behavioral_score,
+                     audio_score, metadata_score)
+                 VALUES (1, 2, ?1, 1, 0.9, 0.6, 0.7, 0.2)",
+                rusqlite::params![model.id],
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+
+        let rows = radio_from_neighbors(&db, 1, &[], 5, 0.0)
+            .expect("radio")
+            .expect("active model");
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.track_id, 2);
+        assert_eq!(
+            row.model_key.as_deref(),
+            Some("discovery-fusion-v2:radio-test")
+        );
+        assert!((row.co_listen_score - 0.6).abs() < 1e-9);
+        // Learned rows carry no album, artist or genre components.
+        assert_eq!(row.co_album_score, 0.0);
+        assert_eq!(row.co_artist_score, 0.0);
+        assert_eq!(row.genre_proximity, 0.0);
+    }
+
+    #[test]
+    fn radio_creativity_prefers_further_neighbors() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+            for id in 1..=6 {
+                conn.execute(
+                    "INSERT INTO tracks (id, title, artist_id) VALUES (?1, 'T', 1)",
+                    rusqlite::params![id],
+                )?;
+            }
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:creativity",
+                MODEL_FAMILY,
+                8,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            for (rank, (neighbor, score)) in [(2, 1.00), (3, 0.97), (4, 0.94), (5, 0.91), (6, 0.88)]
+                .into_iter()
+                .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score)
+                     VALUES (1, ?1, ?2, ?3, ?4)",
+                    rusqlite::params![neighbor, model.id, rank as i64 + 1, score],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seed");
+
+        let order = |creativity: f64| {
+            radio_from_neighbors(&db, 1, &[], 5, creativity)
+                .expect("radio")
+                .expect("model")
+                .into_iter()
+                .map(|row| row.track_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(0.0),
+            vec![2, 3, 4, 5, 6],
+            "no creativity keeps nearest first"
+        );
+        assert_ne!(
+            order(0.5)[0],
+            2,
+            "high creativity reaches past the nearest neighbor"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_trainer_threads_really_run_at_low_priority() {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_NORMAL,
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .start_handler(|_| lower_current_thread_priority())
+            .build()
+            .expect("pool");
+        // SAFETY: reads the scheduling priority of the calling pool thread.
+        let priority = pool.install(|| unsafe { GetThreadPriority(GetCurrentThread()) });
+        assert!(
+            priority < THREAD_PRIORITY_NORMAL,
+            "background trainer thread priority was {priority}"
+        );
+    }
+
+    #[test]
+    fn background_training_stays_on_a_small_thread_budget() {
+        assert_eq!(background_training_worker_threads_for_available(1), 1);
+        assert_eq!(background_training_worker_threads_for_available(4), 1);
+        assert_eq!(background_training_worker_threads_for_available(8), 2);
+        assert_eq!(background_training_worker_threads_for_available(32), 2);
+        assert_eq!(
+            background_training_safety_timeout(DiscoveryIntensity::Medium),
+            discovery_training_safety_timeout(DiscoveryIntensity::Medium) * 4
+        );
+    }
+
+    #[test]
     fn training_safety_profile_defaults_to_balanced_and_round_trips() {
         let db = Database::open_in_memory().expect("in-memory db");
         db.run_migrations().expect("migrations");
@@ -3169,6 +3371,7 @@ mod tests {
         let err = start_training(
             db.clone(),
             event_tx,
+            false,
             false,
             false,
             Arc::new(AtomicBool::new(false)),
@@ -3207,6 +3410,7 @@ mod tests {
         let err = start_training(
             db.clone(),
             event_tx,
+            false,
             false,
             false,
             Arc::new(AtomicBool::new(false)),
@@ -3592,5 +3796,107 @@ mod tests {
 
         assert!(manual > passive);
         assert!(passive < 1.0);
+    }
+
+    fn gate_metrics(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), *value))
+            .collect()
+    }
+
+    #[test]
+    fn activation_accepts_an_improvement_below_the_old_absolute_floor() {
+        // Model 17 on a real library: better than the active model on the same
+        // held-out set, but under the old fixed 0.15 floor.
+        let metrics = gate_metrics(&[
+            ("coverage_ratio", 1.0),
+            ("transition_recall_at_10", 0.131),
+            ("baseline_transition_recall_at_10", 0.116),
+            ("baseline_coverage_ratio", 1.0),
+            (
+                "baseline_trainer_config_version",
+                TRAINER_CONFIG_VERSION as f64,
+            ),
+            ("evidence_count.listen_history", 5000.0),
+        ]);
+        assert!(should_activate_model(&metrics));
+    }
+
+    #[test]
+    fn activation_rejects_a_recall_regression_at_the_same_trainer_version() {
+        let metrics = gate_metrics(&[
+            ("coverage_ratio", 1.0),
+            ("transition_recall_at_10", 0.110),
+            ("baseline_transition_recall_at_10", 0.116),
+            ("baseline_coverage_ratio", 1.0),
+            (
+                "baseline_trainer_config_version",
+                TRAINER_CONFIG_VERSION as f64,
+            ),
+        ]);
+        assert!(!should_activate_model(&metrics));
+    }
+
+    #[test]
+    fn activation_allows_a_small_dip_when_replacing_an_older_trainer_version() {
+        let older = (TRAINER_CONFIG_VERSION - 1) as f64;
+        let small_dip = gate_metrics(&[
+            ("coverage_ratio", 1.0),
+            ("transition_recall_at_10", 0.110),
+            ("baseline_transition_recall_at_10", 0.116),
+            ("baseline_trainer_config_version", older),
+        ]);
+        assert!(should_activate_model(&small_dip));
+        let large_dip = gate_metrics(&[
+            ("coverage_ratio", 1.0),
+            ("transition_recall_at_10", 0.090),
+            ("baseline_transition_recall_at_10", 0.116),
+            ("baseline_trainer_config_version", older),
+        ]);
+        assert!(!should_activate_model(&large_dip));
+    }
+
+    #[test]
+    fn activation_rejects_a_coverage_loss() {
+        let metrics = gate_metrics(&[
+            ("coverage_ratio", 0.90),
+            ("transition_recall_at_10", 0.20),
+            ("baseline_transition_recall_at_10", 0.10),
+            ("baseline_coverage_ratio", 0.97),
+            (
+                "baseline_trainer_config_version",
+                TRAINER_CONFIG_VERSION as f64,
+            ),
+        ]);
+        assert!(!should_activate_model(&metrics));
+    }
+
+    #[test]
+    fn first_activation_keeps_the_absolute_tiers() {
+        let established = |recall: f64| {
+            gate_metrics(&[
+                ("coverage_ratio", 0.9),
+                ("transition_recall_at_10", recall),
+                ("evidence_count.listen_history", 100.0),
+            ])
+        };
+        assert!(!should_activate_model(&established(0.12)));
+        assert!(should_activate_model(&established(0.16)));
+        let cold_start = gate_metrics(&[("coverage_ratio", 0.6)]);
+        assert!(should_activate_model(&cold_start));
+    }
+
+    #[test]
+    fn trainer_config_version_defaults_to_one_for_old_models() {
+        assert_eq!(trainer_config_version_from_json(None), 1);
+        assert_eq!(
+            trainer_config_version_from_json(Some(r#"{"trainer":"rust"}"#)),
+            1
+        );
+        assert_eq!(
+            trainer_config_version_from_json(Some(r#"{"trainer_config_version":3}"#)),
+            3
+        );
     }
 }

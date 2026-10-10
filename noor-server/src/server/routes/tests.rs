@@ -11,51 +11,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn test_track(id: i64, title: &str) -> crate::db::models::Track {
-    crate::db::models::Track {
-        id,
-        title: title.to_string(),
-        artist_id: 1,
-        artist_name: Some("Artist".to_string()),
-        album_id: None,
-        album_title: None,
-        disc_number: None,
-        track_number: None,
-        duration_ms: Some(180_000),
-        isrc: None,
-        tidal_id: Some(id),
-        artist_tidal_id: None,
-        album_tidal_id: None,
-        ytmusic_id: None,
-        soundcloud_id: None,
-        best_quality: Some("LOSSLESS".to_string()),
-        best_source: Some("tidal".to_string()),
-        fidelity_score: 0,
-        is_favorite: false,
-        play_count: 0,
-        last_played_at: None,
-        date_added: None,
-        source: "tidal".to_string(),
-        artwork_url: None,
-    }
-}
-
-fn test_queue_item(
-    id: i64,
-    track: crate::db::models::Track,
-    position: i32,
-    source: &str,
-) -> crate::db::models::QueueItem {
-    crate::db::models::QueueItem {
-        id,
-        track,
-        position,
-        source: source.to_string(),
-        reason: None,
-        is_pending: source == "automix-new",
-    }
-}
-
 fn lastfm_test_track(artist: &str, title: &str) -> LastFmChartTrack {
     LastFmChartTrack {
         artist: artist.to_string(),
@@ -3882,6 +3837,168 @@ async fn discovery_feedback_rejects_actions_outside_allowlist() {
 }
 
 #[tokio::test]
+async fn discovery_feedback_summary_counts_recent_likes_and_skips() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", [])?;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Pick', 1)",
+            [],
+        )?;
+        conn.execute_batch(
+            "INSERT INTO discovery_feedback (seed_track_id, candidate_track_id, action, surface, created_at) VALUES
+                (1, 2, 'like', 'discover_space', datetime('now', '-1 days')),
+                (1, 2, 'like', 'discover_space', datetime('now', '-2 days')),
+                (1, 2, 'skip', 'discover_space', datetime('now', '-3 days')),
+                (1, 2, 'dismiss', 'discover_space', datetime('now', '-4 days')),
+                (1, 2, 'like', 'discover_space', datetime('now', '-60 days'));",
+        )?;
+        Ok(())
+    })
+    .expect("seed feedback");
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/discovery/feedback/summary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["likes"], 2);
+    assert_eq!(json["skips"], 2);
+}
+
+#[tokio::test]
+async fn not_for_me_round_trips_and_rejects_unknown_kinds() {
+    let db = fresh_migrated_db();
+    let send = |method: &'static str, body: &'static str| {
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+            db.clone(),
+        ))));
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/api/recommendations/not-for-me")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    let count = || {
+        db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM recommendation_feedback WHERE kind = 'artist' AND entity_id = 7",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .unwrap()
+    };
+
+    assert_eq!(
+        send("POST", r#"{"kind":"artist","id":7}"#).await,
+        StatusCode::OK
+    );
+    assert_eq!(count(), 1);
+    assert_eq!(
+        send("DELETE", r#"{"kind":"artist","id":7}"#).await,
+        StatusCode::OK
+    );
+    assert_eq!(count(), 0);
+    assert_eq!(
+        send("POST", r#"{"kind":"album","id":7}"#).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn not_for_me_removes_a_track_from_discovery_space() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist'), (2, 'Blocked Artist');
+             INSERT INTO tracks (id, title, artist_id, duration_ms, source, is_library)
+             VALUES (1, 'Seed', 1, 200000, 'tidal', 1), (2, 'Candidate', 2, 200000, 'tidal', 1);",
+        )?;
+        let model = queries::create_embedding_model(
+            conn,
+            "discovery-fusion-v2:not-for-me",
+            queries::DISCOVERY_ENGINE_V2_FAMILY,
+            2,
+            "ready",
+            None,
+        )?;
+        queries::activate_embedding_model(conn, model.id)?;
+        conn.execute(
+            "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score,
+                                          behavioral_score, confidence, primary_reason)
+             VALUES (1, 2, ?1, 1, 0.9, 0.9, 1.0, 'behavioral')",
+            [model.id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let space_has_candidate = || {
+        let app = api_routes(state.clone());
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/discovery/space")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"seed_track_id":1,"mode":"radio","limit":20}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: Value = serde_json::from_slice(&body).unwrap();
+            json["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|track| track["track_id"] == 2)
+        }
+    };
+
+    assert!(space_has_candidate().await);
+    let marked = api_routes(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/recommendations/not-for-me")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"track","id":2}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(marked.status(), StatusCode::OK);
+    assert!(!space_has_candidate().await);
+}
+
+#[tokio::test]
 async fn discovery_rerank_suppresses_skipped_tracks_via_session_taste() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {
@@ -6434,100 +6551,6 @@ async fn promote_pending_row_emit_marks_external_candidate_resolved() {
         })
         .unwrap();
     assert_eq!(resolved, Some(1));
-}
-
-#[test]
-fn automix_discover_new_fallback_waits_when_sidecar_new_rows_fill_slots() {
-    let current = test_track(1, "Current");
-    let mut snapshot = crate::playback::player::PlaybackSnapshot {
-        state: crate::db::models::PlaybackState {
-            current_track: Some(current.clone()),
-            current_queue_item_id: Some(10),
-            position_ms: 0,
-            is_playing: true,
-            volume: 1.0,
-            shuffle_mode: "off".to_string(),
-            repeat_mode: "off".to_string(),
-            automix_enabled: true,
-            crossfade_ms: 0,
-            automix_discover_new: true,
-            automix_use_learning: true,
-            automix_allow_external: true,
-            buffered_ms: 0,
-            buffered_start_ms: 0,
-        },
-        queue: vec![
-            test_queue_item(10, current, 0, "manual"),
-            test_queue_item(11, test_track(2, "Sidecar A"), 1, "automix-new"),
-            test_queue_item(12, test_track(3, "Sidecar B"), 2, "automix-new"),
-        ],
-        queue_revision: 0,
-    };
-
-    assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
-
-    snapshot.queue.pop();
-
-    assert!(automix_discover_new_fallback_seed(&snapshot).is_some());
-}
-
-#[test]
-fn automix_discover_new_fallback_ignores_mismatched_queue_anchor() {
-    let current = test_track(1, "Current");
-    let snapshot = crate::playback::player::PlaybackSnapshot {
-        state: crate::db::models::PlaybackState {
-            current_track: Some(current.clone()),
-            current_queue_item_id: Some(13),
-            position_ms: 0,
-            is_playing: true,
-            volume: 1.0,
-            shuffle_mode: "off".to_string(),
-            repeat_mode: "off".to_string(),
-            automix_enabled: true,
-            crossfade_ms: 0,
-            automix_discover_new: true,
-            automix_use_learning: true,
-            automix_allow_external: true,
-            buffered_ms: 0,
-            buffered_start_ms: 0,
-        },
-        queue: vec![
-            test_queue_item(10, current, 0, "manual"),
-            test_queue_item(11, test_track(2, "Sidecar A"), 1, "automix-new"),
-            test_queue_item(12, test_track(3, "Sidecar B"), 2, "automix-new"),
-            test_queue_item(13, test_track(4, "Stale Anchor"), 3, "manual"),
-        ],
-        queue_revision: 0,
-    };
-
-    assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
-}
-
-#[test]
-fn automix_discover_new_fallback_stays_off_when_disabled() {
-    let current = test_track(1, "Current");
-    let snapshot = crate::playback::player::PlaybackSnapshot {
-        state: crate::db::models::PlaybackState {
-            current_track: Some(current.clone()),
-            current_queue_item_id: Some(10),
-            position_ms: 0,
-            is_playing: true,
-            volume: 1.0,
-            shuffle_mode: "off".to_string(),
-            repeat_mode: "off".to_string(),
-            automix_enabled: true,
-            crossfade_ms: 0,
-            automix_discover_new: false,
-            automix_use_learning: true,
-            automix_allow_external: true,
-            buffered_ms: 0,
-            buffered_start_ms: 0,
-        },
-        queue: vec![test_queue_item(10, current, 0, "manual")],
-        queue_revision: 0,
-    };
-
-    assert!(automix_discover_new_fallback_seed(&snapshot).is_none());
 }
 
 #[tokio::test]

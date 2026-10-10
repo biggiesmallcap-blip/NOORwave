@@ -530,6 +530,10 @@ async fn main() -> Result<()> {
     mirror_managed_host_mode(&db, &resolved_bind)?;
     let genre_count = db.with_conn(genre::taxonomy::ensure_taxonomy_loaded)?;
     db.seed_genres_from_taxonomy()?;
+    // Radio quality flags shipped off; turn them on once per install.
+    if let Err(error) = db.with_conn(services::radio_config::apply_quality_defaults_once) {
+        tracing::warn!(%error, "Radio quality defaults not applied");
+    }
     // The audio runtime is ephemeral, but the queue is durable session state.
     // Boot paused at the beginning of the current row; the resume route rebuilds
     // the runtime on demand. Queue rows and the playhead therefore survive quit /
@@ -988,6 +992,8 @@ async fn main() -> Result<()> {
     //
     // Both short-circuit on the `radio_similarity_running` atomic, so a rebuild
     // in flight is never doubled up. See services::radio_similarity.
+    // The upgrade retrain (services::discovery_retrain) rides the same hourly
+    // sweep and stands aside while a rebuild runs.
     {
         let listener_state = state.clone();
         let mut event_rx = listener_state.read().await.event_tx.subscribe();
@@ -1021,6 +1027,7 @@ async fn main() -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(150)).await;
             services::radio_similarity::run_if_stale(loop_state.clone(), RebuildTrigger::Periodic)
                 .await;
+            services::discovery_retrain::run_if_outdated(loop_state.clone()).await;
 
             // Hourly: frequent enough that a debounced change is picked up soon
             // after its 6h window clears, cheap enough to no-op the rest of the
@@ -1034,6 +1041,7 @@ async fn main() -> Result<()> {
                     RebuildTrigger::Periodic,
                 )
                 .await;
+                services::discovery_retrain::run_if_outdated(loop_state.clone()).await;
             }
         });
     }

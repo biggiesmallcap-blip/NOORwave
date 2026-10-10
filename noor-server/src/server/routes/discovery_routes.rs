@@ -470,6 +470,18 @@ pub(super) async fn get_discovery_status(
     Ok(Json(json!({ "status": status })))
 }
 
+/// Whether the one-time upgrade retrain is due or running, so the app can
+/// tell the listener what is happening (once per trainer version).
+pub(super) async fn get_discovery_upgrade(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let db = state.read().await.db.clone();
+    let status = db
+        .with_conn(crate::services::discovery_retrain::upgrade_status)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!(status)))
+}
+
 pub(super) async fn get_discovery_training_status(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
@@ -525,14 +537,24 @@ pub(super) async fn get_discovery_training_status(
     Ok(Json(json!({ "run": run, "stages": stages })))
 }
 
-pub(super) async fn start_discovery_training(
-    State(state): State<SharedState>,
-    Json(payload): Json<DiscoveryTrainRequest>,
-) -> Result<Json<Value>, StatusCode> {
+/// Outcome of asking for a training run. Shared by the Settings route and the
+/// upgrade retrain sweep (services::discovery_retrain).
+pub enum TrainingSpawn {
+    AlreadyRunning,
+    LegacyEngine(discovery_learning::DiscoveryEngine),
+    Started,
+}
+
+/// Start a discovery training run in the background unless one is running or
+/// the selected engine cannot train. Returns immediately.
+pub async fn spawn_discovery_training(
+    state: SharedState,
+    full_mode: bool,
+    rebuild_audio: bool,
+    background: bool,
+) -> TrainingSpawn {
     use std::sync::atomic::Ordering;
 
-    let (mode, full_mode) = parse_discovery_training_mode(payload.mode.as_deref())?;
-    let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
     let (db, cancel) = {
         let guard = state.read().await;
         (guard.db.clone(), guard.discovery_train_cancel.clone())
@@ -545,22 +567,13 @@ pub(super) async fn start_discovery_training(
         .flatten()
         .map(|run| run.status == "running")
         .unwrap_or(false);
-
     if already_running {
-        return Ok(Json(json!({
-            "status": "already_running",
-            "mode": mode
-        })));
+        return TrainingSpawn::AlreadyRunning;
     }
 
     let engine = discovery_learning::load_discovery_engine(&db);
     if !engine.supports_training() {
-        return Ok(Json(json!({
-            "status": "legacy_trainer_unavailable",
-            "mode": mode,
-            "engine": engine.as_str(),
-            "message": "V1 legacy can read existing models. Switch to V2 to train a new model."
-        })));
+        return TrainingSpawn::LegacyEngine(engine);
     }
 
     // Reset cancel flag synchronously before spawning so that a Stop request
@@ -596,6 +609,7 @@ pub(super) async fn start_discovery_training(
             event_tx,
             full_mode,
             rebuild_audio,
+            background,
             cancel,
             external_refresh_clients,
         )
@@ -608,10 +622,33 @@ pub(super) async fn start_discovery_training(
             );
         }
     });
-    Ok(Json(json!({
-        "status": "training_started",
-        "mode": if full_mode { "full" } else { "incremental" }
-    })))
+    TrainingSpawn::Started
+}
+
+pub(super) async fn start_discovery_training(
+    State(state): State<SharedState>,
+    Json(payload): Json<DiscoveryTrainRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let (mode, full_mode) = parse_discovery_training_mode(payload.mode.as_deref())?;
+    let rebuild_audio = payload.rebuild_audio.unwrap_or(false);
+    Ok(Json(
+        match spawn_discovery_training(state, full_mode, rebuild_audio, false).await {
+            TrainingSpawn::AlreadyRunning => json!({
+                "status": "already_running",
+                "mode": mode
+            }),
+            TrainingSpawn::LegacyEngine(engine) => json!({
+                "status": "legacy_trainer_unavailable",
+                "mode": mode,
+                "engine": engine.as_str(),
+                "message": "V1 legacy can read existing models. Switch to V2 to train a new model."
+            }),
+            TrainingSpawn::Started => json!({
+                "status": "training_started",
+                "mode": if full_mode { "full" } else { "incremental" }
+            }),
+        },
+    ))
 }
 
 pub(super) async fn stop_discovery_training(
@@ -846,6 +883,83 @@ pub(super) async fn get_discovery_safety(
             "window_size": params.window_size,
             "include_audio_proxy": params.include_audio_proxy,
         },
+    })))
+}
+
+/// Likes and skips (dismiss counts as a skip) of discovery picks over the
+/// last 30 days, across sessions. The Discovery Space uses it to pick a
+/// starting coherence: heavy likers start more adventurous, heavy skippers
+/// more familiar.
+pub(super) async fn discovery_feedback_summary(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    let db = state.read().await.db.clone();
+    let (likes, skips): (i64, i64) = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COALESCE(SUM(action = 'like'), 0),
+                        COALESCE(SUM(action IN ('skip', 'dismiss')), 0)
+                 FROM discovery_feedback
+                 WHERE julianday(created_at) >= julianday('now', '-30 days')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "likes": likes, "skips": skips, "days": 30 })))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct NotForMeRequest {
+    kind: String,
+    id: i64,
+}
+
+/// Mark a track or artist "Not for me": every recommendation source (automix,
+/// radio, external picks) skips it from then on.
+pub(super) async fn set_not_for_me(
+    State(state): State<SharedState>,
+    Json(payload): Json<NotForMeRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    write_not_for_me(&state, &payload, true).await
+}
+
+/// Undo a "Not for me".
+pub(super) async fn clear_not_for_me(
+    State(state): State<SharedState>,
+    Json(payload): Json<NotForMeRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    write_not_for_me(&state, &payload, false).await
+}
+
+async fn write_not_for_me(
+    state: &SharedState,
+    payload: &NotForMeRequest,
+    not_for_me: bool,
+) -> Result<Json<Value>, StatusCode> {
+    if !matches!(payload.kind.as_str(), "track" | "artist") || payload.id <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let db = state.read().await.db.clone();
+    db.with_conn(|conn| {
+        if not_for_me {
+            conn.execute(
+                "INSERT OR IGNORE INTO recommendation_feedback (kind, entity_id) VALUES (?1, ?2)",
+                rusqlite::params![payload.kind, payload.id],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM recommendation_feedback WHERE kind = ?1 AND entity_id = ?2",
+                rusqlite::params![payload.kind, payload.id],
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({
+        "kind": payload.kind,
+        "id": payload.id,
+        "not_for_me": not_for_me,
     })))
 }
 

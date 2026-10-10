@@ -110,6 +110,93 @@ pub fn current_pending(conn: &Connection) -> Result<Option<(i64, String, String,
         .optional()?)
 }
 
+/// Whether a recommended row (radio, automix, discovery) may keep the track it
+/// just resolved to: the shared candidate gate runs again now that the real
+/// track is known (hidden, Not for me, recently played, already queued under
+/// another name). Rows the listener queued themselves always pass.
+pub fn resolved_track_admitted(
+    conn: &Connection,
+    queue_item_id: i64,
+    local_track_id: i64,
+) -> Result<bool> {
+    let source: Option<String> = conn
+        .query_row(
+            "SELECT source FROM queue WHERE id = ?1",
+            params![queue_item_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let recommended = source.as_deref().is_some_and(|source| {
+        source.starts_with("radio")
+            || source.starts_with("automix")
+            || source.starts_with("discover")
+    });
+    if !recommended {
+        return Ok(true);
+    }
+    let Some(track) = crate::playback::queue::get_track_by_id(conn, local_track_id)? else {
+        return Ok(true);
+    };
+    let items = crate::playback::queue::load_queue(conn)?;
+    let gate =
+        crate::playback::candidate_gate::CandidateGate::load(conn, &items, Some(queue_item_id));
+    Ok(gate.allows_track(&track))
+}
+
+/// Drop a pending row the gate rejected after resolution. When playback has
+/// already reached that row, the playhead moves on to the next row instead of
+/// pointing at a deleted one.
+pub fn drop_rejected(conn: &Connection, queue_item_id: i64) -> Result<bool> {
+    let still_pending = conn
+        .query_row(
+            "SELECT 1 FROM queue WHERE id = ?1 AND track_id IS NULL",
+            params![queue_item_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if still_pending {
+        crate::playback::player::remove_queue_item_and_reconcile(conn, queue_item_id)?;
+    }
+    Ok(still_pending)
+}
+
+/// Outcome of promoting a resolved pending row through the candidate gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Promotion {
+    Promoted,
+    /// The gate rejected the resolved track and the row was dropped.
+    Rejected,
+    /// Another resolver promoted or removed the row first.
+    NotPending,
+}
+
+/// The one promotion boundary for every resolver: recommended rows pass the
+/// candidate gate again with the real track, then promote atomically. A gate
+/// error lets the row through rather than losing it.
+pub fn promote_if_admitted(
+    conn: &Connection,
+    queue_item_id: i64,
+    local_track_id: i64,
+    score_stored: i32,
+) -> Result<Promotion> {
+    if !resolved_track_admitted(conn, queue_item_id, local_track_id).unwrap_or(true) {
+        return Ok(if drop_rejected(conn, queue_item_id)? {
+            Promotion::Rejected
+        } else {
+            Promotion::NotPending
+        });
+    }
+    Ok(
+        if promote(conn, queue_item_id, local_track_id, score_stored)? {
+            Promotion::Promoted
+        } else {
+            Promotion::NotPending
+        },
+    )
+}
+
 /// Atomically promote a pending queue row to a resolved library row.
 ///
 /// Returns `Ok(true)` iff this caller won the promotion race - the row's
@@ -275,6 +362,97 @@ mod tests {
             media_ref_kind: kind.to_string(),
             media_ref_id: id.to_string(),
         }
+    }
+
+    #[test]
+    fn resolved_recommendation_already_queued_is_rejected_and_dropped() {
+        let conn = setup_conn();
+        let track_id = seed_track(&conn, Some(4242));
+        conn.execute(
+            "INSERT INTO queue (id, track_id, position, source) VALUES (1, ?1, 0, 'radio')",
+            params![track_id],
+        )
+        .expect("queued library row");
+        conn.execute(
+            "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title, pending_at)
+             VALUES (2, NULL, 1, 'radio', 'Artist', 'Track', datetime('now')),
+                    (3, NULL, 2, 'user', 'Artist', 'Track', datetime('now'))",
+            [],
+        )
+        .expect("pending rows");
+
+        // A radio row resolving to a track already queued is a duplicate.
+        assert!(!resolved_track_admitted(&conn, 2, track_id).expect("gate"));
+        assert!(drop_rejected(&conn, 2).expect("drop"));
+        // A row the listener queued is never second-guessed.
+        assert!(resolved_track_admitted(&conn, 3, track_id).expect("gate"));
+    }
+
+    #[test]
+    fn every_resolver_promotion_runs_the_candidate_gate() {
+        let conn = setup_conn();
+        let blocked = seed_track(&conn, Some(5201));
+        conn.execute(
+            "INSERT INTO recommendation_feedback (kind, entity_id) VALUES ('track', ?1)",
+            params![blocked],
+        )
+        .expect("not for me");
+        conn.execute(
+            "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title, pending_at)
+             VALUES (1, NULL, 0, 'automix', 'Artist', 'Track', datetime('now')),
+                    (2, NULL, 1, 'user', 'Artist', 'Track', datetime('now'))",
+            [],
+        )
+        .expect("pending rows");
+
+        assert_eq!(
+            promote_if_admitted(&conn, 1, blocked, 900).expect("automix row"),
+            Promotion::Rejected
+        );
+        assert_eq!(
+            promote_if_admitted(&conn, 1, blocked, 900).expect("already gone"),
+            Promotion::NotPending
+        );
+        assert_eq!(
+            promote_if_admitted(&conn, 2, blocked, 900).expect("listener row"),
+            Promotion::Promoted
+        );
+    }
+
+    #[test]
+    fn dropping_the_current_pending_row_moves_playback_to_the_next_row() {
+        let conn = setup_conn();
+        let first = seed_track(&conn, Some(5101));
+        let following = seed_track(&conn, Some(5102));
+        conn.execute(
+            "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title, pending_at)
+             VALUES (1, ?1, 0, 'radio', NULL, NULL, NULL),
+                    (2, NULL, 1, 'radio', 'Artist', 'Track', datetime('now')),
+                    (3, ?2, 2, 'radio', NULL, NULL, NULL)",
+            params![first, following],
+        )
+        .expect("queue rows");
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = NULL, current_queue_item_id = 2, is_playing = 1
+             WHERE id = 1",
+            [],
+        )
+        .expect("playhead on the pending row");
+
+        assert!(drop_rejected(&conn, 2).expect("drop"));
+        let (track_id, queue_item_id, playing): (Option<i64>, Option<i64>, i64) = conn
+            .query_row(
+                "SELECT current_track_id, current_queue_item_id, is_playing
+                 FROM playback_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("playback state");
+        assert_eq!(
+            (track_id, queue_item_id, playing),
+            (Some(following), Some(3), 1)
+        );
     }
 
     #[test]

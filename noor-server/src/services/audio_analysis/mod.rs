@@ -224,15 +224,33 @@ fn prepare_passive_analysis_samples(samples: Vec<f32>, sample_rate: u32) -> (Vec
 
 // Camelot compatibility helpers (reused by automix scoring + radio).
 
-/// Check if two Camelot keys are compatible (same number, or differ by 1 mod 12).
+/// Compatible Camelot keys: the same number (same key or its relative
+/// major/minor), or one step around the wheel with the same letter.
 pub fn camelot_compatible(a: &str, b: &str) -> bool {
-    camelot_number(a) == camelot_number(b) || camelot_number_diff(a, b) == 1
+    camelot_number(a) == camelot_number(b)
+        || (camelot_number_diff(a, b) == 1 && camelot_letter(a) == camelot_letter(b))
 }
 
-/// Check if two Camelot keys are adjacent (differ by 1 mod 12, or same number A<->B).
+/// Adjacent but not compatible: one step with the other letter (the diagonal
+/// energy move, 8A to 9B) or two steps with the same letter.
 pub fn camelot_adjacent(a: &str, b: &str) -> bool {
-    camelot_number_diff(a, b) == 1
-        || (camelot_number(a) == camelot_number(b) && camelot_letter(a) != camelot_letter(b))
+    let diff = camelot_number_diff(a, b);
+    let same_letter = camelot_letter(a) == camelot_letter(b);
+    (diff == 1 && !same_letter) || (diff == 2 && same_letter)
+}
+
+/// Relative tempo difference after folding half and double time, so 85 and
+/// 170 BPM count as the same pulse (DSP tempo estimates often land an octave
+/// off). None when either side is missing or not a positive number.
+pub fn tempo_delta(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    let (a, b) = (a?, b?);
+    if !a.is_finite() || !b.is_finite() || a <= 0.0 || b <= 0.0 {
+        return None;
+    }
+    [0.5, 1.0, 2.0]
+        .into_iter()
+        .map(|family| ((b * family) / a - 1.0).abs())
+        .reduce(f64::min)
 }
 
 fn camelot_number(k: &str) -> u32 {
@@ -280,8 +298,8 @@ pub fn camelot_relation(a: &str, b: &str) -> CamelotRelation {
 /// Returns 1.0 when either side is unanalyzed so we never penalise tracks we
 /// simply don't know anything about.
 ///
-/// Camelot: compatible → *2.2, adjacent → *1.4, clash → *0.6
-/// BPM: diff <5 → *1.8, <10 → *1.3, <20 → *0.9, else *0.65
+/// Camelot: compatible x2.2, adjacent x1.4, clash x0.6
+/// Tempo (octave-folded `tempo_delta`): <4% x1.8, <8% x1.3, <16% x0.9, else x0.65
 pub fn compute_harmonic_multiplier(
     seed_camelot: Option<&str>,
     cand_camelot: Option<&str>,
@@ -298,17 +316,16 @@ pub fn compute_harmonic_multiplier(
         };
     }
 
-    if let (Some(a), Some(b)) = (seed_bpm, cand_bpm) {
-        let diff = (a - b).abs();
-        if diff < 5.0 {
-            mult *= 1.8;
-        } else if diff < 10.0 {
-            mult *= 1.3;
-        } else if diff < 20.0 {
-            mult *= 0.9;
+    if let Some(delta) = tempo_delta(seed_bpm, cand_bpm) {
+        mult *= if delta < 0.04 {
+            1.8
+        } else if delta < 0.08 {
+            1.3
+        } else if delta < 0.16 {
+            0.9
         } else {
-            mult *= 0.65;
-        }
+            0.65
+        };
     }
 
     mult
@@ -407,9 +424,35 @@ mod tests {
     }
 
     #[test]
-    fn camelot_adjacent_includes_relative_and_neighbor_keys() {
-        assert!(camelot_adjacent("8A", "8B"));
-        assert!(camelot_adjacent("8A", "9A"));
-        assert!(camelot_adjacent("12B", "1B"));
+    fn camelot_relation_separates_compatible_adjacent_and_clash() {
+        use CamelotRelation::*;
+        for (a, b, expected) in [
+            ("8A", "8A", Compatible),
+            ("8A", "8B", Compatible),
+            ("8A", "9A", Compatible),
+            ("12B", "1B", Compatible),
+            ("8A", "9B", Adjacent),
+            ("8A", "7B", Adjacent),
+            ("8A", "10A", Adjacent),
+            ("8A", "11A", Clash),
+            ("8A", "10B", Clash),
+        ] {
+            assert_eq!(camelot_relation(a, b), expected, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn tempo_delta_folds_half_and_double_time() {
+        assert!(tempo_delta(Some(85.0), Some(170.0)).unwrap() < 1e-9);
+        assert!((tempo_delta(Some(120.0), Some(126.0)).unwrap() - 0.05).abs() < 1e-9);
+        assert_eq!(tempo_delta(None, Some(120.0)), None);
+        assert_eq!(tempo_delta(Some(0.0), Some(120.0)), None);
+    }
+
+    #[test]
+    fn harmonic_multiplier_treats_double_time_as_the_same_tempo() {
+        let same = compute_harmonic_multiplier(None, None, Some(85.0), Some(85.0));
+        let double = compute_harmonic_multiplier(None, None, Some(85.0), Some(170.0));
+        assert!((same - double).abs() < 1e-9);
     }
 }

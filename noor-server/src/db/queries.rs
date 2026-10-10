@@ -3772,21 +3772,31 @@ pub fn get_genre_diverse_candidates(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    // One track per artist sharing a seed genre. Track and artist order come
+    // from a stable per-seed hash, not the lowest ids, so different seeds widen
+    // with different tracks instead of the same old rows every time.
     let sql = format!(
-        "SELECT {proj}
-         FROM tracks t
-         LEFT JOIN artists a ON t.artist_id = a.id
-         LEFT JOIN albums al ON t.album_id = al.id
-         WHERE t.id IN (
-             SELECT MIN(t2.id)
+        "WITH pool AS (
+             SELECT DISTINCT t2.id, t2.artist_id,
+                    (((t2.id * 2654435761) % 1000003) * ((?1 * 40503) % 1000003 + 1)) % 1000003 AS k
              FROM tracks t2
              JOIN track_genres tg ON tg.track_id = t2.id
              WHERE tg.genre_id IN (
                  SELECT genre_id FROM track_genres WHERE track_id = ?1
              )
-             GROUP BY t2.artist_id
+               AND t2.id != ?1
+         ),
+         pick AS (
+             SELECT id, k, ROW_NUMBER() OVER (PARTITION BY artist_id ORDER BY k, id) AS rn
+             FROM pool
          )
-         ORDER BY t.id
+         SELECT {proj}
+         FROM pick
+         JOIN tracks t ON t.id = pick.id
+         LEFT JOIN artists a ON t.artist_id = a.id
+         LEFT JOIN albums al ON t.album_id = al.id
+         WHERE pick.rn = 1
+         ORDER BY pick.k, t.id
          LIMIT {limit}",
         proj = track_projection("a"),
     );
@@ -4360,10 +4370,23 @@ pub struct TrackSimilarityResult {
     pub genre_proximity: f64,
 }
 
-/// Compute similarity scores for all track pairs in the library.
-/// Build pre-computed similarity pairs for the radio feature.
-/// Fixes: Stage 1 now enumerates ALL pairs per album/artist (not just MIN/MAX).
-///        Stage 2 uses indexed temp tables so scores merge correctly.
+/// Genres with more members than this are too broad to propose candidate pairs
+/// (every pop track "shares a genre" with every other); they still count toward
+/// genre_proximity for pairs found another way.
+const GENRE_CANDIDATE_MAX_MEMBERS: i64 = 1_000;
+/// Genre-only candidates kept per track, strongest shared rarity first. Replaces
+/// a global LIMIT that filled up with the lowest track ids.
+const GENRE_CANDIDATES_PER_TRACK: i64 = 50;
+/// Co-listen window and lookback for the co_listen component.
+const CO_LISTEN_WINDOW_MINUTES: f64 = 30.0;
+const CO_LISTEN_LOOKBACK_DAYS: i64 = 90;
+
+/// Build pre-computed similarity pairs for the radio feature, in four stages:
+///   1. per-(track, genre) weights (genre rarity x tag confidence);
+///   2. co-listened pairs from listen_history, recency-weighted PPMI;
+///   3. candidate pairs: same album, same artist (artists with <= 100 tracks),
+///      every co-listened pair, and each track's strongest genre partners;
+///   4. per-component scores and the weighted total.
 pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     // Do the expensive work in temporary tables so the background rebuild does
     // not hold SQLite's single writer slot while playback is trying to update
@@ -4389,38 +4412,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     ",
     )?;
 
-    // ── Stage 1: candidate pairs ─────────────────────────────────────────────
-    // Each INSERT must satisfy CHECK (track_a < track_b), ensured by `b.id > a.id`.
-
-    conn.execute_batch(
-        "
-        -- 1a: Same-album pairs (all combinations, not just min/max)
-        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
-        SELECT a.id, b.id
-        FROM tracks a
-        JOIN tracks b ON b.album_id = a.album_id AND b.id > a.id
-        WHERE a.album_id IS NOT NULL;
-
-        -- 1b: Same-artist pairs (cap at artists with <=100 tracks)
-        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
-        SELECT a.id, b.id
-        FROM tracks a
-        JOIN tracks b ON b.artist_id = a.artist_id AND b.id > a.id
-        WHERE a.artist_id IN (
-            SELECT artist_id FROM tracks GROUP BY artist_id HAVING COUNT(*) <= 100
-        );
-
-        -- 1c: Shared-genre pairs (deduplicated by GROUP BY, limited to avoid explosion)
-        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
-        SELECT a.track_id, b.track_id
-        FROM track_genres a
-        JOIN track_genres b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
-        GROUP BY a.track_id, b.track_id
-        LIMIT 300000;
-    ",
-    )?;
-
-    // ── Stage 2: aggregate signals into indexed temp tables ──────────────────
+    // -- Stage 1: per-track genre weights --
 
     // Per-(track, genre) weight = genre rarity (IDF) x tag confidence.
     //
@@ -4434,12 +4426,6 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     //      contributes little, while a well-attested genre counts fully. Clamped to
     //      1.0 so an unusually high accumulated score can't let one genre dominate
     //      by raw magnitude.
-    //
-    // This replaces an earlier family-vote damping heuristic: once confidence is
-    // calibrated (the count-saturation fix in genre/scorer.rs stops a lone vote from
-    // scoring 1.0), confidence is the honest signal and the vote-count proxy is
-    // unnecessary. Takes full effect once a MusicBrainz re-enrichment recomputes
-    // stale confidences and this table is rebuilt.
     //
     // Computed in Rust and staged in a temp table because the bundled SQLite has no ln().
     let total_tracks: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
@@ -4496,35 +4482,155 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         }
     }
 
+    // -- Stage 2: co-listened pairs --
+
+    // listen_history.started_at is RFC 3339 ("2026-10-07T03:54:43...+00:00").
+    // Compared as text with datetime() output ("2026-10-07 04:24:43") it fails
+    // on the same day, which left every co_listen_score at 0, so all time math
+    // goes through julianday(). Early skips (under 30 s, not completed) are not
+    // co-listens. Each listen counts by recency: 1.0 now, fading to 0.2 at the
+    // end of the lookback window.
+    conn.execute_batch(&format!(
+        "
+        DROP TABLE IF EXISTS _listen_jd;
+        CREATE TEMP TABLE _listen_jd AS
+        SELECT track_id, julianday(started_at) AS jd,
+               MAX(0.2, 1.0 - (julianday('now') - julianday(started_at)) / {lookback}.0) AS w
+        FROM listen_history
+        WHERE track_id IS NOT NULL
+          AND julianday(started_at) >= julianday('now', '-{lookback} days')
+          AND (completed = 1 OR COALESCE(duration_listened_ms, 0) >= 30000);
+        CREATE INDEX _listen_jd_idx ON _listen_jd(jd);
+
+        DROP TABLE IF EXISTS _co_listen;
+        CREATE TEMP TABLE _co_listen (
+            ta INTEGER NOT NULL,
+            tb INTEGER NOT NULL,
+            n REAL NOT NULL,
+            score REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (ta, tb)
+        );
+        INSERT INTO _co_listen (ta, tb, n)
+        SELECT MIN(a.track_id, b.track_id), MAX(a.track_id, b.track_id), SUM(MIN(a.w, b.w))
+        FROM _listen_jd a
+        JOIN _listen_jd b
+            ON b.track_id != a.track_id
+           AND b.jd BETWEEN a.jd AND a.jd + {window:.1} / 1440.0
+        GROUP BY 1, 2
+        HAVING COUNT(*) >= 2;
+        ",
+        lookback = CO_LISTEN_LOOKBACK_DAYS,
+        window = CO_LISTEN_WINDOW_MINUTES,
+    ))?;
+
+    // Positive PMI times log count: a pair heard together more often than the
+    // two tracks' own play counts predict scores high; two popular tracks that
+    // merely co-occur score low. The log count keeps a single lucky pairing
+    // from topping the list. Normalized so the strongest pair scores 1.0. Done
+    // in Rust; the bundled SQLite has no ln().
+    {
+        let marginals: HashMap<i64, f64> = {
+            let mut stmt =
+                conn.prepare("SELECT track_id, SUM(w) FROM _listen_jd GROUP BY track_id")?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<HashMap<_, _>, _>>()?
+        };
+        let total: f64 = marginals.values().sum();
+        let pairs: Vec<(i64, i64, f64)> = {
+            let mut stmt = conn.prepare("SELECT ta, tb, n FROM _co_listen")?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let raw = pairs
+            .into_iter()
+            .map(|(ta, tb, n)| {
+                let wa = marginals.get(&ta).copied().unwrap_or(0.0);
+                let wb = marginals.get(&tb).copied().unwrap_or(0.0);
+                let pmi = if wa > 0.0 && wb > 0.0 && total > 0.0 {
+                    (n * total / (wa * wb)).ln().max(0.0)
+                } else {
+                    0.0
+                };
+                (ta, tb, pmi * n.ln_1p())
+            })
+            .collect::<Vec<_>>();
+        let max_raw = raw.iter().map(|pair| pair.2).fold(0.0f64, f64::max);
+        if max_raw > 0.0 {
+            let mut update =
+                conn.prepare("UPDATE _co_listen SET score = ?3 WHERE ta = ?1 AND tb = ?2")?;
+            for (ta, tb, value) in raw {
+                update.execute(params![ta, tb, value / max_raw])?;
+            }
+        }
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS _listen_jd;")?;
+
+    // -- Stage 3: candidate pairs --
+    // Each INSERT must satisfy CHECK (track_a < track_b).
+
     conn.execute_batch(
         "
-        DROP TABLE IF EXISTS _co_listen;
-        CREATE TEMP TABLE _co_listen AS
-        SELECT
-            MIN(a.track_id, b.track_id) AS ta,
-            MAX(a.track_id, b.track_id) AS tb,
-            CAST(COUNT(*) AS REAL) AS n
-        FROM listen_history a
-        JOIN listen_history b
-            ON b.track_id != a.track_id
-            AND b.started_at BETWEEN a.started_at AND datetime(a.started_at, '+30 minutes')
-        WHERE a.started_at >= datetime('now', '-90 days')
-        GROUP BY ta, tb
-        HAVING COUNT(*) >= 2;
-        CREATE INDEX _co_listen_idx ON _co_listen(ta, tb);
+        -- 3a: Same-album pairs (all combinations, not just min/max)
+        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
+        SELECT a.id, b.id
+        FROM tracks a
+        JOIN tracks b ON b.album_id = a.album_id AND b.id > a.id
+        WHERE a.album_id IS NOT NULL;
 
-        -- A shared genre bridges the pair only as strongly as the weaker side
-        -- believes it: MIN(a, b) means a damped mis-tag on one track can't inflate
-        -- the match even if the other track holds that genre firmly.
-        DROP TABLE IF EXISTS _genre_shared;
-        CREATE TEMP TABLE _genre_shared AS
+        -- 3b: Same-artist pairs (cap at artists with <=100 tracks)
+        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
+        SELECT a.id, b.id
+        FROM tracks a
+        JOIN tracks b ON b.artist_id = a.artist_id AND b.id > a.id
+        WHERE a.artist_id IN (
+            SELECT artist_id FROM tracks GROUP BY artist_id HAVING COUNT(*) <= 100
+        );
+
+        -- 3c: Co-listened pairs, whatever their artist or album. Before this
+        -- they could only be scored if they also shared one.
+        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
+        SELECT cl.ta, cl.tb FROM _co_listen cl
+        WHERE EXISTS (SELECT 1 FROM tracks WHERE id = cl.ta)
+          AND EXISTS (SELECT 1 FROM tracks WHERE id = cl.tb);
+    ",
+    )?;
+
+    // 3d: Genre pairs: each track's strongest partners by shared genre rarity,
+    // from genres narrow enough to tell tracks apart.
+    conn.execute_batch(&format!(
+        "
+        DROP TABLE IF EXISTS _genre_candidates;
+        CREATE TEMP TABLE _genre_candidates AS
         SELECT a.track_id AS ta, b.track_id AS tb, SUM(MIN(a.weight, b.weight)) AS shared
         FROM _track_genre_weight a
         JOIN _track_genre_weight b ON b.genre_id = a.genre_id AND b.track_id > a.track_id
-        GROUP BY a.track_id, b.track_id;
-        CREATE INDEX _genre_shared_idx ON _genre_shared(ta, tb);
+        WHERE a.genre_id IN (
+            SELECT genre_id FROM _track_genre_weight
+            GROUP BY genre_id HAVING COUNT(*) <= {max_members}
+        )
+        GROUP BY a.track_id, b.track_id
+        HAVING shared > 0;
 
-        -- Track → release year, for era_proximity. Albums table holds the year.
+        INSERT OR IGNORE INTO _track_similarity_build (track_a, track_b)
+        SELECT MIN(t, o), MAX(t, o)
+        FROM (
+            SELECT t, o, ROW_NUMBER() OVER (PARTITION BY t ORDER BY shared DESC, o) AS rn
+            FROM (
+                SELECT ta AS t, tb AS o, shared FROM _genre_candidates
+                UNION ALL
+                SELECT tb AS t, ta AS o, shared FROM _genre_candidates
+            )
+        )
+        WHERE rn <= {per_track};
+        DROP TABLE _genre_candidates;
+        ",
+        max_members = GENRE_CANDIDATE_MAX_MEMBERS,
+        per_track = GENRE_CANDIDATES_PER_TRACK,
+    ))?;
+
+    // Track -> release year, for era_proximity. Albums table holds the year.
+    conn.execute_batch(
+        "
         DROP TABLE IF EXISTS _track_year;
         CREATE TEMP TABLE _track_year AS
         SELECT t.id AS track_id, al.year AS year
@@ -4535,7 +4641,7 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     ",
     )?;
 
-    // ── Stage 3: score each component ────────────────────────────────────────
+    // -- Stage 4: score each component --
 
     // co_album: 1.0 if same album
     conn.execute(
@@ -4567,19 +4673,31 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         [],
     )?;
 
-    // genre_proximity: summed genre rarity for the pair, normalized by the highest
-    // summed rarity across all pairs, so two tracks sharing rare genres score near
-    // 1 and two sharing only a broad genre score near 0.
+    // genre_proximity: summed rarity of the genres both tracks hold (each counted
+    // as strongly as the weaker side believes it, so a damped mis-tag on one
+    // track can't inflate the match), normalized so the strongest pair scores
+    // 1.0. Computed per candidate instead of over every genre pair.
     conn.execute(
-        "
-        UPDATE _track_similarity_build SET genre_proximity = COALESCE((
-            SELECT gs.shared / NULLIF((SELECT MAX(shared) FROM _genre_shared), 0)
-            FROM _genre_shared gs
-            WHERE gs.ta = _track_similarity_build.track_a AND gs.tb = _track_similarity_build.track_b
-        ), 0)
-    ",
+        "UPDATE _track_similarity_build SET genre_proximity = COALESCE((
+            SELECT SUM(MIN(a.weight, b.weight))
+            FROM _track_genre_weight a
+            JOIN _track_genre_weight b
+              ON b.track_id = _track_similarity_build.track_b AND b.genre_id = a.genre_id
+            WHERE a.track_id = _track_similarity_build.track_a
+        ), 0)",
         [],
     )?;
+    let max_genre: f64 = conn.query_row(
+        "SELECT COALESCE(MAX(genre_proximity), 0) FROM _track_similarity_build",
+        [],
+        |row| row.get(0),
+    )?;
+    if max_genre > 0.0 {
+        conn.execute(
+            "UPDATE _track_similarity_build SET genre_proximity = genre_proximity / ?1",
+            params![max_genre],
+        )?;
+    }
 
     // duration_proximity: 1 - |dur_a - dur_b| / 180s, clamped 0-1
     conn.execute(
@@ -4594,15 +4712,12 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
         [],
     )?;
 
-    // co_listen: normalized co-occurrence count
+    // co_listen: log-scaled co-occurrence (Stage 2)
     conn.execute(
-        "
-        UPDATE _track_similarity_build SET co_listen_score = COALESCE((
-            SELECT cl.n / NULLIF((SELECT MAX(n) FROM _co_listen), 0)
-            FROM _co_listen cl
+        "UPDATE _track_similarity_build SET co_listen_score = COALESCE((
+            SELECT cl.score FROM _co_listen cl
             WHERE cl.ta = _track_similarity_build.track_a AND cl.tb = _track_similarity_build.track_b
-        ), 0)
-    ",
+        ), 0)",
         [],
     )?;
 
@@ -4637,7 +4752,6 @@ pub fn compute_track_similarity(conn: &Connection) -> Result<usize> {
     conn.execute_batch(
         "
         DROP TABLE IF EXISTS _co_listen;
-        DROP TABLE IF EXISTS _genre_shared;
         DROP TABLE IF EXISTS _track_year;
         DROP TABLE IF EXISTS _track_genre_weight;
     ",
@@ -5677,6 +5791,15 @@ pub fn replace_track_neighbors(
 
 /// Replace neighbor rows for a single seed track only — used by the background
 /// per-seed refresh so it doesn't wipe every other track's neighbors.
+/// True when `seed_id` already has neighbor rows under `model_id`.
+pub fn seed_has_neighbors(conn: &Connection, model_id: i64, seed_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM track_neighbors WHERE model_id = ?1 AND track_id = ?2)",
+        params![model_id, seed_id],
+        |row| row.get(0),
+    )?)
+}
+
 pub fn replace_seed_neighbors(
     conn: &Connection,
     model_id: i64,
@@ -6338,6 +6461,78 @@ pub fn replace_external_candidate_neighbors(
     Ok(())
 }
 
+/// External candidates Last.fm linked to the given seeds, best first. Each
+/// seed carries a weight (1.0 for the playing track, less for its learned
+/// neighbors); a candidate scores its best `similarity x weight`, and only
+/// scores at or above `min_score` count. Playable (TIDAL id) and unexpired only.
+pub fn get_sighted_external_candidates(
+    conn: &Connection,
+    weighted_seeds: &[(i64, f64)],
+    min_score: f64,
+    limit: i64,
+) -> Result<Vec<ExternalCandidateNeighborRow>> {
+    if weighted_seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let values = (0..weighted_seeds.len())
+        .map(|i| format!("(?{}, ?{})", i * 2 + 3, i * 2 + 4))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "WITH w(seed_id, weight) AS (VALUES {values})
+         SELECT c.id, c.tidal_id, c.title, c.artist_name, c.duration_ms,
+                MAX(COALESCE(s.similarity, 0) * w.weight) AS score
+         FROM external_track_candidate_sightings s
+         JOIN w ON w.seed_id = s.seed_track_id
+         JOIN external_track_candidates c ON c.id = s.candidate_id
+         WHERE c.tidal_id IS NOT NULL
+           AND julianday(s.expires_at) > julianday('now')
+           AND julianday(c.expires_at) > julianday('now')
+         GROUP BY c.id
+         HAVING score >= ?1
+         ORDER BY score DESC, c.id
+         LIMIT ?2"
+    );
+    let mut bound: Vec<rusqlite::types::Value> = vec![min_score.into(), limit.max(1).into()];
+    for (seed_id, weight) in weighted_seeds {
+        bound.push((*seed_id).into());
+        bound.push((*weight).into());
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(bound), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, f64>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .map(
+            |(rank, (candidate_id, tidal_id, title, artist_name, duration_ms, score))| {
+                ExternalCandidateNeighborRow {
+                    candidate_id,
+                    tidal_id,
+                    title,
+                    artist_name,
+                    duration_ms,
+                    rank: rank as i32 + 1,
+                    score,
+                    audio_score: 0.0,
+                    metadata_score: 0.0,
+                    reason_json: None,
+                }
+            },
+        )
+        .collect())
+}
+
 pub fn get_external_candidate_neighbors(
     conn: &Connection,
     model_id: i64,
@@ -6353,6 +6548,7 @@ pub fn get_external_candidate_neighbors(
          WHERE n.model_id = ?1
            AND n.library_track_id = ?2
            AND (?3 = 0 OR c.tidal_id IS NOT NULL)
+           AND julianday(c.expires_at) > julianday('now')
          ORDER BY n.rank ASC
          LIMIT ?4",
     )?;
@@ -6749,6 +6945,11 @@ pub fn get_completion_weighted_listen_edges(
                 END AS completion_weight
             FROM listen_history lh
             JOIN tracks t ON t.id = lh.track_id
+            -- Early skips are not co-listens.
+            WHERE (COALESCE(lh.completed, 0) = 1
+                OR (COALESCE(lh.duration_listened_ms, 0) >= 30000
+                    AND (t.duration_ms IS NULL OR t.duration_ms <= 0
+                         OR COALESCE(lh.duration_listened_ms, 0) * 4 >= t.duration_ms)))
         )
         SELECT
             'listen_history_pair:' || a.id || ':' || b.id,
@@ -6764,7 +6965,10 @@ pub fn get_completion_weighted_listen_edges(
                 (a.session_id IS NOT NULL AND a.session_id = b.session_id)
                 OR (
                     (a.session_id IS NULL OR b.session_id IS NULL)
-                    AND b.started_at BETWEEN a.started_at AND datetime(a.started_at, printf('+%d minutes', ?1))
+                    -- julianday(): started_at is RFC 3339, datetime() output is not; text compares fail.
+                    AND julianday(b.started_at)
+                        BETWEEN julianday(a.started_at)
+                            AND julianday(a.started_at) + (?1 / 1440.0)
                 )
            )
         ORDER BY a.started_at ASC, a.id ASC, b.started_at ASC, b.id ASC",
@@ -6801,6 +7005,11 @@ pub fn get_listen_history_transition_edges(conn: &Connection) -> Result<Vec<Weig
          JOIN tracks t ON t.id = lh.track_id
          WHERE lh.transition_from_track_id IS NOT NULL
            AND lh.transition_from_track_id != lh.track_id
+           -- An early skip (under 30 s or a quarter) is not evidence the two go together.
+           AND (COALESCE(lh.completed, 0) = 1
+                OR (COALESCE(lh.duration_listened_ms, 0) >= 30000
+                    AND (t.duration_ms IS NULL OR t.duration_ms <= 0
+                         OR COALESCE(lh.duration_listened_ms, 0) * 4 >= t.duration_ms)))
          ORDER BY lh.started_at ASC, lh.id ASC",
     )?;
     let rows = stmt
@@ -8662,6 +8871,177 @@ mod tests {
     }
 
     #[test]
+    fn compute_track_similarity_scores_co_listens_across_artists() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        for id in 1..=4 {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (?1, ?2)",
+                params![id, format!("A{id}")],
+            )
+            .expect("artist");
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES (?1, ?2, ?1, 180000)",
+                params![id, format!("T{id}")],
+            )
+            .expect("track");
+        }
+        // Stored the way the player writes them: RFC 3339 with a T separator.
+        let listen = |track: i64, hours_ago: i64, minutes: i64| {
+            conn.execute(
+                "INSERT INTO listen_history (track_id, started_at, duration_listened_ms, completed)
+                 VALUES (?1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now',
+                         printf('-%d hours', ?2), printf('+%d minutes', ?3)), 180000, 1)",
+                params![track, hours_ago, minutes],
+            )
+            .expect("listen");
+        };
+        // 1 and 2 (different artists) back to back in two sessions; 3 and 4 in eight.
+        for hours_ago in [30, 20] {
+            listen(1, hours_ago, 0);
+            listen(2, hours_ago, 5);
+        }
+        for hours_ago in [80, 70, 60, 50, 45, 40, 35, 25] {
+            listen(3, hours_ago, 0);
+            listen(4, hours_ago, 5);
+        }
+
+        compute_track_similarity(&conn).expect("compute similarity");
+
+        let co = |a: i64, b: i64| -> f64 {
+            conn.query_row(
+                "SELECT co_listen_score FROM track_similarity WHERE track_a=?1 AND track_b=?2",
+                params![a, b],
+                |row| row.get(0),
+            )
+            .expect("co-listened pair is a candidate")
+        };
+        // Both cross-artist pairs are scored; the strongest normalizes to 1.0.
+        let (a, b) = (co(1, 2), co(3, 4));
+        assert!(a > 0.0 && b > 0.0, "co(1, 2) = {a}, co(3, 4) = {b}");
+        assert!((a.max(b) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compute_track_similarity_co_listen_prefers_pairs_beyond_chance() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        for id in 1..=8 {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (?1, ?2)",
+                params![id, format!("A{id}")],
+            )
+            .expect("artist");
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES (?1, ?2, ?1, 180000)",
+                params![id, format!("T{id}")],
+            )
+            .expect("track");
+        }
+        let listen = |track: i64, hours_ago: i64, minutes: i64| {
+            conn.execute(
+                "INSERT INTO listen_history (track_id, started_at, duration_listened_ms, completed)
+                 VALUES (?1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now',
+                         printf('-%d hours', ?2), printf('+%d minutes', ?3)), 180000, 1)",
+                params![track, hours_ago, minutes],
+            )
+            .expect("listen");
+        };
+        // 1 and 2 are only ever heard together (twice).
+        for hours_ago in [10, 20] {
+            listen(1, hours_ago, 0);
+            listen(2, hours_ago, 5);
+        }
+        // 3 is popular: twice with 4, and once each with 5..8.
+        for hours_ago in [30, 40] {
+            listen(3, hours_ago, 0);
+            listen(4, hours_ago, 5);
+        }
+        for (partner, hours_ago) in [(5, 50), (6, 60), (7, 70), (8, 80)] {
+            listen(3, hours_ago, 0);
+            listen(partner, hours_ago, 5);
+        }
+
+        compute_track_similarity(&conn).expect("compute similarity");
+
+        let co = |a: i64, b: i64| -> f64 {
+            conn.query_row(
+                "SELECT co_listen_score FROM track_similarity WHERE track_a=?1 AND track_b=?2",
+                params![a, b],
+                |row| row.get(0),
+            )
+            .expect("co-listened pair")
+        };
+        assert!(
+            co(1, 2) > co(3, 4),
+            "a pair heard only together ({}) beats a popular track's pair ({})",
+            co(1, 2),
+            co(3, 4)
+        );
+    }
+
+    #[test]
+    fn compute_track_similarity_genre_candidates_skip_broad_genres_and_reach_high_ids() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys");
+        schema::run_migrations(&conn).expect("migrations");
+        // One artist with 1,001 tracks: over the 100-track same-artist cap, so
+        // genre is the only candidate source.
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Prolific')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO genres (id, name, slug) VALUES
+                (1,'Broad','broad'),(2,'Niche Low','niche-low'),(3,'Niche High','niche-high')",
+            [],
+        )
+        .expect("genres");
+        let tx = conn.unchecked_transaction().expect("tx");
+        for id in 1..=1001 {
+            tx.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES (?1, ?2, 1, 180000)",
+                params![id, format!("T{id}")],
+            )
+            .expect("track");
+            tx.execute(
+                "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, 1)",
+                params![id],
+            )
+            .expect("broad genre");
+        }
+        tx.execute(
+            "INSERT INTO track_genres (track_id, genre_id) VALUES (1,2),(2,2),(1000,3),(1001,3)",
+            [],
+        )
+        .expect("niche genres");
+        tx.commit().expect("commit");
+
+        compute_track_similarity(&conn).expect("compute similarity");
+
+        let exists = |a: i64, b: i64| -> bool {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM track_similarity WHERE track_a=?1 AND track_b=?2)",
+                params![a, b],
+                |row| row.get(0),
+            )
+            .expect("exists")
+        };
+        assert!(exists(1, 2), "niche pair at low ids is a candidate");
+        assert!(
+            exists(1000, 1001),
+            "niche pair at high ids is a candidate too"
+        );
+        assert!(
+            !exists(1, 1001),
+            "sharing only a 1,001-track genre does not make a candidate"
+        );
+    }
+
+    #[test]
     fn get_genre_diverse_candidates_samples_one_track_per_artist() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -8679,17 +9059,29 @@ mod tests {
         .expect("genres");
         conn.execute(
             "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES
-                (10,'seed',9,1000),
-                (101,'a-low',1,1000),(102,'a-high',1,1000),
+                (10,'seed',9,1000),(11,'other-seed',9,1000),
                 (201,'b-low',2,1000),(202,'b-high',2,1000),
                 (301,'c-only',3,1000),
                 (401,'off-genre',9,1000)",
             [],
         )
         .expect("tracks");
+        // Artist 1 has twenty tracks in the shared genre.
+        for id in 101..=120 {
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, duration_ms) VALUES (?1, 'a', 1, 1000)",
+                params![id],
+            )
+            .expect("artist 1 track");
+            conn.execute(
+                "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, 1)",
+                params![id],
+            )
+            .expect("artist 1 genre");
+        }
         conn.execute(
             "INSERT INTO track_genres (track_id, genre_id) VALUES
-                (10,1),(101,1),(102,1),(201,1),(202,1),(301,1),(401,2)",
+                (10,1),(11,1),(201,1),(202,1),(301,1),(401,2)",
             [],
         )
         .expect("track_genres");
@@ -8699,11 +9091,22 @@ mod tests {
         // One representative per artist that shares genre 1 - never two from one.
         assert_eq!(out.len(), artist_ids.len(), "no artist appears twice");
         assert!(artist_ids.contains(&1) && artist_ids.contains(&2) && artist_ids.contains(&3));
-        // The representative is the lowest-id track per artist.
-        assert!(out.iter().any(|t| t.id == 101) && !out.iter().any(|t| t.id == 102));
-        assert!(out.iter().any(|t| t.id == 201) && !out.iter().any(|t| t.id == 202));
-        // A track tagged only with a different genre must not leak in.
+        // The seed never widens to itself, and off-genre tracks never leak in.
+        assert!(!out.iter().any(|t| t.id == 10));
         assert!(!out.iter().any(|t| t.id == 401));
+        // Stable for a seed, but a different seed samples differently.
+        let again = get_genre_diverse_candidates(&conn, 10, 100).expect("query");
+        assert_eq!(
+            out.iter().map(|t| t.id).collect::<Vec<_>>(),
+            again.iter().map(|t| t.id).collect::<Vec<_>>()
+        );
+        let artist_one = |tracks: &[Track]| tracks.iter().find(|t| t.artist_id == 1).map(|t| t.id);
+        let other = get_genre_diverse_candidates(&conn, 11, 100).expect("query");
+        assert_ne!(
+            artist_one(&out),
+            artist_one(&other),
+            "seeds should sample differently"
+        );
     }
 
     mod dj_transition_event {
@@ -10018,6 +10421,36 @@ mod tests {
     }
 
     #[test]
+    fn completion_weighted_listen_edges_window_handles_rfc3339_rows() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms)
+             VALUES (1,'A',1,180000),(2,'B',1,180000),(3,'C',1,180000)",
+            [],
+        )
+        .expect("tracks");
+        // No session ids, so only the time window links listens.
+        conn.execute(
+            "INSERT INTO listen_history (id, track_id, started_at, duration_listened_ms, completed)
+             VALUES
+                (1, 1, '2026-10-01T10:00:00.123+00:00', 180000, 1),
+                (2, 2, '2026-10-01T10:10:00.456+00:00', 180000, 1),
+                (3, 3, '2026-10-01T13:00:00.789+00:00', 180000, 1)",
+            [],
+        )
+        .expect("listens");
+        let rows = get_completion_weighted_listen_edges(&conn, 45).expect("edges");
+        let pairs: Vec<(i64, i64)> = rows
+            .iter()
+            .map(|row| (row.from_track_id, row.to_track_id))
+            .collect();
+        assert_eq!(pairs, vec![(1, 2)]);
+    }
+
+    #[test]
     fn completion_weighted_listen_edges_downweight_skipped_tracks() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
@@ -10046,6 +10479,45 @@ mod tests {
         assert_eq!(rows[0].to_track_id, 2);
         assert!((rows[0].weight - 0.5).abs() < 1e-9);
         assert_eq!(rows[0].source.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn listen_history_edges_leave_out_early_skips() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, duration_ms)
+             VALUES (1, 'Before', 1, 200000), (2, 'Kept', 1, 200000), (3, 'Skipped', 1, 200000)",
+            [],
+        )
+        .expect("tracks");
+        conn.execute(
+            "INSERT INTO listen_history
+                (id, track_id, started_at, duration_listened_ms, completed, session_id, transition_from_track_id)
+             VALUES
+                (1, 1, '2026-01-01T00:00:00+00:00', 200000, 1, 's1', NULL),
+                (2, 2, '2026-01-01T00:04:00+00:00', 120000, 0, 's1', 1),
+                (3, 3, '2026-01-01T00:06:00+00:00', 8000, 0, 's1', 2)",
+            [],
+        )
+        .expect("listens");
+
+        let transitions = get_listen_history_transition_edges(&conn).expect("transitions");
+        assert_eq!(
+            transitions
+                .iter()
+                .map(|row| (row.from_track_id, row.to_track_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 2)]
+        );
+        let pairs = get_completion_weighted_listen_edges(&conn, 45).expect("pairs");
+        assert!(
+            pairs
+                .iter()
+                .all(|row| row.to_track_id != 3 && row.from_track_id != 3)
+        );
     }
 
     #[test]
@@ -10556,6 +11028,72 @@ mod tests {
     }
 
     #[test]
+    fn sighted_external_candidates_follow_lastfm_links_with_a_floor() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+            .expect("artist");
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id) VALUES (1, 'Seed', 1), (2, 'Neighbor', 1), (3, 'Elsewhere', 1)",
+            [],
+        )
+        .expect("tracks");
+        let candidate = |tidal_id: Option<i64>, title: &str| {
+            upsert_external_track_candidate(
+                &conn,
+                &ExternalTrackCandidateUpsert {
+                    tidal_id,
+                    mbid: None,
+                    dedupe_key: format!("test:{title}"),
+                    title: title.to_string(),
+                    artist_name: "Outside".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(200_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )
+            .expect("candidate")
+            .id
+        };
+        let direct = candidate(Some(501), "Direct");
+        let via_neighbor = candidate(Some(502), "Via Neighbor");
+        let weak = candidate(Some(503), "Weak");
+        let unplayable = candidate(None, "Unplayable");
+        let unrelated = candidate(Some(505), "Unrelated");
+        for (candidate_id, seed, similarity) in [
+            (direct, 1, 0.6),
+            (via_neighbor, 2, 0.5),
+            (weak, 1, 0.05),
+            (unplayable, 1, 0.9),
+            (unrelated, 3, 0.9),
+        ] {
+            upsert_external_candidate_sighting(
+                &conn,
+                &ExternalCandidateSightingUpsert {
+                    candidate_id,
+                    seed_track_id: seed,
+                    source: "lastfm_similar".to_string(),
+                    source_payload_json: None,
+                    similarity: Some(similarity),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )
+            .expect("sighting");
+        }
+
+        let rows = get_sighted_external_candidates(&conn, &[(1, 1.0), (2, 0.65)], 0.15, 10)
+            .expect("sighted");
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Direct", "Via Neighbor"]
+        );
+        assert!((rows[1].score - 0.325).abs() < 1e-9);
+    }
+
+    #[test]
     fn external_neighbor_lookup_returns_only_tidal_resolved_candidates_by_default() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         schema::run_migrations(&conn).expect("migrations");
@@ -10586,7 +11124,7 @@ mod tests {
                 artist_name: "Outside".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(100_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .expect("unresolved");
@@ -10600,7 +11138,7 @@ mod tests {
                 artist_name: "Outside".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(100_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .expect("resolved");

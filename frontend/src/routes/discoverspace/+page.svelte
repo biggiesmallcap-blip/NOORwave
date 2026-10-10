@@ -14,6 +14,7 @@
 		lockSeed,
 		unlockSeed,
 		hydrateDiscoverControls,
+		refreshSuggestedCoherence,
 	} from '$lib/components/DiscoverSpace/discover_space_store';
 	import DiscoverFilterBar from '$lib/components/DiscoverSpace/DiscoverFilterBar.svelte';
 	import DiscoverRankedList from '$lib/components/DiscoverSpace/DiscoverRankedList.svelte';
@@ -184,6 +185,7 @@
 		// Controls (coherence, filters, session id) hydrate before the first
 		// load so the initial request already carries them.
 		hydrateDiscoverControls();
+		void refreshSuggestedCoherence();
 		const seedId = resolvedSeedId;
 		if (seedId !== null) {
 			lastLoadedSeedId = seedId;

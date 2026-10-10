@@ -25,11 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use crate::db::models::AudioDspFeatures;
 #[cfg(test)]
-use crate::services::audio_analysis::compute_harmonic_multiplier;
-#[cfg(test)]
 use crate::smart::taste_vector::adapters::from_session_profile;
-#[cfg(test)]
-use std::cmp::Ordering;
 
 #[derive(Debug, Clone)]
 pub struct PlaybackSnapshot {
@@ -266,6 +262,9 @@ pub struct LiveListenSession {
 const SESSION_GAP_MINUTES: i64 = 30;
 
 const SESSION_FEEDBACK_LIMIT: i64 = 60;
+/// Listens older than this do not describe the current session (after a week
+/// away the last 60 listens were last week's).
+const SESSION_FEEDBACK_MAX_AGE_DAYS: i64 = 3;
 
 #[derive(Debug, Default)]
 pub(crate) struct SessionTasteProfile {
@@ -2298,6 +2297,33 @@ pub fn is_completed_listen(track: &Track, listened_ms: i64) -> bool {
         .unwrap_or(listened_ms >= 240_000)
 }
 
+/// What a listen says about taste. Only an early skip is negative; a partial
+/// play (often a DJ mix-out or a track you moved on from late) says little.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListenOutcome {
+    Completed,
+    Partial,
+    EarlySkip,
+}
+
+/// Under 30 seconds, or under a quarter of the track, without completing.
+pub(crate) fn classify_listen(
+    completed: bool,
+    listened_ms: i64,
+    duration_ms: Option<i64>,
+) -> ListenOutcome {
+    if completed {
+        return ListenOutcome::Completed;
+    }
+    let under_quarter =
+        duration_ms.is_some_and(|duration| duration > 0 && listened_ms * 4 < duration);
+    if listened_ms < 30_000 || under_quarter {
+        ListenOutcome::EarlySkip
+    } else {
+        ListenOutcome::Partial
+    }
+}
+
 /// Cap a flushed listen-session duration at the track's length when known.
 ///
 /// The session timer accrues wall-clock time while the player is nominally
@@ -2364,15 +2390,27 @@ pub(crate) fn build_session_taste_profile(
     }
 
     let mut stmt = conn.prepare(
-        "SELECT track_id, completed
-         FROM listen_history
-         ORDER BY started_at DESC, id DESC
+        "SELECT lh.track_id, lh.completed, COALESCE(lh.duration_listened_ms, 0), t.duration_ms
+         FROM listen_history lh
+         LEFT JOIN tracks t ON t.id = lh.track_id
+         WHERE julianday(lh.started_at) >= julianday('now', printf('-%d days', ?2))
+         ORDER BY julianday(lh.started_at) DESC, lh.id DESC
          LIMIT ?1",
     )?;
     let feedback_rows = stmt
-        .query_map(params![SESSION_FEEDBACK_LIMIT], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
-        })?
+        .query_map(
+            params![SESSION_FEEDBACK_LIMIT, SESSION_FEEDBACK_MAX_AGE_DAYS],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    classify_listen(
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ),
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut feedback_tracks = Vec::new();
@@ -2383,11 +2421,17 @@ pub(crate) fn build_session_taste_profile(
     let found_tracks = queue::get_tracks_by_ids(conn, &feedback_track_ids)?;
     let track_map: HashMap<i64, &Track> = found_tracks.iter().map(|t| (t.id, t)).collect();
 
-    for (track_id, completed) in feedback_rows {
+    for (track_id, outcome) in feedback_rows {
         profile.recent_track_ids.insert(track_id);
-        if !completed {
-            profile.skipped_track_ids.insert(track_id);
-        }
+        // Partial plays only mark the track as recent; they carry no taste.
+        let completed = match outcome {
+            ListenOutcome::Completed => true,
+            ListenOutcome::EarlySkip => {
+                profile.skipped_track_ids.insert(track_id);
+                false
+            }
+            ListenOutcome::Partial => continue,
+        };
 
         if let Some(track) = track_map.get(&track_id) {
             feedback_tracks.push((**track).clone());
@@ -2548,6 +2592,53 @@ mod tests {
     }
 
     #[test]
+    fn classify_listen_separates_early_skips_from_partial_plays() {
+        use ListenOutcome::*;
+        for (completed, listened, duration, expected) in [
+            (true, 200_000, Some(200_000), Completed),
+            (false, 10_000, Some(200_000), EarlySkip),
+            (false, 45_000, Some(200_000), EarlySkip),
+            (false, 60_000, Some(200_000), Partial),
+            (false, 150_000, Some(200_000), Partial),
+            (false, 29_000, None, EarlySkip),
+            (false, 31_000, None, Partial),
+        ] {
+            assert_eq!(
+                classify_listen(completed, listened, duration),
+                expected,
+                "{completed} {listened} {duration:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_taste_treats_partial_plays_as_neutral_and_ignores_old_listens() {
+        let conn = conn();
+        conn.execute_batch(
+            "INSERT INTO listen_history (track_id, started_at, duration_listened_ms, completed) VALUES
+                (2, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-1 hours'), 10000, 0),
+                (3, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-2 hours'), 120000, 0),
+                (4, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-5 days'), 5000, 0);",
+        )
+        .unwrap();
+        let current = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
+
+        let profile = build_session_taste_profile(&conn, &current).unwrap();
+
+        assert!(profile.skipped_track_ids.contains(&2), "early skip");
+        assert!(
+            !profile.skipped_track_ids.contains(&3),
+            "partial play is neutral"
+        );
+        assert!(profile.recent_track_ids.contains(&3));
+        assert!(
+            !profile.recent_track_ids.contains(&4),
+            "older than the window"
+        );
+        assert!(!profile.skipped_track_ids.contains(&4));
+    }
+
+    #[test]
     fn clamp_listened_ms_passes_through_unknown_durations() {
         assert_eq!(clamp_listened_ms(2_795_000, None), 2_795_000);
         assert_eq!(clamp_listened_ms(2_795_000, Some(0)), 2_795_000);
@@ -2651,6 +2742,16 @@ mod tests {
                 resolved_track_id INTEGER,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE external_track_candidate_sightings (
+                candidate_id INTEGER NOT NULL,
+                seed_track_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                source_payload_json TEXT,
+                similarity REAL,
+                seen_at TEXT DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (candidate_id, seed_track_id, source)
             );
             CREATE TABLE external_track_candidate_neighbors (
                 library_track_id INTEGER NOT NULL,
@@ -4609,7 +4710,7 @@ mod tests {
 
     #[test]
     fn automix_reason_does_not_claim_harmonic_match_on_key_clash_with_close_bpm() {
-        // 8A vs 10A is a Camelot clash, but a near-identical BPM pushes the
+        // 8A vs 11A is a Camelot clash, but a near-identical BPM pushes the
         // *combined* harmonic multiplier above 1.0. The reason must still call
         // it a key clash - deriving the signal from the Camelot relationship,
         // not the blended multiplier.
@@ -4625,7 +4726,7 @@ mod tests {
             ..blank_dsp_features()
         };
         let candidate_features = AudioDspFeatures {
-            camelot_key: Some("10A".to_string()),
+            camelot_key: Some("11A".to_string()),
             bpm: Some(122.0),
             ..blank_dsp_features()
         };
@@ -5275,6 +5376,65 @@ mod tests {
         );
     }
 
+    /// Last.fm linked the candidate to track 1 (the playing seed).
+    fn sight_for_seed_one(conn: &Connection, candidate_id: i64, similarity: f64) {
+        queries::upsert_external_candidate_sighting(
+            conn,
+            &queries::ExternalCandidateSightingUpsert {
+                candidate_id,
+                seed_track_id: 1,
+                source: "lastfm_similar".to_string(),
+                source_payload_json: None,
+                similarity: Some(similarity),
+                expires_at: "2099-01-01 00:00:00".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn include_new_uses_the_lastfm_lane_and_skips_weak_links() {
+        let conn = conn();
+        let current = queue::get_tracks_by_ids(&conn, &[1]).unwrap().remove(0);
+        queue::append_tracks(&conn, std::slice::from_ref(&current), "user").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, position_ms = 0, is_playing = 1, automix_enabled = 1,
+                 automix_allow_external = 0, automix_discover_new = 1, automix_use_learning = 0",
+            [],
+        )
+        .unwrap();
+        let candidate = |tidal_id: i64, title: &str| {
+            queries::upsert_external_track_candidate(
+                &conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(tidal_id),
+                    mbid: None,
+                    dedupe_key: format!("tidal:{tidal_id}"),
+                    title: title.to_string(),
+                    artist_name: "Outside Artist".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(180_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )
+            .unwrap()
+        };
+        let strong = candidate(99101, "Strong Link");
+        let weak = candidate(99102, "Weak Link");
+        sight_for_seed_one(&conn, strong.id, 0.7);
+        sight_for_seed_one(&conn, weak.id, 0.05);
+
+        let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
+
+        let external: Vec<&str> = queue
+            .iter()
+            .filter(|item| item.source == "automix-new")
+            .map(|item| item.track.title.as_str())
+            .collect();
+        assert_eq!(external, vec!["Strong Link"]);
+    }
+
     #[test]
     fn ensure_automix_external_enabled_appends_pending_sidecar_rows() {
         let conn = conn();
@@ -5307,24 +5467,11 @@ mod tests {
                 artist_name: "Outside Artist".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(180_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .unwrap();
-        queries::replace_external_candidate_neighbors(
-            &conn,
-            model.id,
-            1,
-            &[queries::ExternalCandidateNeighborWriteRow {
-                candidate_id: candidate.id,
-                rank: 1,
-                score: 0.9,
-                audio_score: 0.9,
-                metadata_score: 0.0,
-                reason_json: None,
-            }],
-        )
-        .unwrap();
+        sight_for_seed_one(&conn, candidate.id, 0.9);
 
         let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
 
@@ -5388,7 +5535,7 @@ mod tests {
                 artist_name: "Outside Artist".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(180_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .unwrap();
@@ -5402,34 +5549,12 @@ mod tests {
                 artist_name: "Outside Artist".to_string(),
                 genre_tags_json: None,
                 duration_ms: Some(181_000),
-                expires_at: "2026-03-01 00:00:00".to_string(),
+                expires_at: "2099-01-01 00:00:00".to_string(),
             },
         )
         .unwrap();
-        queries::replace_external_candidate_neighbors(
-            &conn,
-            model.id,
-            1,
-            &[
-                queries::ExternalCandidateNeighborWriteRow {
-                    candidate_id: first.id,
-                    rank: 1,
-                    score: 0.95,
-                    audio_score: 0.95,
-                    metadata_score: 0.0,
-                    reason_json: None,
-                },
-                queries::ExternalCandidateNeighborWriteRow {
-                    candidate_id: second.id,
-                    rank: 2,
-                    score: 0.9,
-                    audio_score: 0.9,
-                    metadata_score: 0.0,
-                    reason_json: None,
-                },
-            ],
-        )
-        .unwrap();
+        sight_for_seed_one(&conn, first.id, 0.95);
+        sight_for_seed_one(&conn, second.id, 0.9);
 
         ensure_automix_queue_depth(&conn, 2, false).unwrap();
 
@@ -5447,6 +5572,67 @@ mod tests {
             .unwrap();
         assert_eq!(hints.iter().filter(|hint| **hint == Some(99001)).count(), 1);
         assert!(hints.contains(&Some(99002)));
+    }
+
+    #[test]
+    fn ensure_automix_external_skips_hidden_ai_candidates_without_failing() {
+        let conn = conn();
+        conn.execute_batch(
+            "ALTER TABLE tracks ADD COLUMN is_library INTEGER DEFAULT 0;
+             CREATE TABLE tidal_track_labels (tidal_id INTEGER PRIMARY KEY, ai INTEGER);
+             INSERT INTO server_config (key, value) VALUES ('tidal_hide_ai', '1');
+             INSERT INTO tidal_track_labels (tidal_id, ai) VALUES (99001, 1);",
+        )
+        .unwrap();
+        let current = queue::get_tracks_by_ids(&conn, &[1]).unwrap().remove(0);
+        queue::append_tracks(&conn, std::slice::from_ref(&current), "user").unwrap();
+        conn.execute(
+            "UPDATE playback_state
+             SET current_track_id = 1, position_ms = 0, is_playing = 1,
+                 automix_enabled = 1, automix_allow_external = 1, automix_use_learning = 0",
+            [],
+        )
+        .unwrap();
+        let model = queries::create_embedding_model(
+            &conn,
+            "discovery-fusion-v2:test-external-ai",
+            "discovery-fusion-v2",
+            32,
+            "ready",
+            None,
+        )
+        .unwrap();
+        queries::activate_embedding_model(&conn, model.id).unwrap();
+        let candidate = |tidal_id: i64, title: &str| {
+            queries::upsert_external_track_candidate(
+                &conn,
+                &queries::ExternalTrackCandidateUpsert {
+                    tidal_id: Some(tidal_id),
+                    mbid: None,
+                    dedupe_key: format!("tidal:{tidal_id}"),
+                    title: title.to_string(),
+                    artist_name: "Outside Artist".to_string(),
+                    genre_tags_json: None,
+                    duration_ms: Some(180_000),
+                    expires_at: "2099-01-01 00:00:00".to_string(),
+                },
+            )
+            .unwrap()
+        };
+        let hidden = candidate(99001, "Hidden AI Track");
+        let fresh = candidate(99002, "Fresh External");
+        sight_for_seed_one(&conn, hidden.id, 0.9);
+        sight_for_seed_one(&conn, fresh.id, 0.8);
+
+        let queue = ensure_automix_queue_depth(&conn, 1, false)
+            .expect("hidden content must not fail the refill");
+
+        let external: Vec<&str> = queue
+            .iter()
+            .filter(|item| item.source == "automix-new")
+            .map(|item| item.track.title.as_str())
+            .collect();
+        assert_eq!(external, vec!["Fresh External"]);
     }
 
     #[test]
@@ -6406,6 +6592,69 @@ mod tests {
     }
 
     #[test]
+    fn learned_automix_refill_stays_anchored_to_the_listeners_pick() {
+        let conn = conn();
+        conn.execute_batch(
+            "
+            CREATE TABLE track_neighbors (
+                track_id INTEGER NOT NULL,
+                neighbor_track_id INTEGER NOT NULL,
+                model_id INTEGER NOT NULL,
+                rank INTEGER NOT NULL,
+                score REAL NOT NULL DEFAULT 0,
+                behavioral_score REAL DEFAULT 0,
+                audio_score REAL DEFAULT 0,
+                metadata_score REAL DEFAULT 0,
+                reason_json TEXT,
+                computed_at TEXT DEFAULT (datetime('now')),
+                primary_reason TEXT,
+                confidence REAL NOT NULL DEFAULT 0,
+                support_count INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree INTEGER NOT NULL DEFAULT 0,
+                candidate_in_degree_percentile REAL NOT NULL DEFAULT 0,
+                play_count_seed INTEGER NOT NULL DEFAULT 0,
+                play_count_candidate INTEGER NOT NULL DEFAULT 0,
+                support_transition REAL NOT NULL DEFAULT 0,
+                support_colisten REAL NOT NULL DEFAULT 0,
+                support_structure REAL NOT NULL DEFAULT 0,
+                support_metadata REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (track_id, neighbor_track_id, model_id)
+            );
+            INSERT INTO server_config (key, value) VALUES ('discovery_engine', 'v2');
+            INSERT INTO embedding_models (
+                id, model_key, family, dimension, status, is_active, trained_at, created_at
+            ) VALUES (
+                1, 'test-anchor', 'discovery-fusion-v2', 3, 'ready', 1,
+                '2026-01-01 00:00:00', '2026-01-01 00:00:00'
+            );
+            -- Track 1 is what the listener picked; track 2 is an automix pick
+            -- now playing. Each has one learned neighbor.
+            INSERT INTO track_neighbors (
+                track_id, neighbor_track_id, model_id, rank, score, behavioral_score, primary_reason
+            ) VALUES
+                (1, 5, 1, 1, 0.90, 0.90, 'behavioral'),
+                (2, 6, 1, 1, 0.90, 0.90, 'behavioral');
+            ",
+        )
+        .expect("schema");
+        let picked = queue::get_tracks_by_ids(&conn, &[1]).unwrap();
+        queue::append_tracks(&conn, &picked, "user").unwrap();
+        let playing = queue::get_tracks_by_ids(&conn, &[2]).unwrap();
+        queue::append_tracks(&conn, &playing, "automix").unwrap();
+        let queue_items = queue::load_queue(&conn).unwrap();
+        let current = playing[0].clone();
+
+        let extension = extension_tracks(&conn, &current, &queue_items, ShuffleMode::Off, 2, true)
+            .expect("extension call");
+
+        // The anchor's neighbor leads; the playing pick's neighbor follows.
+        assert_eq!(
+            extension.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+    }
+
+    #[test]
     fn learned_automix_builds_chain_aware_order_from_overfetched_neighbors() {
         let conn = conn();
         conn.execute_batch(
@@ -6453,6 +6702,7 @@ mod tests {
                 analysis_version TEXT NOT NULL DEFAULT 'test'
             );
             INSERT INTO server_config (key, value) VALUES ('discovery_engine', 'v2');
+            UPDATE playback_state SET crossfade_ms = 4000 WHERE id = 1;
             INSERT INTO embedding_models (
                 id, model_key, family, dimension, status, is_active, trained_at, created_at
             ) VALUES (
@@ -6468,7 +6718,7 @@ mod tests {
             INSERT INTO audio_dsp_features (track_id, bpm, camelot_key) VALUES
                 (1, 120.0, '1A'),
                 (2, 120.0, '2A'),
-                (3, 120.0, '12A'),
+                (3, 120.0, '12B'),
                 (4, 120.0, '3A');
             ",
         )
@@ -6485,7 +6735,7 @@ mod tests {
     }
 
     #[test]
-    fn learned_automix_smoke_prefers_next_track_fit_over_vague_similarity() {
+    fn learned_automix_keeps_relevance_and_lets_fit_nudge_only_while_mixing() {
         let conn = conn();
         conn.execute_batch(
             "
@@ -6559,13 +6809,27 @@ mod tests {
         .expect("schema");
         let seed = queue::get_track_by_id(&conn, 1).unwrap().unwrap();
 
-        let extension =
+        // Not mixing: relevance with lane policy decides, so the co-listened
+        // rank-1 neighbor leads even though it clashes on key and tempo.
+        let plain =
             extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 5, true).expect("extension call");
+        assert_eq!(plain.first().map(|track| track.id), Some(2));
 
-        assert_eq!(extension.first().map(|track| track.id), Some(6));
-        assert_eq!(
-            extension.iter().map(|track| track.id).collect::<Vec<_>>(),
-            vec![6, 5, 3, 4, 2]
+        // Mixing: the clash drops behind close, well-fitting ranks but is not
+        // buried, and the far rank-5 fit does not jump to the top.
+        conn.execute(
+            "UPDATE playback_state SET crossfade_ms = 4000 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let mixed =
+            extension_tracks(&conn, &seed, &[], ShuffleMode::Off, 5, true).expect("extension call");
+        let position = |id: i64| mixed.iter().position(|track| track.id == id).unwrap();
+        assert_eq!(mixed.first().map(|track| track.id), Some(3));
+        assert!(
+            (1..=3).contains(&position(2)),
+            "order: {:?}",
+            mixed.iter().map(|t| t.id).collect::<Vec<_>>()
         );
     }
 
@@ -6759,481 +7023,16 @@ mod quality_precedence_tests {
 
 #[cfg(test)]
 mod parity_tests {
-    //! Parity gate for the TasteVector migration (Phase 1).
-    //!
-    //! Runs the live `automix_score` against a frozen snapshot
-    //! (`automix_score_old`) on a fixed synthetic fixture and asserts the
-    //! top-30 candidate ordering matches exactly. In the scaffolding commit
-    //! the snapshot is byte-identical to the live function so the gate
-    //! passes trivially; in the migration commit the live function is
-    //! rewritten to consume `TasteVector`/`SeedContext` while the snapshot
-    //! stays frozen, so divergence indicates a migration bug rather than a
-    //! tuning miss.
-    //!
-    //! Fixture is built in-memory with no database - `automix_score` only
-    //! consumes plain data, so a DB round-trip would add noise without
-    //! adding signal.
-    use super::*;
-    use crate::playback::automix::{automix_score, parse_days_since_last_played};
-    use std::collections::{HashMap, HashSet};
+    //! The frozen pre-TasteVector scorer and its top-30 parity gate lived here.
+    //! The automix scorer was deliberately reworked (relevance first, weighted
+    //! Jaccard genres, tamed harmonic, penalties last), so the gate is gone;
+    //! the characterization test below still pins timestamp parsing.
+    use crate::playback::automix::parse_days_since_last_played;
 
-    /// Frozen snapshot of `automix_score` taken at Phase 1 start. The body
-    /// is a verbatim copy of `super::automix_score` and must not be
-    /// modified by the migration commit - the whole point is that this
-    /// path keeps producing the original numbers while the live function
-    /// changes shape underneath it.
-    fn automix_score_old(
-        track: &Track,
-        genres: &[String],
-        taste: &SessionTasteProfile,
-        seed_features: Option<&AudioDspFeatures>,
-        candidate_features: Option<&AudioDspFeatures>,
-    ) -> f64 {
-        let mut score = 1.0;
-
-        if taste.skipped_track_ids.contains(&track.id) {
-            score *= 0.1;
-        }
-
-        if Some(track.artist_id) == taste.current_artist_id && track.artist_id != 0 {
-            score *= 1.1;
-        }
-
-        if taste.current_source.as_deref() == Some(track.source.as_str()) {
-            score *= 1.05;
-        }
-
-        if track.is_favorite {
-            score *= 1.2;
-        }
-
-        if track.play_count == 0 {
-            score *= 1.35;
-        } else if let Some(last_played) = track.last_played_at.as_deref() {
-            let days_since = parse_days_since_last_played(last_played);
-            if days_since < 14.0 {
-                let penalty = 0.5 + 0.5 * (days_since / 14.0);
-                score *= penalty;
-            }
-        }
-
-        if track.artist_id != 0 {
-            score += taste
-                .positive_artists
-                .get(&track.artist_id)
-                .copied()
-                .unwrap_or(0.0)
-                * 0.5;
-            score -= taste
-                .negative_artists
-                .get(&track.artist_id)
-                .copied()
-                .unwrap_or(0.0)
-                * 0.65;
-        }
-
-        let normalized_genres = genres.iter().map(|genre| normalize_genre_key(genre));
-        for genre in normalized_genres {
-            if taste.current_genres.contains(&genre) {
-                score += 1.8;
-            }
-            score += taste.positive_genres.get(&genre).copied().unwrap_or(0.0) * 0.4;
-            score -= taste.negative_genres.get(&genre).copied().unwrap_or(0.0) * 0.5;
-        }
-
-        score += (track.fidelity_score.max(0) as f64) * 0.003;
-
-        if let (Some(seed), Some(cand)) = (seed_features, candidate_features) {
-            score *= compute_harmonic_multiplier(
-                seed.camelot_key.as_deref(),
-                cand.camelot_key.as_deref(),
-                seed.bpm,
-                cand.bpm,
-            );
-
-            if let (Some(seed_energy), Some(cand_energy)) = (seed.energy, cand.energy)
-                && (seed_energy - cand_energy).abs() > 0.5
-            {
-                score *= 0.7;
-            }
-        }
-
-        score.max(0.05)
-    }
-
-    struct CandidateInput {
-        track: Track,
-        genres: Vec<String>,
-        features: Option<AudioDspFeatures>,
-    }
-
-    struct Fixture {
-        profile: SessionTasteProfile,
-        seed_features: Option<AudioDspFeatures>,
-        candidates: Vec<CandidateInput>,
-    }
-
-    fn make_track(
-        id: i64,
-        artist_id: i64,
-        is_favorite: bool,
-        play_count: i32,
-        fidelity_score: i32,
-        source: &str,
-    ) -> Track {
-        Track {
-            id,
-            title: format!("Track {id}"),
-            artist_id,
-            artist_name: Some(format!("Artist {artist_id}")),
-            album_id: Some(artist_id * 10),
-            album_title: Some(format!("Album {artist_id}")),
-            disc_number: Some(1),
-            track_number: Some(1),
-            duration_ms: Some(180_000),
-            isrc: None,
-            tidal_id: Some(id),
-            artist_tidal_id: None,
-            album_tidal_id: None,
-            ytmusic_id: None,
-            soundcloud_id: None,
-            best_quality: Some("LOSSLESS".to_string()),
-            best_source: Some(source.to_string()),
-            fidelity_score,
-            is_favorite,
-            play_count,
-            last_played_at: None,
-            date_added: Some("2025-01-01T00:00:00Z".to_string()),
-            source: source.to_string(),
-            artwork_url: None,
-        }
-    }
-
-    fn make_features(camelot: &str, bpm: f64, energy: f64) -> AudioDspFeatures {
-        AudioDspFeatures {
-            track_id: 0,
-            bpm: Some(bpm),
-            key_signature: None,
-            camelot_key: Some(camelot.to_string()),
-            loudness_lufs: None,
-            energy: Some(energy),
-            danceability: None,
-            beat_strength: None,
-            spectral_centroid: None,
-            stereo_width: None,
-            is_instrumental: false,
-            analysis_source: "test".to_string(),
-            analysis_offset_ms: 0,
-            samples_analyzed: None,
-            analyzed_at: "2026-01-01T00:00:00Z".to_string(),
-            analysis_version: "test".to_string(),
-        }
-    }
-
-    /// Synthetic fixture exercising every branch in `automix_score`:
-    /// hard suppression (skipped track), same-artist boost, same-source
-    /// boost, favourite multiplier, unplayed boost, positive/negative
-    /// artist signal, positive/negative genre signal, current-genre
-    /// proximity bonus, fidelity tilt, harmonic multiplier, and energy
-    /// whiplash penalty.
-    fn build_fixture() -> Fixture {
-        let mut profile = SessionTasteProfile {
-            current_artist_id: Some(1),
-            current_album_id: Some(10),
-            current_source: Some("tidal".to_string()),
-            ..SessionTasteProfile::default()
-        };
-        profile.current_genres.insert("house".to_string());
-        for (id, weight) in [(1, 8.5_f64), (2, 5.2), (3, 3.0), (4, 1.5), (5, 0.8)] {
-            profile.positive_artists.insert(id, weight);
-        }
-        for (id, weight) in [(2, 1.1_f64), (3, 2.4)] {
-            profile.negative_artists.insert(id, weight);
-        }
-        for (genre, weight) in [("house", 6.4_f64), ("techno", 4.2), ("ambient", 2.0)] {
-            profile.positive_genres.insert(genre.to_string(), weight);
-        }
-        for (genre, weight) in [("jazz", 1.8_f64), ("ambient", 0.4)] {
-            profile.negative_genres.insert(genre.to_string(), weight);
-        }
-        for id in [300, 301, 302, 305] {
-            profile.recent_track_ids.insert(id);
-        }
-        profile.skipped_track_ids.insert(305);
-
-        let seed_features = Some(make_features("8A", 124.0, 0.7));
-
-        let candidates = vec![
-            CandidateInput {
-                track: make_track(100, 1, true, 0, 80, "tidal"),
-                genres: vec!["House".to_string()],
-                features: Some(make_features("8A", 125.0, 0.65)),
-            },
-            CandidateInput {
-                track: make_track(101, 1, false, 2, 60, "tidal"),
-                genres: vec!["Techno".to_string()],
-                features: None,
-            },
-            CandidateInput {
-                track: make_track(102, 2, false, 0, 70, "tidal"),
-                genres: vec!["House".to_string(), "Techno".to_string()],
-                features: Some(make_features("9A", 128.0, 0.75)),
-            },
-            CandidateInput {
-                track: make_track(103, 3, false, 5, 40, "tidal"),
-                genres: vec!["Jazz".to_string()],
-                features: None,
-            },
-            CandidateInput {
-                track: make_track(104, 4, true, 0, 50, "tidal"),
-                genres: vec!["Ambient".to_string()],
-                features: Some(make_features("3B", 110.0, 0.2)),
-            },
-            CandidateInput {
-                track: make_track(105, 5, false, 1, 30, "tidal"),
-                genres: vec!["House".to_string()],
-                features: None,
-            },
-            CandidateInput {
-                track: make_track(106, 6, false, 0, 70, "tidal"),
-                genres: vec!["Techno".to_string()],
-                features: Some(make_features("8A", 124.0, 0.7)),
-            },
-            CandidateInput {
-                track: make_track(107, 7, false, 3, 20, "local"),
-                genres: vec!["Jazz".to_string(), "Ambient".to_string()],
-                features: None,
-            },
-            CandidateInput {
-                track: make_track(108, 2, false, 0, 10, "tidal"),
-                genres: vec![],
-                features: None,
-            },
-            CandidateInput {
-                track: make_track(109, 1, false, 0, 90, "tidal"),
-                genres: vec!["House".to_string(), "Ambient".to_string()],
-                features: Some(make_features("2A", 130.0, 0.85)),
-            },
-            CandidateInput {
-                track: make_track(110, 3, true, 4, 85, "tidal"),
-                genres: vec!["Techno".to_string()],
-                features: None,
-            },
-            CandidateInput {
-                track: make_track(305, 4, false, 0, 60, "tidal"),
-                genres: vec!["House".to_string()],
-                features: None,
-            },
-        ];
-
-        Fixture {
-            profile,
-            seed_features,
-            candidates,
-        }
-    }
-
-    /// Builds a `TasteVector` + `SeedContext` from the fixture's
-    /// `SessionTasteProfile` via `from_session_profile`, then calls the
-    /// migrated `automix_score`. Conversion happens once per call (not per
-    /// candidate) to mirror the production call site.
-    fn score_with_new_path(fixture: &Fixture) -> Vec<(i64, f64)> {
-        let (taste, seed) =
-            crate::smart::taste_vector::adapters::from_session_profile(&fixture.profile);
-        fixture
-            .candidates
-            .iter()
-            .map(|cand| {
-                let score = automix_score(
-                    &cand.track,
-                    &cand.genres,
-                    &taste,
-                    &seed,
-                    fixture.seed_features.as_ref(),
-                    cand.features.as_ref(),
-                )
-                .value;
-                (cand.track.id, score)
-            })
-            .collect()
-    }
-
-    fn score_with_old_path(fixture: &Fixture) -> Vec<(i64, f64)> {
-        fixture
-            .candidates
-            .iter()
-            .map(|cand| {
-                let score = automix_score_old(
-                    &cand.track,
-                    &cand.genres,
-                    &fixture.profile,
-                    fixture.seed_features.as_ref(),
-                    cand.features.as_ref(),
-                );
-                (cand.track.id, score)
-            })
-            .collect()
-    }
-
-    fn top_n_ids(scores: &[(i64, f64)], n: usize) -> Vec<i64> {
-        let mut sorted: Vec<(i64, f64)> = scores.to_vec();
-        sorted.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        sorted.into_iter().take(n).map(|(id, _)| id).collect()
-    }
-
-    fn kendall_tau_top_n(new_scores: &[(i64, f64)], old_scores: &[(i64, f64)], n: usize) -> f64 {
-        let new_top = top_n_ids(new_scores, n);
-        let old_top = top_n_ids(old_scores, n);
-        let new_rank: HashMap<i64, usize> =
-            new_top.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-        let old_rank: HashMap<i64, usize> =
-            old_top.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-        let union: HashSet<i64> = new_top.iter().chain(old_top.iter()).copied().collect();
-        let items: Vec<i64> = union.into_iter().collect();
-
-        let mut concordant = 0i64;
-        let mut discordant = 0i64;
-        for i in 0..items.len() {
-            for j in (i + 1)..items.len() {
-                let (a, b) = (items[i], items[j]);
-                if let (Some(&na), Some(&nb), Some(&oa), Some(&ob)) = (
-                    new_rank.get(&a),
-                    new_rank.get(&b),
-                    old_rank.get(&a),
-                    old_rank.get(&b),
-                ) {
-                    let new_order = na.cmp(&nb);
-                    let old_order = oa.cmp(&ob);
-                    if new_order == old_order {
-                        concordant += 1;
-                    } else {
-                        discordant += 1;
-                    }
-                }
-            }
-        }
-        let total = concordant + discordant;
-        if total == 0 {
-            1.0
-        } else {
-            (concordant - discordant) as f64 / total as f64
-        }
-    }
-
-    /// Per-track structured table emitted on parity failure. Sorted by
-    /// `|new_score - old_score|` descending so tiny diffs at the top
-    /// suggest float precision while large diffs at the top point to a
-    /// logic bug. Free triage signal.
-    fn emit_divergence_table(new_scores: &[(i64, f64)], old_scores: &[(i64, f64)]) {
-        let new_lookup: HashMap<i64, f64> = new_scores.iter().copied().collect();
-        let old_lookup: HashMap<i64, f64> = old_scores.iter().copied().collect();
-        let new_full = top_n_ids(new_scores, new_scores.len());
-        let old_full = top_n_ids(old_scores, old_scores.len());
-        let new_rank: HashMap<i64, usize> = new_full
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (*id, i))
-            .collect();
-        let old_rank: HashMap<i64, usize> = old_full
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (*id, i))
-            .collect();
-
-        let mut rows: Vec<(i64, usize, usize, f64, f64)> = new_scores
-            .iter()
-            .map(|(id, new_s)| {
-                let old_s = old_lookup.get(id).copied().unwrap_or(f64::NAN);
-                let nr = *new_rank.get(id).unwrap_or(&usize::MAX);
-                let or = *old_rank.get(id).unwrap_or(&usize::MAX);
-                (*id, or, nr, old_s, *new_s)
-            })
-            .collect();
-        rows.sort_by(|a, b| {
-            (b.4 - b.3)
-                .abs()
-                .partial_cmp(&(a.4 - a.3).abs())
-                .unwrap_or(Ordering::Equal)
-        });
-
-        eprintln!(
-            "{:>8}  {:>8}  {:>8}  {:>10}  {:>11}  {:>11}  {:>13}",
-            "track_id",
-            "old_rank",
-            "new_rank",
-            "rank_delta",
-            "old_score",
-            "new_score",
-            "score_delta"
-        );
-        for (id, or, nr, old_s, new_s) in rows {
-            let rank_delta = (nr as i64) - (or as i64);
-            eprintln!(
-                "{:>8}  {:>8}  {:>8}  {:>10}  {:>11.6}  {:>11.6}  {:>13.9}",
-                id,
-                or,
-                nr,
-                rank_delta,
-                old_s,
-                new_s,
-                new_s - old_s
-            );
-        }
-        // Note: per-signal contribution breakdown is intentionally not
-        // emitted here. If parity fails, the score-delta column above plus
-        // a quick read of `automix_score` against the snapshot is faster
-        // than maintaining a parallel breakdown that itself can drift.
-        let _ = new_lookup;
-    }
-
-    #[test]
-    fn automix_score_parity_top_30() {
-        let fixture = build_fixture();
-        let new_scores = score_with_new_path(&fixture);
-        let old_scores = score_with_old_path(&fixture);
-
-        // Pre-assertion guards: same length, no NaN/Inf on either side.
-        // Catches NaN-from-zero-division or shape mismatches before we
-        // attempt to interpret rankings.
-        assert_eq!(
-            old_scores.len(),
-            new_scores.len(),
-            "score vector lengths differ"
-        );
-        assert!(
-            old_scores.iter().all(|(_, s)| s.is_finite()),
-            "old path produced NaN/Inf"
-        );
-        assert!(
-            new_scores.iter().all(|(_, s)| s.is_finite()),
-            "new path produced NaN/Inf"
-        );
-
-        let n = 30.min(fixture.candidates.len());
-        let new_top = top_n_ids(&new_scores, n);
-        let old_top = top_n_ids(&old_scores, n);
-
-        let tau = kendall_tau_top_n(&new_scores, &old_scores, n);
-        eprintln!("automix parity: kendall_tau_top_{n} = {tau:.6}");
-
-        if new_top != old_top {
-            eprintln!("\nautomix parity divergence (sorted by |score_delta| desc):");
-            emit_divergence_table(&new_scores, &old_scores);
-            panic!("top-{n} ranking diverged.\n  old: {old_top:?}\n  new: {new_top:?}");
-        }
-    }
-
-    // Characterization test. The previous refactor plan got this exactly backwards:
-    // it claimed malformed timestamps incur "maximum recency penalty". They do not.
-    // parse_days_since_last_played returns f64::MAX on parse failure, and the caller
-    // in automix_score only applies a penalty when `days_since < 14.0` (player.rs:1586).
-    // f64::MAX is never < 14.0, so the penalty branch is skipped and the candidate
-    // keeps its base score. This test pins that behavior so a future "cleanup" that
-    // returns 0.0 or 999.0 on error would be caught.
+    // Characterization test: parse_days_since_last_played returns f64::MAX on
+    // parse failure, and the 14-day recency penalty only applies when
+    // days_since < 14.0, so malformed timestamps keep their score. This pins
+    // that behavior so a future cleanup returning 0.0 would be caught.
     #[test]
     fn parse_days_since_last_played_returns_f64_max_on_malformed_input() {
         assert_eq!(parse_days_since_last_played("not a date"), f64::MAX);

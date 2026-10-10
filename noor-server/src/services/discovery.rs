@@ -20,6 +20,9 @@ pub struct DiscoveryCandidateTrack {
     // a discovery-injected stub album collides with the real album on a
     // later sync and the user ends up with two album rows for the same
     // release. Optional because not every seed source includes it.
+    // Filled by providers; no reader since the "Include New" text-search
+    // injection was folded into the Last.fm external lane.
+    #[allow(dead_code)]
     pub album_tidal_id: Option<i64>,
     pub artwork_url: Option<String>,
     pub duration_ms: Option<i64>,

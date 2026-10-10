@@ -52,6 +52,46 @@ fn read_bool_flag(conn: &Connection, key: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// The radio quality flags that new behavior depends on. They shipped off by
+/// default, so fresh installs got the legacy interleave. No UI sets them.
+const QUALITY_FLAGS: [&str; 5] = [
+    "radio_score_normalization_enabled",
+    "radio_confidence_penalty_enabled",
+    "radio_hub_penalty_enabled",
+    "radio_diversity_rerank_enabled",
+    "radio_source_quota_bonus_enabled",
+];
+/// Marks that the quality defaults were applied, so a later manual 'false'
+/// is never overwritten.
+const QUALITY_DEFAULTS_MARKER: &str = "radio_quality_defaults_v2";
+
+/// Turn the radio quality flags on once per install (at startup, after
+/// migrations). Self-terminating: the marker makes every later call a no-op.
+pub fn apply_quality_defaults_once(conn: &Connection) -> Result<()> {
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM server_config WHERE key = ?1)",
+        params![QUALITY_DEFAULTS_MARKER],
+        |row| row.get(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    for key in QUALITY_FLAGS {
+        tx.execute(
+            "INSERT INTO server_config (key, value) VALUES (?1, 'true')
+             ON CONFLICT(key) DO UPDATE SET value = 'true'",
+            params![key],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO server_config (key, value) VALUES (?1, '1')",
+        params![QUALITY_DEFAULTS_MARKER],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn load_radio_flags(conn: &Connection) -> RadioFlags {
     RadioFlags {
         use_legacy_pipeline: read_bool_flag(conn, "radio_use_legacy_pipeline"),
@@ -154,11 +194,7 @@ pub struct RadioProfile {
 impl RadioProfile {
     pub fn from_blend(blend: RadioBlend) -> Self {
         let (library_weight, lastfm_weight, engine_weight) = blend.weights();
-        let creativity = match blend {
-            RadioBlend::Familiar => 0.15,
-            RadioBlend::Mixed => 0.30,
-            RadioBlend::Adventurous => 0.50,
-        };
+        let creativity = blend.creativity();
         // Same-artist / same-album / genre_saturation penalties only fire when
         // diversity_rerank_enabled, so these defaults are inert until then.
         // min_confidence default 0.4 is the fused-edge floor — penalty applies
@@ -310,6 +346,30 @@ mod tests {
     }
 
     #[test]
+    fn quality_defaults_turn_on_once_and_respect_later_choices() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("migrations");
+
+        apply_quality_defaults_once(&conn).expect("apply");
+        let flags = load_radio_flags(&conn);
+        assert!(!flags.use_legacy_pipeline, "the legacy switch stays off");
+        assert!(flags.score_normalization_enabled);
+        assert!(flags.confidence_penalty_enabled);
+        assert!(flags.hub_penalty_enabled);
+        assert!(flags.diversity_rerank_enabled);
+        assert!(flags.source_quota_bonus_enabled);
+
+        // A later deliberate 'false' survives the next startup.
+        conn.execute(
+            "UPDATE server_config SET value = 'false' WHERE key = 'radio_hub_penalty_enabled'",
+            [],
+        )
+        .expect("update");
+        apply_quality_defaults_once(&conn).expect("apply again");
+        assert!(!load_radio_flags(&conn).hub_penalty_enabled);
+    }
+
+    #[test]
     fn flag_round_trips_through_server_config() {
         let conn = Connection::open_in_memory().expect("memory db");
         schema::run_migrations(&conn).expect("migrations");
@@ -327,8 +387,11 @@ mod tests {
     fn profile_from_blend_carries_weights_and_creativity() {
         let p = RadioProfile::from_blend(RadioBlend::Familiar);
         assert_eq!(p.name(), "familiar");
-        assert!((p.library_weight - 0.60).abs() < 1e-9);
-        assert!((p.creativity - 0.15).abs() < 1e-9);
+        assert!((p.library_weight - 0.55).abs() < 1e-9);
+        assert!(
+            p.creativity.abs() < 1e-9,
+            "Familiar stays with the nearest neighbors"
+        );
         let total = p.library_weight + p.lastfm_weight + p.engine_weight;
         assert!((total - 1.0).abs() < 1e-9, "weights sum {}", total);
     }

@@ -568,6 +568,10 @@ fn build_discovery_blend_space(
         why_by_identity.insert(cand.identity.clone(), shaped);
     }
 
+    // "Not for me" applies everywhere suggestions are made.
+    let not_for_me = crate::playback::candidate_gate::NotForMe::load(conn);
+    candidates.retain(|cand| !not_for_me.blocks(cand.track_id, None, &cand.artist_name));
+
     // User filters, seed nodes exempt (they are appended after this point).
     let mut filter_dropped_count = 0usize;
     if !filters.is_noop() {
@@ -1053,6 +1057,9 @@ pub(super) async fn rerank_discovery_space(
                     let Some(action) = ranking::FeedbackAction::parse(&action) else {
                         continue;
                     };
+                    let dsp = queries::get_audio_dsp_features(conn, candidate_track_id)
+                        .ok()
+                        .flatten();
                     taste_rows.push(ranking::FeedbackRow {
                         candidate_track_id,
                         action,
@@ -1061,6 +1068,8 @@ pub(super) async fn rerank_discovery_space(
                             .get(&candidate_track_id)
                             .cloned()
                             .unwrap_or_default(),
+                        energy: dsp.as_ref().and_then(|features| features.energy),
+                        bpm: dsp.as_ref().and_then(|features| features.bpm),
                     });
                 }
             }
@@ -2022,6 +2031,18 @@ pub(super) async fn get_discovery_space(
             );
         }
     }
+
+    // "Not for me" applies everywhere suggestions are made (seed exempt).
+    // External rows carry a TIDAL id in track_id, so only library rows match
+    // by track id.
+    let not_for_me = state_guard
+        .db
+        .with_conn(|conn| Ok(crate::playback::candidate_gate::NotForMe::load(conn)))
+        .unwrap_or_default();
+    space_tracks.retain(|t| {
+        t.track_id == seed_id
+            || !not_for_me.blocks(t.is_in_library.then_some(t.track_id), None, &t.artist_name)
+    });
 
     // -- 3g. User filters (seed exempt) ----------------------------------------
     let mut filter_dropped_count = 0usize;

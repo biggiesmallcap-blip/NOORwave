@@ -75,7 +75,20 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_071,
     MIGRATION_072,
     MIGRATION_073,
+    MIGRATION_074,
 ];
+
+// Global "Not for me" feedback: a track or artist the listener never wants
+// suggested again. Read by the candidate gate for every recommendation source.
+// Runs inside the >= 69 migration transaction: no BEGIN/COMMIT here.
+const MIGRATION_074: &str = r#"
+CREATE TABLE IF NOT EXISTS recommendation_feedback (
+    kind TEXT NOT NULL CHECK (kind IN ('track', 'artist')),
+    entity_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (kind, entity_id)
+);
+"#;
 
 // Video stations: one row per station in a day's lineup, with a stored
 // preview so the Stations tab opens instantly. Runs inside the >= 69

@@ -1,6 +1,6 @@
 use crate::db::models::{AudioDjProfileKey, AudioDspFeatures};
 use crate::db::queries;
-use crate::services::audio_analysis::{CamelotRelation, camelot_relation};
+use crate::services::audio_analysis::{CamelotRelation, camelot_relation, tempo_delta};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::cmp::Ordering;
@@ -53,30 +53,80 @@ struct ScoredCandidate<T> {
     ranked: RankedGeneratedCandidate<T>,
 }
 
+/// Callers hand candidates over best first, so input rank stands in for
+/// relevance: 1.0 for the first, 0.5 for the eleventh.
+const RANK_RELEVANCE_DECAY: f64 = 0.1;
+/// DJ fit nudges relevance instead of replacing it: the raw fit (x0.4 to x3.3)
+/// is tamed the way discovery_ranking tames harmonic fit, so a strong fit can
+/// lift a candidate a few places but never past clearly better matches.
+const DJ_FIT_EXPONENT: f64 = 0.35;
+const DJ_FIT_MIN: f64 = 0.8;
+const DJ_FIT_MAX: f64 = 1.25;
+
+fn rank_relevance(ordinal: usize) -> f64 {
+    1.0 / (1.0 + RANK_RELEVANCE_DECAY * ordinal as f64)
+}
+
+pub(crate) fn dj_fit_multiplier(fit: f64) -> f64 {
+    fit.max(0.0)
+        .powf(DJ_FIT_EXPONENT)
+        .clamp(DJ_FIT_MIN, DJ_FIT_MAX)
+}
+
+/// True when transitions are mixed (crossfade or the DJ engine), the only
+/// time key and tempo fit should touch queue order.
+pub(crate) fn mixing_active(conn: &Connection) -> bool {
+    let crossfade_ms: i64 = conn
+        .query_row(
+            "SELECT COALESCE(crossfade_ms, 0) FROM playback_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    crossfade_ms > 0 || queries::is_dj_engine_enabled(conn).unwrap_or(false)
+}
+
+fn passthrough<T>(candidates: Vec<GeneratedCandidate<T>>) -> Vec<RankedGeneratedCandidate<T>> {
+    candidates
+        .into_iter()
+        .map(|candidate| RankedGeneratedCandidate {
+            item: candidate.item,
+            score: candidate.policy.score_multiplier,
+            reasons: candidate.policy.reasons,
+        })
+        .collect()
+}
+
+/// Order candidates by relevance (input rank) x caller policy, nudged by DJ
+/// fit against the seed only while mixing. Without mixing no DJ facts are
+/// loaded and no DJ reasons are reported.
 pub(crate) fn rank_generated_candidates<T>(
     conn: &Connection,
     seed_track_id: i64,
     candidates: Vec<GeneratedCandidate<T>>,
+    mixing: bool,
 ) -> Result<Vec<RankedGeneratedCandidate<T>>> {
     if candidates.len() <= 1 {
-        return Ok(candidates
-            .into_iter()
-            .map(|candidate| RankedGeneratedCandidate {
-                item: candidate.item,
-                score: candidate.policy.score_multiplier,
-                reasons: candidate.policy.reasons,
-            })
-            .collect());
+        return Ok(passthrough(candidates));
     }
 
-    let seed = load_facts_for_track(conn, seed_track_id)?;
+    let seed = if mixing {
+        Some(load_facts_for_track(conn, seed_track_id)?)
+    } else {
+        None
+    };
     let mut scored = candidates
         .into_iter()
         .enumerate()
         .map(|(ordinal, candidate)| {
-            let facts = load_facts(conn, candidate.track_id, candidate.tidal_id)?;
-            let (score, mut reasons) = score_facts(&seed, &facts);
-            let score = score * candidate.policy.score_multiplier;
+            let mut score = rank_relevance(ordinal) * candidate.policy.score_multiplier;
+            let mut reasons = Vec::new();
+            if let Some(seed) = seed.as_ref() {
+                let facts = load_facts(conn, candidate.track_id, candidate.tidal_id)?;
+                let (fit, fit_reasons) = score_facts(seed, &facts);
+                score *= dj_fit_multiplier(fit);
+                reasons = fit_reasons;
+            }
             reasons.extend(candidate.policy.reasons);
             Ok(ScoredCandidate {
                 ordinal,
@@ -101,20 +151,17 @@ pub(crate) fn rank_generated_candidates<T>(
     Ok(scored.into_iter().map(|entry| entry.ranked).collect())
 }
 
+/// Like `rank_generated_candidates`, but while mixing each pick is scored
+/// against the previous pick instead of the seed, so the run flows track to
+/// track. Callers pass the queue tail as the seed.
 pub(crate) fn rank_generated_candidates_chain<T>(
     conn: &Connection,
     seed_track_id: i64,
     candidates: Vec<GeneratedCandidate<T>>,
+    mixing: bool,
 ) -> Result<Vec<RankedGeneratedCandidate<T>>> {
-    if candidates.len() <= 1 {
-        return Ok(candidates
-            .into_iter()
-            .map(|candidate| RankedGeneratedCandidate {
-                item: candidate.item,
-                score: candidate.policy.score_multiplier,
-                reasons: candidate.policy.reasons,
-            })
-            .collect());
+    if candidates.len() <= 1 || !mixing {
+        return rank_generated_candidates(conn, seed_track_id, candidates, false);
     }
 
     let mut previous = load_facts_for_track(conn, seed_track_id)?;
@@ -128,12 +175,22 @@ pub(crate) fn rank_generated_candidates_chain<T>(
         .collect::<Result<Vec<_>>>()?;
     let mut ranked = Vec::with_capacity(remaining.len());
 
+    let score_of = |previous: &DjQueueFacts,
+                    ordinal: usize,
+                    facts: &DjQueueFacts,
+                    policy: &GeneratedCandidatePolicy| {
+        let (fit, reasons) = score_facts(previous, facts);
+        (
+            rank_relevance(ordinal) * policy.score_multiplier * dj_fit_multiplier(fit),
+            reasons,
+        )
+    };
+
     while !remaining.is_empty() {
         let mut best_index = 0usize;
         let mut best_score = f64::NEG_INFINITY;
         for (idx, (ordinal, _, facts, policy)) in remaining.iter().enumerate() {
-            let (score, _) = score_facts(&previous, facts);
-            let score = score * policy.score_multiplier;
+            let (score, _) = score_of(&previous, *ordinal, facts, policy);
             let score_order = score.partial_cmp(&best_score).unwrap_or(Ordering::Equal);
             let is_better = score_order == Ordering::Greater
                 || (score_order == Ordering::Equal && *ordinal < remaining[best_index].0);
@@ -143,9 +200,8 @@ pub(crate) fn rank_generated_candidates_chain<T>(
             }
         }
 
-        let (_ordinal, item, facts, policy) = remaining.remove(best_index);
-        let (score, mut reasons) = score_facts(&previous, &facts);
-        let score = score * policy.score_multiplier;
+        let (ordinal, item, facts, policy) = remaining.remove(best_index);
+        let (score, mut reasons) = score_of(&previous, ordinal, &facts, &policy);
         reasons.extend(policy.reasons);
         previous = facts;
         ranked.push(RankedGeneratedCandidate {
@@ -373,23 +429,10 @@ enum TempoFit {
 }
 
 fn tempo_fit(seed_bpm: f64, candidate_bpm: f64) -> TempoFit {
-    if !seed_bpm.is_finite()
-        || !candidate_bpm.is_finite()
-        || seed_bpm <= 0.0
-        || candidate_bpm <= 0.0
-    {
-        return TempoFit::Wide;
-    }
-    let best_ratio_delta = [0.5, 1.0, 2.0]
-        .into_iter()
-        .map(|family| ((candidate_bpm * family) / seed_bpm - 1.0).abs())
-        .fold(f64::INFINITY, f64::min);
-    if best_ratio_delta <= 0.03 {
-        TempoFit::InsideNudge
-    } else if best_ratio_delta <= 0.08 {
-        TempoFit::Near
-    } else {
-        TempoFit::Wide
+    match tempo_delta(Some(seed_bpm), Some(candidate_bpm)) {
+        Some(delta) if delta <= 0.03 => TempoFit::InsideNudge,
+        Some(delta) if delta <= 0.08 => TempoFit::Near,
+        _ => TempoFit::Wide,
     }
 }
 
@@ -493,6 +536,7 @@ mod tests {
                     policy: Default::default(),
                 },
             ],
+            true,
         )
         .expect("rank");
 
@@ -557,6 +601,7 @@ mod tests {
                     policy: Default::default(),
                 },
             ],
+            true,
         )
         .expect("rank");
 
@@ -628,6 +673,7 @@ mod tests {
                     policy: Default::default(),
                 },
             ],
+            true,
         )
         .expect("rank");
 
@@ -663,6 +709,7 @@ mod tests {
                     policy: Default::default(),
                 },
             ],
+            true,
         )
         .expect("rank");
 
@@ -670,5 +717,90 @@ mod tests {
             ranked.into_iter().map(|row| row.item).collect::<Vec<_>>(),
             vec!["first", "second", "third"]
         );
+    }
+
+    fn dsp_conn(rows: &[(i64, f64, &str)]) -> Connection {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "
+            CREATE TABLE tracks (id INTEGER PRIMARY KEY, tidal_id INTEGER);
+            CREATE TABLE audio_dsp_features (
+                track_id INTEGER PRIMARY KEY,
+                bpm REAL,
+                key_signature TEXT,
+                camelot_key TEXT,
+                loudness_lufs REAL,
+                energy REAL,
+                danceability REAL,
+                beat_strength REAL,
+                spectral_centroid REAL,
+                stereo_width REAL,
+                is_instrumental INTEGER NOT NULL DEFAULT 0,
+                analysis_source TEXT NOT NULL DEFAULT 'test',
+                analysis_offset_ms INTEGER NOT NULL DEFAULT 0,
+                samples_analyzed INTEGER,
+                analyzed_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+                analysis_version TEXT NOT NULL DEFAULT 'test'
+            );
+            ",
+        )
+        .expect("schema");
+        for (track_id, bpm, key) in rows {
+            conn.execute(
+                "INSERT INTO audio_dsp_features (track_id, bpm, camelot_key) VALUES (?1, ?2, ?3)",
+                params![track_id, bpm, key],
+            )
+            .expect("features");
+        }
+        conn
+    }
+
+    fn candidate(item: &'static str, track_id: i64) -> GeneratedCandidate<&'static str> {
+        GeneratedCandidate {
+            item,
+            track_id: Some(track_id),
+            tidal_id: None,
+            policy: Default::default(),
+        }
+    }
+
+    #[test]
+    fn without_mixing_relevance_order_stands_and_no_dj_reasons() {
+        // Track 3 clashes with the seed, track 2 fits it perfectly; with
+        // mixing off the caller's relevance order wins anyway.
+        let conn = dsp_conn(&[(1, 124.0, "8A"), (2, 125.0, "8A"), (3, 145.0, "3B")]);
+        let ranked = rank_generated_candidates(
+            &conn,
+            1,
+            vec![candidate("clash", 3), candidate("fit", 2)],
+            false,
+        )
+        .expect("rank");
+        assert_eq!(
+            ranked.iter().map(|row| row.item).collect::<Vec<_>>(),
+            vec!["clash", "fit"]
+        );
+        assert!(ranked.iter().all(|row| row.reasons.is_empty()));
+    }
+
+    #[test]
+    fn while_mixing_a_strong_fit_moves_up_only_a_few_places() {
+        // Rank 0 clashes with the seed; rank 10 is a perfect fit; the rest
+        // have no analysis (neutral). The fit lifts rank 10 but cannot take
+        // it past clearly more relevant candidates.
+        let conn = dsp_conn(&[(1, 124.0, "8A"), (100, 145.0, "3B"), (110, 124.0, "8A")]);
+        let items: [&'static str; 11] = [
+            "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10",
+        ];
+        let candidates = items
+            .iter()
+            .enumerate()
+            .map(|(rank, item)| candidate(item, 100 + rank as i64))
+            .collect::<Vec<_>>();
+        let ranked = rank_generated_candidates(&conn, 1, candidates, true).expect("rank");
+        let position = |item: &str| ranked.iter().position(|row| row.item == item).unwrap();
+        assert!(position("r10") < 10, "the fit should help");
+        assert!(position("r10") >= 5, "but not jump the top of the list");
+        assert!(position("r0") <= 2, "a clash costs rank 0 at most a little");
     }
 }
