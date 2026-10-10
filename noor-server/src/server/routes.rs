@@ -1,3 +1,7 @@
+use super::transport::generation::{
+    bump as bump_playback_generation, current as current_playback_generation,
+    is_current as playback_generation_is_current,
+};
 use crate::db::queries;
 use crate::metadata::discogs::DiscogsClient;
 use crate::metadata::lastfm::LastFmClient;
@@ -9264,25 +9268,6 @@ async fn current_playback_runtime(
         .as_ref()
         .map(|runtime| runtime.handle.clone())
         .filter(playback_runtime::PlaybackRuntimeHandle::is_healthy)
-}
-
-fn current_playback_generation(state: &crate::AppState) -> u64 {
-    state
-        .playback_generation
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
-async fn bump_playback_generation(state: &SharedState) -> u64 {
-    let state_guard = state.read().await;
-    state_guard
-        .playback_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        + 1
-}
-
-async fn playback_generation_is_current(state: &SharedState, generation: u64) -> bool {
-    let state_guard = state.read().await;
-    current_playback_generation(&state_guard) == generation
 }
 
 async fn current_playback_snapshot_json(
