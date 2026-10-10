@@ -2792,6 +2792,12 @@ async fn radio_song(
         "radio_song",
     )
     .await?;
+    remember_radio_seed(
+        &db,
+        crate::server::radio_continuation::RadioSeedKind::Track,
+        payload.seed_track_id,
+        blend,
+    );
     let snapshot = start_first_radio_queue_item(&state).await?;
     let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
     body["first_playable"] = first_playable;
@@ -2818,7 +2824,7 @@ struct RadioStartRequest {
 
 /// Seed for the TIDAL mix fallback, by local id.
 #[derive(Clone, Copy)]
-enum TidalMixSeed {
+pub(crate) enum TidalMixSeed {
     Track(i64),
     Artist(i64),
 }
@@ -2827,7 +2833,7 @@ enum TidalMixSeed {
 /// too little evidence of its own (never played, no genres or audio analysis,
 /// no Last.fm match). Fill it from TIDAL's track or artist mix for the seed.
 /// Best effort: no TIDAL session or no mix leaves the radio as it was.
-async fn add_tidal_mix_fallback(
+pub(crate) async fn add_tidal_mix_fallback(
     state: &SharedState,
     db: &crate::db::Database,
     seed: TidalMixSeed,
@@ -2907,6 +2913,25 @@ async fn add_tidal_mix_fallback(
         "radio: seed had too little evidence; filled from TIDAL mix"
     );
     tracks.extend(added);
+}
+
+/// Remember which radio built the queue so topping it up continues that radio
+/// (server::radio_continuation). Best effort: a failure only means automix
+/// carries the queue on instead.
+fn remember_radio_seed(
+    db: &crate::db::Database,
+    kind: crate::server::radio_continuation::RadioSeedKind,
+    id: i64,
+    blend: crate::services::radio::RadioBlend,
+) {
+    let seed = crate::server::radio_continuation::RadioSeed { kind, id, blend };
+    if let Err(error) = db.with_conn(|conn| {
+        Ok(crate::server::radio_continuation::remember_seed(
+            conn, seed,
+        )?)
+    }) {
+        tracing::warn!(%error, "radio: could not remember the radio seed");
+    }
 }
 
 pub(super) async fn build_radio_queue_and_spawn_resolvers(
@@ -3304,12 +3329,13 @@ async fn radio_start(
     .await;
 
     // Build queue atomically and collect pending row IDs for background tasks.
+    let seed_track_id = payload.seed_track_id;
     let build = db
         .with_conn(move |conn| {
             Ok(
                 crate::server::radio_pipeline::build_radio_queue_from_candidates(
                     conn,
-                    payload.seed_track_id,
+                    seed_track_id,
                     radio_queue.tracks,
                 )?,
             )
@@ -3321,6 +3347,12 @@ async fn radio_start(
                 Json(json!({ "error": "failed to build queue" })),
             )
         })?;
+    remember_radio_seed(
+        &db,
+        crate::server::radio_continuation::RadioSeedKind::Track,
+        seed_track_id,
+        blend,
+    );
     let first_item = build.first_item;
     let pending_item_ids = build.pending_item_ids;
     let pending_count = pending_item_ids.len();
@@ -3453,6 +3485,12 @@ async fn radio_album(
         "radio_album",
     )
     .await?;
+    remember_radio_seed(
+        &db,
+        crate::server::radio_continuation::RadioSeedKind::Album,
+        payload.seed_album_id,
+        blend,
+    );
     let snapshot = start_first_radio_queue_item(&state).await?;
     let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
     body["first_playable"] = first_playable;
@@ -3523,6 +3561,12 @@ async fn radio_artist(
         "radio_artist",
     )
     .await?;
+    remember_radio_seed(
+        &db,
+        crate::server::radio_continuation::RadioSeedKind::Artist,
+        payload.seed_artist_id,
+        blend,
+    );
     let snapshot = start_first_radio_queue_item(&state).await?;
     let mut body = serde_json::to_value(queue).unwrap_or(json!({}));
     body["first_playable"] = first_playable;
@@ -7108,14 +7152,15 @@ async fn set_playback_automix(
             if let Some(ms) = payload.crossfade_ms {
                 player::set_crossfade_ms(conn, ms)?;
             }
-            if let Some(dn) = payload.discover_new {
+            // "Include new" is the one switch for picks from outside the
+            // library; allow_external from older clients folds into it
+            // (migration 075 merged the two).
+            if let Some(dn) = payload.discover_new.or(payload.allow_external) {
                 automix::set_automix_discover_new(conn, dn)?;
+                automix::set_automix_allow_external(conn, false)?;
             }
             if let Some(use_learning) = payload.use_learning {
                 automix::set_automix_use_learning(conn, use_learning)?;
-            }
-            if let Some(allow_external) = payload.allow_external {
-                automix::set_automix_allow_external(conn, allow_external)?;
             }
             automix::set_automix_enabled(conn, payload.enabled)
         })
@@ -7282,6 +7327,7 @@ fn first_queue_item_id_for_track(
 
 fn preserve_only_queue_item(conn: &rusqlite::Connection, queue_item_id: i64) -> anyhow::Result<()> {
     conn.execute("DELETE FROM queue WHERE id != ?1", params![queue_item_id])?;
+    crate::server::radio_continuation::forget_seed(conn);
     conn.execute(
         "UPDATE playback_state SET current_queue_item_id = ?1 WHERE id = 1",
         params![queue_item_id],

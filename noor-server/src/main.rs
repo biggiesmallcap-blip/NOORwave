@@ -800,6 +800,7 @@ async fn main() -> Result<()> {
     services::artwork_cache::spawn(state.clone());
     services::audio_analysis::queue_prescanner::spawn(state.clone());
     info!("Queue DSP prescanner spawned");
+    server::radio_continuation::spawn(state.clone());
     services::scrobbling::spawn_periodic_drain(state.clone());
     services::scrobbling::spawn_drain(state.clone());
     info!("Scrobble outbox drain spawned");

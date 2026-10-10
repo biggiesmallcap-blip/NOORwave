@@ -8,16 +8,12 @@
 	import {
 		automixEnabled,
 		automixDiscoverNew,
-		automixUseLearning,
-		automixAllowExternal,
 		shuffleMode,
 		currentTrack,
 		currentTrackFeatures,
 		playbackQueue,
 		setPlayerShuffleMode,
 		setPlayerDiscoverNew,
-		setPlayerAutomixUseLearning,
-		setPlayerAutomixAllowExternal,
 		refreshPlaybackRuntime,
 		currentStreamDisplay,
 		refreshPlaybackState,
@@ -139,14 +135,6 @@
 
 	function toggleDiscoverNew() {
 		return runSaving(() => setPlayerDiscoverNew(!$automixDiscoverNew));
-	}
-
-	function toggleUseLearning() {
-		return runSaving(() => setPlayerAutomixUseLearning(!$automixUseLearning));
-	}
-
-	function toggleAllowExternal() {
-		return runSaving(() => setPlayerAutomixAllowExternal(!$automixAllowExternal));
 	}
 
 	const shuffleModes = [
@@ -380,9 +368,7 @@
 		<div class="session-row">
 			<span class="row-label">Queue source</span>
 			<div class="chips">
-				<FilterChip pressed={$automixDiscoverNew} onclick={toggleDiscoverNew} disabled={saving} title="Mix in tracks from outside your library that Last.fm links to what is playing.">Include new</FilterChip>
-				<FilterChip pressed={$automixUseLearning} onclick={toggleUseLearning} disabled={saving} title="Use listening signals.">Learned radio</FilterChip>
-				<FilterChip pressed={$automixAllowExternal} onclick={toggleAllowExternal} disabled={saving} title="Same Last.fm lane as Include new: linked tracks from outside your library.">External picks</FilterChip>
+				<FilterChip pressed={$automixDiscoverNew} onclick={toggleDiscoverNew} disabled={saving} title="Mix in tracks from outside your library that Last.fm links to what is playing; more of them when your library knows little about it. Radio stations keep to their own picks.">Include new</FilterChip>
 			</div>
 		</div>
 		<div class="session-row">

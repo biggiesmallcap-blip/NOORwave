@@ -766,6 +766,82 @@ fn is_provider_rate_limit_error(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Look up Last.fm matches for one track now (similar artists when the track
+/// itself has none) and store them as sightings, so automix's external lane
+/// has picks for a track the periodic refresh never reached. Skipped while
+/// the track still has unexpired Last.fm sightings.
+pub async fn refresh_lastfm_sightings_for_track(
+    db: &Database,
+    lastfm: &crate::metadata::lastfm::LastFmClient,
+    track_id: i64,
+) -> Result<usize> {
+    let seed = db.with_conn(|conn| {
+        let fresh: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM external_track_candidate_sightings
+             WHERE seed_track_id = ?1 AND source = 'lastfm_similar'
+               AND expires_at > datetime('now'))",
+            [track_id],
+            |row| row.get(0),
+        )?;
+        if fresh {
+            return Ok(None);
+        }
+        Ok(conn
+            .query_row(
+                "SELECT t.title, a.name FROM tracks t
+                 LEFT JOIN artists a ON a.id = t.artist_id
+                 WHERE t.id = ?1",
+                [track_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?)
+    })?;
+    let Some((title, Some(artist))) = seed else {
+        return Ok(0);
+    };
+    let rows = lastfm
+        .track_get_similar_with_artist_fallback(
+            &artist,
+            &title,
+            EXTERNAL_REFRESH_LASTFM_ROWS_PER_SEED,
+        )
+        .await?
+        .into_iter()
+        .map(ExternalLastfmCandidate::from)
+        .collect::<Vec<_>>();
+    let seed_row = EmbeddingTrackRow {
+        track_id,
+        title,
+        artist_name: Some(artist),
+        album_title: None,
+        duration_ms: None,
+        best_quality: None,
+        source: String::new(),
+        play_count: 0,
+        is_favorite: false,
+        playlist_memberships: 0,
+        genre_paths: Vec::new(),
+        bpm: None,
+        energy: None,
+        camelot_key: None,
+        danceability: None,
+        beat_strength: None,
+        loudness_lufs: None,
+    };
+    let by_seed = HashMap::from([(track_id, rows)]);
+    let report = db.with_conn(|conn| {
+        persist_external_provider_refresh(
+            conn,
+            std::slice::from_ref(&seed_row),
+            &by_seed,
+            &[],
+            &HashMap::new(),
+            chrono::Utc::now().naive_utc(),
+        )
+    })?;
+    Ok(report.lastfm_sightings_upserted)
+}
+
 pub fn persist_external_provider_refresh(
     conn: &rusqlite::Connection,
     seeds: &[EmbeddingTrackRow],

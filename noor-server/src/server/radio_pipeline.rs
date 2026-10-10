@@ -63,6 +63,10 @@ pub fn build_radio_queue_from_candidates_with_seed(
         ));
     }
 
+    // A new queue: whichever radio built the old one is over. Radio routes
+    // remember their own seed after this.
+    crate::server::radio_continuation::forget_seed(conn);
+
     let tx = conn.unchecked_transaction()?;
 
     tx.execute("DELETE FROM queue", [])?;
@@ -150,6 +154,7 @@ pub fn replace_queue_with_ordered_candidates(
         ));
     }
     let tx = conn.unchecked_transaction()?;
+    crate::server::radio_continuation::forget_seed(&tx);
     tx.execute("DELETE FROM queue", [])?;
 
     let mut pending_item_ids = Vec::new();

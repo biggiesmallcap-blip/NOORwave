@@ -435,6 +435,7 @@ pub fn replace_queue_with_reasons(
 
 pub fn clear_queue(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM queue", [])?;
+    crate::server::radio_continuation::forget_seed(conn);
     Ok(())
 }
 
