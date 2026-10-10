@@ -22,7 +22,7 @@ describe('TIDAL mix link contracts', () => {
 	});
 
 	test('TIDAL mix track endpoint includes album ids for now-playing links', () => {
-		const routes = readFileSync('../noor-server/src/server/routes.rs', 'utf8');
+		const routes = readFileSync('../noor-server/src/server/routes/tidal_catalog_routes.rs', 'utf8');
 		const mixRoute = tidalMixRouteSource();
 
 		expect(routes).toContain('"artist_tidal_id": t.artist.id');
@@ -33,7 +33,7 @@ describe('TIDAL mix link contracts', () => {
 	test('TIDAL mix playback preserves local liked state when available', () => {
 		const client = readFileSync('src/lib/api/client.ts', 'utf8');
 		const player = readFileSync('src/lib/stores/player.ts', 'utf8');
-		const routes = readFileSync('../noor-server/src/server/routes.rs', 'utf8');
+		const routes = readFileSync('../noor-server/src/server/routes/tidal_catalog_routes.rs', 'utf8');
 		const mixRoute = tidalMixRouteSource();
 
 		expect(client).toContain('is_favorite?: boolean');
