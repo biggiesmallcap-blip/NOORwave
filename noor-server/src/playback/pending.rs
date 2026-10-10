@@ -119,20 +119,7 @@ pub fn resolved_track_admitted(
     queue_item_id: i64,
     local_track_id: i64,
 ) -> Result<bool> {
-    let source: Option<String> = conn
-        .query_row(
-            "SELECT source FROM queue WHERE id = ?1",
-            params![queue_item_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
-    let recommended = source.as_deref().is_some_and(|source| {
-        source.starts_with("radio")
-            || source.starts_with("automix")
-            || source.starts_with("discover")
-    });
-    if !recommended {
+    if !is_recommended(conn, queue_item_id)? {
         return Ok(true);
     }
     let Some(track) = crate::playback::queue::get_track_by_id(conn, local_track_id)? else {
@@ -142,6 +129,34 @@ pub fn resolved_track_admitted(
     let gate =
         crate::playback::candidate_gate::CandidateGate::load(conn, &items, Some(queue_item_id));
     Ok(gate.allows_track(&track))
+}
+
+/// Whether a queue row came from a recommender (radio, automix, discovery)
+/// rather than from the listener.
+fn is_recommended(conn: &Connection, queue_item_id: i64) -> Result<bool> {
+    let source: Option<String> = conn
+        .query_row(
+            "SELECT source FROM queue WHERE id = ?1",
+            params![queue_item_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(source.as_deref().is_some_and(|source| {
+        source.starts_with("radio")
+            || source.starts_with("automix")
+            || source.starts_with("discover")
+    }))
+}
+
+/// Drop a recommended pending row that has no TIDAL match. Left in place it
+/// would show "Resolving on TIDAL..." with no resolver working on it. Rows the
+/// listener queued stay so play time can retry them.
+pub fn drop_unmatched(conn: &Connection, queue_item_id: i64) -> Result<bool> {
+    if !is_recommended(conn, queue_item_id)? {
+        return Ok(false);
+    }
+    drop_rejected(conn, queue_item_id)
 }
 
 /// Drop a pending row the gate rejected after resolution. When playback has
@@ -386,6 +401,33 @@ mod tests {
         assert!(drop_rejected(&conn, 2).expect("drop"));
         // A row the listener queued is never second-guessed.
         assert!(resolved_track_admitted(&conn, 3, track_id).expect("gate"));
+    }
+
+    #[test]
+    fn unmatched_recommendation_is_dropped_but_listener_row_stays() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title, pending_at)
+             VALUES (1, NULL, 0, 'radio_pending', 'Artist', 'Track', datetime('now')),
+                    (2, NULL, 1, 'user', 'Artist', 'Track', datetime('now'))",
+            [],
+        )
+        .expect("pending rows");
+
+        // No TIDAL match: a radio row is dropped instead of showing
+        // "Resolving on TIDAL..." forever.
+        assert!(drop_unmatched(&conn, 1).expect("radio row"));
+        assert!(!drop_unmatched(&conn, 1).expect("already gone"));
+        // A row the listener queued stays for play-time retry.
+        assert!(!drop_unmatched(&conn, 2).expect("listener row"));
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM queue ORDER BY position")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, vec![2]);
     }
 
     #[test]

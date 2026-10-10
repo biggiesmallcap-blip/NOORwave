@@ -16,6 +16,8 @@ export interface ContextMenuState {
 	closing: boolean;
 	x: number;
 	y: number;
+	/** Bottom edge to use when the menu flips above its anchor (defaults to y). */
+	flipY?: number;
 	items: MenuItem[];
 	title?: string;
 }
@@ -72,6 +74,7 @@ export function openMenuAtElement(el: HTMLElement, items: MenuItem[], title?: st
 		closing: false,
 		x: rect.right,
 		y: rect.bottom + 4,
+		flipY: rect.top - 4,
 		items,
 		title
 	});

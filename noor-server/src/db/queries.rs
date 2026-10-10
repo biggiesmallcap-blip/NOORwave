@@ -5260,8 +5260,10 @@ pub const EMBEDDING_MODELS_KEPT: usize = 1;
 /// Rows deleted per statement when pruning. A single unbounded DELETE over the
 /// retired models is a multi-GB WAL write and minutes of exclusive lock on a
 /// real library (measured: 16M rows, 3.7GB WAL and still going), which is not
-/// something a background repair may do to a running app.
-const NEIGHBOR_PRUNE_BATCH: usize = 20_000;
+/// something a background repair may do to a running app. Each batch also holds
+/// the shared connection: 20k rows held it for about a second, which made
+/// volume and transport controls lag, so batches stay small.
+const NEIGHBOR_PRUNE_BATCH: usize = 2_000;
 
 /// Make sure the prune can seek by model instead of scanning.
 ///
@@ -5750,42 +5752,66 @@ pub fn replace_track_neighbors(
         "DELETE FROM track_neighbors WHERE model_id = ?1",
         params![model_id],
     )?;
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO track_neighbors
-             (track_id, neighbor_track_id, model_id, rank, score,
-              behavioral_score, audio_score, metadata_score, reason_json, primary_reason,
-              confidence, support_count, support_transition, support_colisten, support_structure,
-              support_metadata, candidate_in_degree, candidate_in_degree_percentile,
-              play_count_seed, play_count_candidate)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-        )?;
-        for n in neighbors {
-            stmt.execute(params![
-                n.track_id,
-                n.neighbor_track_id,
-                model_id,
-                n.rank,
-                n.score,
-                n.behavioral_score,
-                n.audio_score,
-                n.metadata_score,
-                n.reason_json,
-                n.primary_reason,
-                n.confidence,
-                n.support_count,
-                n.support_transition,
-                n.support_colisten,
-                n.support_structure,
-                n.support_metadata,
-                n.candidate_in_degree,
-                n.candidate_in_degree_percentile,
-                n.play_count_seed,
-                n.play_count_candidate,
-            ])?;
-        }
-    }
+    insert_neighbor_rows(&tx, model_id, neighbors)?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Add neighbour rows to a model without clearing it, in one short
+/// transaction. Training writes a multi-million-row graph as
+/// `replace_track_neighbors` (first chunk) plus these appends, releasing the
+/// shared connection between chunks so playback and requests keep running.
+/// The model is still inactive while it fills, so readers never see it half
+/// written.
+pub fn append_track_neighbors(
+    conn: &Connection,
+    model_id: i64,
+    neighbors: &[NeighborWriteRow],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    insert_neighbor_rows(&tx, model_id, neighbors)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_neighbor_rows(
+    conn: &Connection,
+    model_id: i64,
+    neighbors: &[NeighborWriteRow],
+) -> Result<()> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO track_neighbors
+         (track_id, neighbor_track_id, model_id, rank, score,
+          behavioral_score, audio_score, metadata_score, reason_json, primary_reason,
+          confidence, support_count, support_transition, support_colisten, support_structure,
+          support_metadata, candidate_in_degree, candidate_in_degree_percentile,
+          play_count_seed, play_count_candidate)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+    )?;
+    for n in neighbors {
+        stmt.execute(params![
+            n.track_id,
+            n.neighbor_track_id,
+            model_id,
+            n.rank,
+            n.score,
+            n.behavioral_score,
+            n.audio_score,
+            n.metadata_score,
+            n.reason_json,
+            n.primary_reason,
+            n.confidence,
+            n.support_count,
+            n.support_transition,
+            n.support_colisten,
+            n.support_structure,
+            n.support_metadata,
+            n.candidate_in_degree,
+            n.candidate_in_degree_percentile,
+            n.play_count_seed,
+            n.play_count_candidate,
+        ])?;
+    }
     Ok(())
 }
 
@@ -10418,6 +10444,26 @@ mod tests {
         assert_eq!(grouped.get(&1).unwrap()[0].support_transition, 2.0);
         assert_eq!(grouped.get(&2).unwrap()[0].track_id, 4);
         assert_eq!(grouped.get(&2).unwrap()[0].support_transition, 3.0);
+
+        // Training writes the graph in chunks: replace with the first chunk,
+        // then append the rest without touching what is already there.
+        append_track_neighbors(&conn, model.id, &[mk(1, 4, 2, 1.0)]).expect("append chunk");
+        let grouped =
+            get_track_neighbors_for_seeds(&conn, model.id, &[1, 2], 10).expect("after append");
+        let seed_a: Vec<i64> = grouped
+            .get(&1)
+            .unwrap()
+            .iter()
+            .map(|n| n.track_id)
+            .collect();
+        assert_eq!(seed_a, vec![3, 4]);
+        assert_eq!(grouped.get(&2).unwrap().len(), 1);
+
+        replace_track_neighbors(&conn, model.id, &[mk(2, 3, 1, 1.0)]).expect("replace again");
+        let grouped =
+            get_track_neighbors_for_seeds(&conn, model.id, &[1, 2], 10).expect("after replace");
+        assert!(!grouped.contains_key(&1));
+        assert_eq!(grouped.get(&2).unwrap()[0].track_id, 3);
     }
 
     #[test]

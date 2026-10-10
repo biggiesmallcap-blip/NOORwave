@@ -6,22 +6,41 @@
 		menuIconForDisplay,
 		type MenuItem
 	} from '$lib/stores/context_menu';
+	import { placeAxis } from './context_menu_placement';
 
 	let menuEl = $state<HTMLDivElement | null>(null);
 	let openSubmenu = $state<number | null>(null);
 
-	// Derived position keeps the menu inside the viewport.
+	// Native-menu placement (see context_menu_placement.ts). The measured size
+	// is observed so an expanding submenu re-places the menu instead of
+	// running off the bottom of the window.
 	const MENU_W = 240;
 	const MENU_H_ESTIMATE = 480;
 
+	let menuSize = $state({ w: MENU_W, h: MENU_H_ESTIMATE });
+	// Side chosen when a submenu was toggled, keyed by the open menu's items so
+	// a fresh menu places itself from scratch.
+	let placementLock = $state.raw<{ items: MenuItem[]; below: boolean; right: boolean } | null>(null);
+
+	$effect(() => {
+		const el = menuEl;
+		if (!el) return;
+		const observer = new ResizeObserver(() => {
+			menuSize = { w: el.offsetWidth, h: el.offsetHeight };
+		});
+		observer.observe(el);
+		return () => observer.disconnect();
+	});
+
 	let position = $derived.by(() => {
-		if (!$contextMenu.open) return { left: 0, top: 0 };
+		if (!$contextMenu.open) return { left: 0, top: 0, below: true, right: true };
 		const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
 		const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
-		const menuHeight = menuEl?.offsetHeight ?? MENU_H_ESTIMATE;
-		const left = Math.min($contextMenu.x, vw - MENU_W - 8);
-		const top = Math.min($contextMenu.y, vh - menuHeight - 8);
-		return { left: Math.max(8, left), top: Math.max(8, top) };
+		const { x, y, flipY, items } = $contextMenu;
+		const lock = placementLock?.items === items ? placementLock : null;
+		const horizontal = placeAxis(x, x, menuSize.w, vw, lock?.right);
+		const vertical = placeAxis(y, flipY ?? y, menuSize.h, vh, lock?.below);
+		return { left: horizontal.pos, top: vertical.pos, below: vertical.after, right: horizontal.after };
 	});
 
 	$effect(() => {
@@ -70,6 +89,7 @@
 	async function activate(item: MenuItem, index: number) {
 		if (item.disabled) return;
 		if (item.submenu && item.submenu.length > 0) {
+			placementLock = { items: $contextMenu.items, below: position.below, right: position.right };
 			openSubmenu = openSubmenu === index ? null : index;
 			return;
 		}
@@ -283,7 +303,7 @@
 	}
 
 	.context-menu-label {
-		flex: 1;
+		flex: 1 1 auto;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -293,8 +313,17 @@
 	.context-menu-caret,
 	.context-menu-hint {
 		margin-left: 8px;
+		white-space: nowrap;
 		font-size: var(--font-size-xs);
 		color: var(--text-tertiary, rgba(255, 255, 255, 0.45));
+	}
+
+	/* The hint gives way first so the label is never ellipsized for it. */
+	.context-menu-hint {
+		flex-shrink: 100;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.context-menu-caret {

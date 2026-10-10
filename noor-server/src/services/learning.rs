@@ -30,6 +30,11 @@ use tokio::sync::mpsc;
 pub const SAVING_STAGE: &str = "saving";
 
 const MODEL_FAMILY: &str = queries::DISCOVERY_ENGINE_V2_FAMILY;
+/// Neighbour rows per write while saving a trained model. Inserts measure about
+/// 30k rows/sec, so one chunk holds the shared connection for well under 100 ms.
+const NEIGHBOR_WRITE_CHUNK: usize = 2_000;
+/// Gap between neighbour chunks so waiting requests get the connection.
+const NEIGHBOR_WRITE_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
 /// Bump when a trainer change makes existing models wrong, not just older.
 /// Installs whose active model predates it retrain once in the background
 /// (services::discovery_retrain), and the activation gate lets the new model
@@ -2013,6 +2018,11 @@ pub async fn start_training(
     if fail_training_on_err!(bail_if_cancelled("neighbors")) {
         return Ok(());
     }
+    // A retrain writes millions of rows. Done in one call it held the shared
+    // connection for over a minute and froze playback controls, so write in
+    // short chunks and let other callers in between them.
+    let mut chunks = neighbors.chunks(NEIGHBOR_WRITE_CHUNK);
+    let first_chunk = chunks.next().unwrap_or(&[]);
     fail_training_on_err!(db.with_conn(|conn| {
         queries::update_training_run_progress(
             conn,
@@ -2023,7 +2033,18 @@ pub async fn start_training(
             None,
             0,
         )?;
-        queries::replace_track_neighbors(conn, model.id, &neighbors)?;
+        queries::replace_track_neighbors(conn, model.id, first_chunk)
+    }));
+    for chunk in chunks {
+        tokio::time::sleep(NEIGHBOR_WRITE_PAUSE).await;
+        if fail_training_on_err!(bail_if_cancelled("neighbors")) {
+            return Ok(());
+        }
+        fail_training_on_err!(
+            db.with_conn(|conn| queries::append_track_neighbors(conn, model.id, chunk))
+        );
+    }
+    fail_training_on_err!(db.with_conn(|conn| {
         persist_external_neighbors(conn, model.id, &output.external_neighbors)
     }));
 

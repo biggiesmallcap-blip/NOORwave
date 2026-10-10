@@ -5869,13 +5869,21 @@ async fn resolve_pending_row(
     let (score, metadata) = match resolved {
         Some(p) => p,
         None => {
-            tracing::debug!(
+            let dropped = db
+                .with_conn(move |conn| pending::drop_unmatched(conn, queue_item_id))
+                .unwrap_or(false);
+            tracing::info!(
                 queue_item_id,
                 artist = %pending_artist,
                 title = %pending_title,
-                "background resolver: no match above threshold"
+                dropped,
+                "background resolver: no TIDAL match above threshold"
             );
-            release(&db, queue_item_id);
+            if dropped {
+                let _ = event_tx.send(AppEvent::QueueUpdated);
+            } else {
+                release(&db, queue_item_id);
+            }
             return false;
         }
     };
