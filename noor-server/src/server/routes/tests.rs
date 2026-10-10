@@ -8129,6 +8129,79 @@ async fn audio_analysis_start_valid_preview_still_requires_actor() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+async fn audio_analysis_status_running(app: &Router) -> bool {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/library/analyze/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    body["running"]
+        .as_bool()
+        .expect("status reports a running flag")
+}
+
+#[tokio::test]
+async fn audio_analysis_local_scan_of_unusable_path_does_not_stay_running() {
+    let scratch = std::env::temp_dir().join(format!(
+        "noor-analysis-path-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let not_a_dir = scratch.join("track.flac");
+    std::fs::write(&not_a_dir, b"not a directory").unwrap();
+    let missing = scratch.join("missing-library");
+
+    for path in [missing, not_a_dir] {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = fresh_test_state(fresh_migrated_db());
+        state.analysis_tx = Some(tx);
+        let app = api_routes(Arc::new(tokio::sync::RwLock::new(state)));
+
+        let body = serde_json::json!({ "mode": "local", "local_path": path }).to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/analyze/audio-features")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "path: {path:?}");
+
+        // The worker rejects the path and exits; status must stop saying running.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while audio_analysis_status_running(&app).await {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "analysis still reported running after its worker exited, path: {path:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 #[tokio::test]
 async fn lastfm_enrichment_rejects_unknown_mode_before_credentials() {
     let app = build_test_app().await;

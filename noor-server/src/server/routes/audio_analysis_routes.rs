@@ -61,6 +61,9 @@ pub(super) async fn start_audio_analysis(
 
     let mode_for_spawn = mode.clone();
     tokio::spawn(async move {
+        // Owned by the worker so every exit (rejected path, finished scan,
+        // panic) clears the flag; status must not report a dead worker as running.
+        let _running = AudioAnalysisRunningGuard(running);
         match mode_for_spawn.as_str() {
             "preview" => {
                 scanner::run_preview_scan(state, tx, cancel).await;
@@ -82,10 +85,18 @@ pub(super) async fn start_audio_analysis(
             }
             _ => {}
         }
-        running.store(false, std::sync::atomic::Ordering::Relaxed);
     });
 
     Ok(Json(json!({ "status": "started", "mode": mode })))
+}
+
+/// Clears `audio_analysis_running` on drop, mirroring `TidalSyncRunningGuard`.
+struct AudioAnalysisRunningGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for AudioAnalysisRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub(super) async fn stop_audio_analysis(
