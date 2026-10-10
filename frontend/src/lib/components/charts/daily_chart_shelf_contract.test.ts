@@ -53,8 +53,8 @@ describe('daily chart shelf contract', () => {
 	test('refreshes a matrix that is empty or behind today, once per session', () => {
 		expect(source).toContain('<script module lang="ts">');
 		expect(source).toContain('let matrixRefreshStarted = false;');
-		expect(source).toContain('function matrixNeedsRefresh(next: ChartMatrixResponse)');
-		expect(source).toContain('latest < todayUtc()');
+		// When a matrix is stale is behaviour-tested in chart_rules.test.ts.
+		expect(source).toContain("from './chart_rules'");
 		expect(source).toContain('!state.loading && !state.refreshing && matrixNeedsRefresh(state.data)');
 	});
 
@@ -72,7 +72,7 @@ describe('daily chart shelf contract', () => {
 		expect(source).toContain('matrix.providers as provider');
 		expect(source).toContain('{provider.label}');
 		expect(source).toContain('row.cells[provider.source_key]');
-		expect(source).toContain('matrixHasData(next)');
+		expect(source).toContain('matrixHasData(');
 		expect(source).toContain('regionHasMatrixData($selectedChartRegion)');
 		// Borderless table: a hairline under the header, fills for hover and selection.
 		expect(source).toContain('border-bottom: 1px solid var(--border-subtle)');
