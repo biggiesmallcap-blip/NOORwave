@@ -12,6 +12,7 @@ function source(path: string): string {
 
 const playerBar = source('lib/shell/PlayerBar.svelte');
 const appShell = source('routes/+layout.svelte');
+const videoPanel = source('lib/shell/VideoQueuePanel.svelte');
 // The artist view (hero artwork, rails) is shared by the library and TIDAL
 // routes via ArtistDetail; both route files are thin wrappers.
 const sharedArtistView = source('routes/artists/ArtistDetail.svelte');
@@ -30,13 +31,14 @@ describe('TIDAL artwork surface contracts', () => {
 		expect(playerBar).not.toContain('src={track.artwork_url}');
 
 		expect(appShell).toContain('createArtworkFallback()');
-		expect(appShell).toContain('let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));');
+		expect(videoPanel).toContain('let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));');
 		expect(appShell).toContain('let mobileNowPlayingArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 640));');
 		expect(appShell).toContain('artworkUrl={artworkCandidate(item.track.artwork_url, 320)}');
 		expect(appShell).toContain('onArtworkError={markArtworkFailed}');
 		expect(appShell).not.toContain('src={$currentTrack.artwork_url}');
 		expect(appShell).not.toContain('src={item.track.artwork_url}');
 		expect(appShell).not.toContain('src={video.artwork_url}');
+		expect(videoPanel).not.toContain('src={video.artwork_url}');
 	});
 
 	test('artist routes render TIDAL artwork through allowed sizes with fallbacks', () => {
