@@ -4410,39 +4410,21 @@ async fn play_track(
             })?
     };
 
-    let user_quality = current_user_audio_quality(&state).await;
-    let stream_request = match player::build_tidal_stream_request(&track, user_quality.clone()) {
-        Some(request) => request,
-        None => {
-            let paused_snapshot = {
-                let state_guard = state.read().await;
-                state_guard.db.with_conn(player::pause).ok()
-            };
-            // Flush the prior TIDAL session before bailing, otherwise the
-            // active session keeps accumulating against the still-playing
-            // previous track, and the next successful play_track records a
-            // bogus multi-hour listen.
-            if let Some(snap) = paused_snapshot {
-                sync_session_after_snapshot(
-                    &state,
-                    &snap,
-                    Some(player::ListenSessionEndReason::Stopped),
-                )
-                .await;
-            }
-            return Err((
-                StatusCode::NOT_IMPLEMENTED,
-                Json(json!({
-                    "status": "local_playback_not_supported",
-                    "message": "Local-library playback is not wired into the host audio runtime yet.",
-                    "track_id": track.id,
-                })),
-            ));
-        }
-    };
-    let stream_info = match resolve_tidal_playback_stream(&state, &track, &stream_request).await {
-        Ok(info) => info,
-        Err(error) if error.is_track_unplayable() => {
+    let crossfade_ms = current_crossfade_ms(&state).await;
+    let started = match start_track(
+        &state,
+        StartRequest {
+            track: &track,
+            generation: playback_generation,
+            dispatch: Dispatch::Play,
+            crossfade_ms,
+        },
+    )
+    .await
+    {
+        Ok(started) => started,
+        Err(StartError::Superseded) => return current_playback_snapshot_json(&state).await,
+        Err(StartError::Stream(error)) if error.is_track_unplayable() => {
             // The track the user picked is a dead TIDAL asset. Rather than fail
             // the whole action, hand off to the skip-aware runtime switch, which
             // advances past it (and any further dead rows) and starts the next
@@ -4463,46 +4445,40 @@ async fn play_track(
             return current_playback_snapshot_json(&state).await;
         }
         Err(error) => {
-            let state_guard = state.read().await;
-            let _ = state_guard.db.with_conn(player::pause);
-            return Err(tidal_playback_error_response(
-                track.id,
+            let paused_snapshot = {
+                let state_guard = state.read().await;
+                state_guard.db.with_conn(player::pause).ok()
+            };
+            // Flush the prior TIDAL session before bailing on a local track,
+            // otherwise the active session keeps accumulating against the
+            // still-playing previous track and the next successful play
+            // records a bogus multi-hour listen.
+            if matches!(error, StartError::LocalUnsupported)
+                && let Some(snap) = paused_snapshot
+            {
+                sync_session_after_snapshot(
+                    &state,
+                    &snap,
+                    Some(player::ListenSessionEndReason::Stopped),
+                )
+                .await;
+            }
+            return Err(start_error_response(
+                &state,
                 error,
+                track.id,
                 "TIDAL stream could not be resolved before playback.",
+                None,
             ));
         }
     };
-    if !playback_generation_is_current(&state, playback_generation).await {
-        return current_playback_snapshot_json(&state).await;
-    }
+    let stream_info = started.stream_info;
     tracing::info!(
         target: "noor.playback.tidal",
         event = "playback_stream_ready",
         track_id = track.id,
         "TIDAL stream resolved before playback start"
     );
-
-    let runtime_handle = ensure_playback_runtime_for_track(&state, &track).await?;
-    let crossfade_ms = current_crossfade_ms(&state).await;
-    // Transport intent re-read at dispatch: a pause that landed during the
-    // stream resolve above wins, so the engine comes up silent instead of
-    // playing under a paused UI (last user action wins).
-    let job =
-        player::build_playback_preparation(&track, Some(&stream_info), crossfade_ms, user_quality)
-            .with_generation(playback_generation)
-            .with_start_paused(!transport_intent_is_playing(&state).await);
-    runtime_handle.play(job).map_err(|error| {
-        let message = format!("Failed to start host audio playback: {error}");
-        report_playback_failure(&state, &message);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "playback_runtime_failed",
-                "message": message,
-                "track_id": track.id,
-            })),
-        )
-    })?;
     // Fire-and-forget play event: session health + artist attribution
     if let Some(tidal_id) = track.tidal_id {
         let http = {
@@ -4531,16 +4507,6 @@ async fn play_track(
             });
         }
     }
-    {
-        let mut state_guard = state.write().await;
-        state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
-            audio_quality: stream_info.audio_quality.clone(),
-            sample_rate: stream_info.sample_rate,
-            bit_depth: stream_info.bit_depth,
-        });
-        state_guard.pending_stream_display = None;
-    }
-
     record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
 
     sync_session_after_snapshot(
