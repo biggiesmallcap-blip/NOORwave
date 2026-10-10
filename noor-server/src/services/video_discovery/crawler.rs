@@ -685,7 +685,7 @@ async fn live_source(state: &SharedState) -> Option<LiveSource> {
     let (tokens, tidal_http, http, db) = {
         let s = state.read().await;
         (
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.tidal_http_client.clone(),
             s.http_client.clone(),
             s.db.clone(),

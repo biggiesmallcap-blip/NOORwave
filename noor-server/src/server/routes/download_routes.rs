@@ -42,7 +42,7 @@ async fn broadcast_progress(state: &SharedState) {
 async fn refresh_access_token(state: &SharedState) -> Option<String> {
     let (http, tokens) = {
         let s = state.read().await;
-        (s.http_client.clone(), s.tidal_tokens.clone())
+        (s.http_client.clone(), s.tidal.tokens())
     };
     let tokens = tokens?;
     match super::recover_tidal_session(state, &http, &tokens).await {
@@ -142,7 +142,7 @@ async fn run_download_worker(state: SharedState) {
                 });
             (
                 s.http_client.clone(),
-                s.tidal_tokens.as_ref().map(|t| t.access_token.clone()),
+                s.tidal.tokens().map(|t| t.access_token),
                 dest,
                 flac_quality,
                 mp3_source,

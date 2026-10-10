@@ -366,15 +366,17 @@ async fn resume_rebuilds_current_track_when_runtime_has_no_loaded_engine() {
     });
     {
         let mut guard = state.write().await;
-        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
-            access_token: "test-token".to_string(),
-            refresh_token: "refresh-token".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
-            user_id: "test-user".to_string(),
-            country_code: "US".to_string(),
-            auth_flow: Some("pkce".to_string()),
-        });
+        guard
+            .tidal
+            .set_tokens_for_test(Some(tidal_auth::TidalTokens {
+                access_token: "test-token".to_string(),
+                refresh_token: "refresh-token".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: 3600,
+                user_id: "test-user".to_string(),
+                country_code: "US".to_string(),
+                auth_flow: Some("pkce".to_string()),
+            }));
         guard.playback_runtime = Some(PlaybackRuntimeState {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
@@ -799,61 +801,6 @@ fn test_tidal_tokens(auth_flow: Option<&str>) -> tidal_auth::TidalTokens {
         country_code: "AU".to_string(),
         auth_flow: auth_flow.map(str::to_string),
     }
-}
-
-#[tokio::test]
-async fn tidal_client_recovery_waiters_recheck_tokens_after_the_refresh_permit() {
-    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(
-        fresh_migrated_db(),
-    )));
-    let stale_tokens = test_tidal_tokens(Some("pkce"));
-    state.write().await.tidal_tokens = Some(stale_tokens.clone());
-
-    let first = begin_tidal_client_recovery(&state).await;
-    assert_eq!(
-        first
-            .current_tokens
-            .as_ref()
-            .map(|tokens| tokens.access_token.as_str()),
-        Some(stale_tokens.access_token.as_str())
-    );
-
-    let waiting_state = state.clone();
-    let waiter = tokio::spawn(async move { begin_tidal_client_recovery(&waiting_state).await });
-    tokio::task::yield_now().await;
-    assert!(
-        !waiter.is_finished(),
-        "second recovery must wait for the permit"
-    );
-
-    let mut fresh_tokens = stale_tokens;
-    fresh_tokens.access_token = "fresh-access-secret".to_string();
-    fresh_tokens.refresh_token = "rotated-refresh-secret".to_string();
-    state.write().await.tidal_tokens = Some(fresh_tokens.clone());
-    drop(first);
-
-    let second = tokio::time::timeout(Duration::from_secs(1), waiter)
-        .await
-        .expect("waiting recovery should resume after the permit is released")
-        .expect("waiting recovery task should complete");
-    assert_eq!(
-        second
-            .current_tokens
-            .as_ref()
-            .map(|tokens| tokens.access_token.as_str()),
-        Some(fresh_tokens.access_token.as_str()),
-        "the waiter must observe the token persisted by the first recovery"
-    );
-    drop(second);
-
-    let (_, recovered_tokens) = recover_tidal_client_with_tokens(&state, &test_tidal_tokens(None))
-        .await
-        .expect("changed in-memory token should be reused without a network refresh");
-    assert_eq!(
-        recovered_tokens.access_token, fresh_tokens.access_token,
-        "client and token metadata must come from the same recovered session"
-    );
-    assert_eq!(recovered_tokens.refresh_token, fresh_tokens.refresh_token);
 }
 
 fn test_tidal_track(id: i64, title: &str) -> crate::services::tidal::client::TidalTrack {
@@ -1810,8 +1757,7 @@ pub(in crate::server) fn fresh_test_state(db: Database) -> crate::AppState {
         event_tx,
         http_client: reqwest::Client::new(),
         tidal_http_client: reqwest::Client::new(),
-        tidal_tokens: None,
-        tidal_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tidal: crate::services::tidal::session::TidalSession::disconnected_for_tests(),
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
         home_picks_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -3078,15 +3024,17 @@ async fn remove_current_queue_item_advances_and_switches_runtime() {
 
     {
         let mut guard = state.write().await;
-        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
-            access_token: "test-token".to_string(),
-            refresh_token: "refresh-token".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
-            user_id: "test-user".to_string(),
-            country_code: "US".to_string(),
-            auth_flow: Some("pkce".to_string()),
-        });
+        guard
+            .tidal
+            .set_tokens_for_test(Some(tidal_auth::TidalTokens {
+                access_token: "test-token".to_string(),
+                refresh_token: "refresh-token".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: 3600,
+                user_id: "test-user".to_string(),
+                country_code: "US".to_string(),
+                auth_flow: Some("pkce".to_string()),
+            }));
         guard.playback_runtime = Some(PlaybackRuntimeState {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
@@ -4554,15 +4502,17 @@ async fn runtime_finish_skips_unresolved_pending_row_and_starts_next_library_tra
 
     {
         let mut guard = state.write().await;
-        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
-            access_token: "test-token".to_string(),
-            refresh_token: "refresh-token".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
-            user_id: "test-user".to_string(),
-            country_code: "US".to_string(),
-            auth_flow: Some("pkce".to_string()),
-        });
+        guard
+            .tidal
+            .set_tokens_for_test(Some(tidal_auth::TidalTokens {
+                access_token: "test-token".to_string(),
+                refresh_token: "refresh-token".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: 3600,
+                user_id: "test-user".to_string(),
+                country_code: "US".to_string(),
+                auth_flow: Some("pkce".to_string()),
+            }));
         guard.playback_runtime = Some(PlaybackRuntimeState {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
@@ -4688,15 +4638,17 @@ async fn runtime_finish_adopts_pending_row_resolved_by_background_resolver() {
 
     {
         let mut guard = state.write().await;
-        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
-            access_token: "test-token".to_string(),
-            refresh_token: "refresh-token".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
-            user_id: "test-user".to_string(),
-            country_code: "US".to_string(),
-            auth_flow: Some("pkce".to_string()),
-        });
+        guard
+            .tidal
+            .set_tokens_for_test(Some(tidal_auth::TidalTokens {
+                access_token: "test-token".to_string(),
+                refresh_token: "refresh-token".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: 3600,
+                user_id: "test-user".to_string(),
+                country_code: "US".to_string(),
+                auth_flow: Some("pkce".to_string()),
+            }));
         guard.playback_runtime = Some(PlaybackRuntimeState {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
@@ -5597,15 +5549,17 @@ async fn runtime_track_error_advances_to_next_library_track() {
 
     {
         let mut guard = state.write().await;
-        guard.tidal_tokens = Some(tidal_auth::TidalTokens {
-            access_token: "test-token".to_string(),
-            refresh_token: "refresh-token".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
-            user_id: "test-user".to_string(),
-            country_code: "US".to_string(),
-            auth_flow: Some("pkce".to_string()),
-        });
+        guard
+            .tidal
+            .set_tokens_for_test(Some(tidal_auth::TidalTokens {
+                access_token: "test-token".to_string(),
+                refresh_token: "refresh-token".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: 3600,
+                user_id: "test-user".to_string(),
+                country_code: "US".to_string(),
+                auth_flow: Some("pkce".to_string()),
+            }));
         guard.playback_runtime = Some(PlaybackRuntimeState {
             access_token: "test-token".to_string(),
             handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
@@ -8477,7 +8431,7 @@ async fn get_album_tracks_returns_local_tracks_when_tidal_session_absent() {
     })
     .expect("seed");
 
-    // fresh_test_state has tidal_tokens: None -> the session is "disconnected".
+    // fresh_test_state has a logged-out TIDAL session -> the session is "disconnected".
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));

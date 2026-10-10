@@ -134,7 +134,7 @@ pub(super) async fn batch_add_to_playlist(
 
         let (http, tokens) = {
             let state = state.read().await;
-            let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
+            let tokens = state.tidal.tokens().ok_or(StatusCode::UNAUTHORIZED)?;
             (state.http_client.clone(), tokens)
         };
 
@@ -236,7 +236,7 @@ pub(super) async fn batch_delete_items(
         } else {
             let (http, tokens) = {
                 let state = state.read().await;
-                let tokens = state.tidal_tokens.clone().ok_or(StatusCode::UNAUTHORIZED)?;
+                let tokens = state.tidal.tokens().ok_or(StatusCode::UNAUTHORIZED)?;
                 (state.http_client.clone(), tokens)
             };
 

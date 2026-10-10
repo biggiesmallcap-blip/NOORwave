@@ -86,7 +86,7 @@ pub(super) async fn resolve_duplicate_group(
     // Get TIDAL tokens for unfavorite calls.
     let (tokens, tidal_http_client) = {
         let s = state.read().await;
-        let tokens = s.tidal_tokens.clone();
+        let tokens = s.tidal.tokens();
         (tokens, s.tidal_http_client.clone())
     };
 

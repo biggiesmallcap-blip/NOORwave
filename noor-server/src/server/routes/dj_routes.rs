@@ -1069,7 +1069,7 @@ async fn queue_tidal_profile_rebuild(
 
     let tokens = {
         let state_guard = state.read().await;
-        state_guard.tidal_tokens.clone()
+        state_guard.tidal.tokens()
     };
     let tokens = match tokens {
         Some(tokens) => Some(tokens),
@@ -3394,8 +3394,7 @@ mod tests {
             event_tx,
             http_client: reqwest::Client::new(),
             tidal_http_client: reqwest::Client::new(),
-            tidal_tokens: None,
-            tidal_refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            tidal: crate::services::tidal::session::TidalSession::disconnected_for_tests(),
             tidal_mixes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tidal_radio_stations_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             home_picks_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),

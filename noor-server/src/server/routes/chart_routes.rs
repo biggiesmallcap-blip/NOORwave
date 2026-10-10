@@ -810,7 +810,7 @@ async fn fetch_tidal_chart(state: &SharedState, limit: i32) -> anyhow::Result<Ve
     let (tokens_opt, http, db, tidal_http_client) = {
         let s = state.read().await;
         (
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.http_client.clone(),
             s.db.clone(),
             s.tidal_http_client.clone(),

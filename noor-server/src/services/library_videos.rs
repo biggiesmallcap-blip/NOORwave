@@ -618,7 +618,7 @@ pub async fn run_if_idle(state: SharedState) {
         (
             s.db.clone(),
             s.library_video_scan_running.clone(),
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.tidal_http_client.clone(),
         )
     };

@@ -171,7 +171,7 @@ fn tidal_write_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
 /// not connected. A local-only playlist never needs these.
 async fn tidal_write_context(state: &SharedState) -> Option<(reqwest::Client, TidalTokens)> {
     let state = state.read().await;
-    let tokens = state.tidal_tokens.clone()?;
+    let tokens = state.tidal.tokens()?;
     Some((state.http_client.clone(), tokens))
 }
 

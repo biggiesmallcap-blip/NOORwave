@@ -629,11 +629,7 @@ fn artwork_from_catalog(
 async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
     let (tokens, tidal_http, db) = {
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone(),
-            s.tidal_http_client.clone(),
-            s.db.clone(),
-        )
+        (s.tidal.tokens(), s.tidal_http_client.clone(), s.db.clone())
     };
     let Some(tokens) = tokens else {
         return;
@@ -1607,7 +1603,7 @@ async fn resolve_recommendation_artist_item(
         && item.get("artwork_url").is_some_and(Value::is_null)
         && let Some(local_artist_id) = item.get("local_artist_id").and_then(Value::as_i64)
         && let Some(tidal_artist_id) = item.get("tidal_artist_id").and_then(Value::as_i64)
-        && let Some(tokens) = s.tidal_tokens.clone()
+        && let Some(tokens) = s.tidal.tokens()
     {
         let http = s.tidal_http_client.clone();
         let db = s.db.clone();

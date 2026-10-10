@@ -590,7 +590,7 @@ pub async fn spawn_discovery_training(
                 guard.event_tx.clone(),
                 guard.http_client.clone(),
                 guard.tidal_http_client.clone(),
-                guard.tidal_tokens.clone(),
+                guard.tidal.tokens(),
             )
         };
         let lastfm = LastFmClient::load(http_client, &db);

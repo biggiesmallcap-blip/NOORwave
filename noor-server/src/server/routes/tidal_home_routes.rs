@@ -126,14 +126,14 @@ pub(super) async fn get_tidal_mixes(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
     // Persisted-tokens fallback covers the cold-boot race: the home page
-    // mounts before `tidal_status` has rehydrated `state.tidal_tokens` from
+    // mounts before `tidal_status` has rehydrated `state.tidal` from
     // disk, so a direct in-memory check returns 503 even though the user is
     // connected. Other TIDAL endpoints follow this same pattern.
     let (tokens, tidal_http_client, mixes_cache) = {
         let in_memory = {
             let s = state.read().await;
             (
-                s.tidal_tokens.clone(),
+                s.tidal.tokens(),
                 s.tidal_http_client.clone(),
                 s.tidal_mixes_cache.clone(),
             )
@@ -205,7 +205,7 @@ pub(super) async fn get_tidal_radio_stations(
         let in_memory = {
             let s = state.read().await;
             (
-                s.tidal_tokens.clone(),
+                s.tidal.tokens(),
                 s.tidal_http_client.clone(),
                 s.tidal_radio_stations_cache.clone(),
             )
@@ -279,7 +279,7 @@ pub(super) async fn get_tidal_home_modules(
         let in_memory = {
             let s = state.read().await;
             (
-                s.tidal_tokens.clone(),
+                s.tidal.tokens(),
                 s.tidal_http_client.clone(),
                 s.tidal_page_modules_cache.clone(),
             )
@@ -340,7 +340,7 @@ pub(super) async fn get_tidal_discover_module_items(
         let in_memory = {
             let s = state.read().await;
             (
-                s.tidal_tokens.clone(),
+                s.tidal.tokens(),
                 s.tidal_http_client.clone(),
                 s.tidal_page_modules_cache.clone(),
             )
@@ -456,7 +456,7 @@ pub(super) async fn get_tidal_mix_tracks(
     let (tokens, tidal_http_client) = {
         let s = state.read().await;
         let tidal_http = s.tidal_http_client.clone();
-        let in_memory = s.tidal_tokens.clone();
+        let in_memory = s.tidal.tokens();
         drop(s);
         match in_memory {
             Some(t) => (Some(t), tidal_http),
@@ -630,7 +630,7 @@ async fn fetch_page_modules(
         let in_memory = {
             let s = state.read().await;
             (
-                s.tidal_tokens.clone(),
+                s.tidal.tokens(),
                 s.tidal_http_client.clone(),
                 s.tidal_page_modules_cache.clone(),
             )
@@ -1477,7 +1477,7 @@ async fn load_tidal_session(
 ) {
     let in_memory = {
         let s = state.read().await;
-        (s.tidal_tokens.clone(), s.tidal_http_client.clone())
+        (s.tidal.tokens(), s.tidal_http_client.clone())
     };
     match in_memory.0 {
         Some(t) => (Some(t), in_memory.1),

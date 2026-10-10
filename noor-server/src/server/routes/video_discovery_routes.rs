@@ -129,11 +129,7 @@ async fn build_missing_sets(
 ) -> anyhow::Result<usize> {
     let (tokens, tidal_http_client, db) = {
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone(),
-            s.tidal_http_client.clone(),
-            s.db.clone(),
-        )
+        (s.tidal.tokens(), s.tidal_http_client.clone(), s.db.clone())
     };
     let tokens = match tokens {
         Some(t) => Some(t),
@@ -811,7 +807,7 @@ pub(super) async fn get_videos_liked(State(state): State<SharedState>) -> Json<V
     let running = s
         .library_video_scan_running
         .load(std::sync::atomic::Ordering::SeqCst);
-    let connected = s.tidal_tokens.is_some();
+    let connected = s.tidal.tokens().is_some();
 
     Json(json!({
         "videos": wall,

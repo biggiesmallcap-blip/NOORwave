@@ -211,6 +211,31 @@ impl TidalSession {
         Ok(loaded)
     }
 
+    /// Test-only: a logged-out session with no store, no events, and a
+    /// refresher that always fails transiently.
+    #[cfg(test)]
+    pub(crate) fn disconnected_for_tests() -> Self {
+        struct NoRefresh;
+
+        #[async_trait]
+        impl TokenRefresher for NoRefresh {
+            async fn refresh(&self, _current: &TidalTokens) -> Result<TidalTokens> {
+                anyhow::bail!("no TIDAL refresh in tests")
+            }
+        }
+
+        Self::new(
+            TidalSessionConfig {
+                api_http: reqwest::Client::new(),
+                api_base: "http://127.0.0.1:9".to_string(),
+                refresher: Arc::new(NoRefresh),
+                store: None,
+                events: None,
+            },
+            None,
+        )
+    }
+
     /// Test-only: replace tokens without persistence or events.
     #[cfg(test)]
     pub(crate) fn set_tokens_for_test(&self, tokens: Option<TidalTokens>) {

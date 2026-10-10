@@ -2101,10 +2101,7 @@ async fn resolve_tidal_track(
             .await
             .map_err(internal)?;
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone().or(persisted),
-            s.tidal_http_client.clone(),
-        )
+        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
     };
     let Some(tokens) = tokens else {
         return Ok(Json(json!({
@@ -2208,7 +2205,7 @@ async fn resolve_tidal_bulk(
             s.sportify_cache_config,
             s.sportify_resolve_config,
             s.db.clone(),
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.tidal_http_client.clone(),
         )
     };
@@ -2477,7 +2474,7 @@ async fn eager_and_lazy_resolve_for_list(
             s.sportify_cache_config,
             s.sportify_resolve_config,
             s.db.clone(),
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.tidal_http_client.clone(),
         )
     };
@@ -2589,7 +2586,7 @@ async fn spawn_background_resolve_for_list(
             s.sportify_cache_config,
             s.sportify_resolve_config,
             s.db.clone(),
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.tidal_http_client.clone(),
         )
     };
@@ -2867,7 +2864,7 @@ pub(crate) async fn add_tidal_mix_fallback(
     let (tokens, http) = {
         let s = state.read().await;
         (
-            s.tidal_tokens.clone().unwrap_or(persisted),
+            s.tidal.tokens().unwrap_or(persisted),
             s.tidal_http_client.clone(),
         )
     };
@@ -3003,7 +3000,7 @@ pub(super) async fn spawn_pending_resolvers_for_queue_items(
 
     let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
         let s = state.read().await;
-        if let Some(t) = s.tidal_tokens.clone() {
+        if let Some(t) = s.tidal.tokens() {
             Some(t)
         } else {
             drop(s);
@@ -3380,7 +3377,7 @@ async fn radio_start(
     if !pending_item_ids.is_empty() {
         let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
             let s = state.read().await;
-            if let Some(t) = s.tidal_tokens.clone() {
+            if let Some(t) = s.tidal.tokens() {
                 Some(t)
             } else {
                 drop(s);
@@ -3722,7 +3719,7 @@ pub(super) async fn tidal_discovery_provider(
     state: &SharedState,
 ) -> Result<TidalDiscoveryProvider, (StatusCode, Json<Value>)> {
     let state_guard = state.read().await;
-    let tokens = state_guard.tidal_tokens.clone().ok_or_else(|| {
+    let tokens = state_guard.tidal.tokens().ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
             Json(json!({
@@ -4533,7 +4530,7 @@ async fn play_track(
         };
         let token = {
             let g = state.read().await;
-            g.tidal_tokens.as_ref().map(|t| t.access_token.clone())
+            g.tidal.tokens().map(|t| t.access_token)
         };
         if let Some(token) = token {
             let quality = stream_info.audio_quality.clone();
@@ -4717,7 +4714,7 @@ async fn resolve_tidal_runtime_stream(
     ensure_tidal_content_allowed(state, request.track_id).await?;
     let tokens = {
         let state_guard = state.read().await;
-        state_guard.tidal_tokens.clone()
+        state_guard.tidal.tokens()
     }
     .ok_or_else(|| anyhow::anyhow!("TIDAL is not connected."))?;
 
@@ -4765,7 +4762,7 @@ async fn ensure_tidal_content_allowed(state: &SharedState, tidal_id: i64) -> any
         (
             guard.db.clone(),
             guard.tidal_http_client.clone(),
-            guard.tidal_tokens.clone(),
+            guard.tidal.tokens(),
         )
     };
     let needs_label = db.with_conn(|conn| {
@@ -4810,7 +4807,7 @@ async fn resolve_tidal_playback_stream(
     }
     let tokens = {
         let state_guard = state.read().await;
-        state_guard.tidal_tokens.clone()
+        state_guard.tidal.tokens()
     }
     .ok_or(TidalPlaybackError::NotConnected)?;
 
@@ -6004,7 +6001,7 @@ async fn resolve_pending_current_queue_item(
         };
         let s = state.read().await;
         (
-            s.tidal_tokens.clone().unwrap_or(persisted),
+            s.tidal.tokens().unwrap_or(persisted),
             s.tidal_http_client.clone(),
         )
     };
@@ -7423,7 +7420,7 @@ fn repair_moved_queue_current_anchor(
 async fn spawn_pending_queue_resolver(state: &SharedState, queue_item_id: i64) {
     let tokens_opt: Option<crate::services::tidal::auth::TidalTokens> = {
         let s = state.read().await;
-        if let Some(t) = s.tidal_tokens.clone() {
+        if let Some(t) = s.tidal.tokens() {
             Some(t)
         } else {
             drop(s);
@@ -8169,8 +8166,7 @@ async fn tidal_login_complete(
         )
     })?;
     {
-        let mut s = state.write().await;
-        s.tidal_tokens = Some(tokens.clone());
+        let s = state.read().await;
         let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
     }
 
@@ -8184,22 +8180,15 @@ async fn tidal_login_complete(
 
 /// Check if polling has completed (frontend polls this).
 async fn tidal_poll(State(state): State<SharedState>) -> Json<Value> {
-    let in_memory_tokens = {
-        let s = state.read().await;
-        s.tidal_tokens.clone()
-    };
-    let tokens = match in_memory_tokens {
-        Some(tokens) => Some(tokens),
-        None => match load_persisted_tidal_tokens(&state).await {
-            Ok(tokens) => tokens,
-            Err(error) => {
-                tracing::warn!(
-                    "Failed to rehydrate persisted TIDAL tokens during login poll: {}",
-                    error
-                );
-                None
-            }
-        },
+    let tokens = match load_persisted_tidal_tokens(&state).await {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            tracing::warn!(
+                "Failed to rehydrate persisted TIDAL tokens during login poll: {}",
+                error
+            );
+            None
+        }
     };
 
     if let Some(tokens) = tokens {
@@ -8218,47 +8207,8 @@ async fn tidal_poll(State(state): State<SharedState>) -> Json<Value> {
 pub(super) async fn load_persisted_tidal_tokens(
     state: &SharedState,
 ) -> anyhow::Result<Option<tidal_auth::TidalTokens>> {
-    let (db, master_key) = {
-        let s = state.read().await;
-        (s.db.clone(), s.master_key.clone())
-    };
-
-    let loaded = db.with_conn(|conn| {
-        let result = conn.query_row(
-            "SELECT access_token_enc FROM service_auth WHERE service='tidal'",
-            [],
-            |row| row.get::<_, Vec<u8>>(0),
-        );
-
-        Ok(match result {
-            Ok(bytes) => tidal_auth::decode_persisted_tidal_tokens(&master_key, &bytes)?,
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(error) => return Err(error.into()),
-        })
-    })?;
-
-    let Some(loaded) = loaded else {
-        return Ok(None);
-    };
-    let needs_rewrite = loaded.needs_encrypted_rewrite();
-    let tokens = loaded.into_tokens();
-    if needs_rewrite {
-        let blob = tidal_auth::encode_persisted_tidal_tokens(&master_key, &tokens)?;
-        db.with_conn(|conn| {
-            conn.execute(
-                "UPDATE service_auth SET access_token_enc = ?1 WHERE service = 'tidal'",
-                params![blob],
-            )?;
-            Ok(())
-        })?;
-    }
-
-    {
-        let mut s = state.write().await;
-        s.tidal_tokens = Some(tokens.clone());
-    }
-
-    Ok(Some(tokens))
+    let session = state.read().await.tidal.clone();
+    session.reload_from_store()
 }
 
 /// Get TIDAL backoff gate status.
@@ -8269,34 +8219,29 @@ async fn get_tidal_backoff_status() -> impl axum::response::IntoResponse {
 
 /// Get TIDAL connection status.
 async fn tidal_status(State(state): State<SharedState>) -> Json<Value> {
-    let in_memory_tokens = {
-        let s = state.read().await;
-        s.tidal_tokens.clone()
-    };
-    let tokens = match in_memory_tokens {
-        Some(tokens) => Some(tokens),
-        None => match load_persisted_tidal_tokens(&state).await {
-            Ok(tokens) => tokens,
-            Err(error) => {
-                tracing::warn!("Failed to rehydrate persisted TIDAL tokens: {}", error);
-                None
-            }
-        },
+    let session = state.read().await.tidal.clone();
+    let tokens = match session.reload_from_store() {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            tracing::warn!("Failed to rehydrate persisted TIDAL tokens: {}", error);
+            None
+        }
     };
 
     if let Some(mut tokens) = tokens {
         if !tokens.is_pkce() {
             tidal_auth::warn_if_fallback_client_credentials();
         }
-        let mut expired = tidal_tokens_locally_expired(&state, &tokens)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!("Failed to inspect persisted TIDAL token expiry: {error}");
-                false
-            });
-        if expired && !tokens.refresh_token.trim().is_empty() {
-            match recover_tidal_client_with_tokens(&state, &tokens).await {
-                Ok((_, refreshed)) => {
+        let mut expired = session.needs_reconnect()
+            || tidal_tokens_locally_expired(&state, &tokens)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!("Failed to inspect persisted TIDAL token expiry: {error}");
+                    false
+                });
+        if expired && !session.needs_reconnect() && !tokens.refresh_token.trim().is_empty() {
+            match session.refresh_stale(&tokens.access_token).await {
+                Ok(refreshed) => {
                     tokens = refreshed;
                     expired = false;
                 }
@@ -8569,7 +8514,7 @@ async fn tidal_search(
             )
         })?;
         let s = state.read().await;
-        s.tidal_tokens.clone().or(persisted)
+        s.tidal.tokens().or(persisted)
     };
 
     let Some(tokens) = tokens else {
@@ -8837,7 +8782,7 @@ async fn tidal_request_tokens(
         )
     })?;
     let s = state.read().await;
-    Ok(s.tidal_tokens.clone().or(persisted))
+    Ok(s.tidal.tokens().or(persisted))
 }
 
 /// Every video list the listener opens teaches the discovery crawler.
@@ -9350,7 +9295,7 @@ async fn tidal_playlist_search(
             )
         })?;
         let s = state.read().await;
-        s.tidal_tokens.clone().or(persisted)
+        s.tidal.tokens().or(persisted)
     };
     let Some(tokens) = tokens else {
         return Err((
@@ -9440,7 +9385,7 @@ async fn tidal_playlist_tracks(
             )
         })?;
         let s = state.read().await;
-        s.tidal_tokens.clone().or(persisted)
+        s.tidal.tokens().or(persisted)
     };
     let Some(tokens) = tokens else {
         return Err((
@@ -9583,10 +9528,7 @@ async fn tidal_artist_profile(
             )
         })?;
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone().or(persisted),
-            s.tidal_http_client.clone(),
-        )
+        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -9641,10 +9583,7 @@ async fn tidal_artist_core(
             )
         })?;
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone().or(persisted),
-            s.tidal_http_client.clone(),
-        )
+        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -9668,51 +9607,11 @@ async fn tidal_artist_core(
 
 pub(crate) async fn recover_tidal_session(
     state: &SharedState,
-    http: &reqwest::Client,
+    _http: &reqwest::Client,
     tokens: &tidal_auth::TidalTokens,
 ) -> anyhow::Result<tidal_auth::TidalTokens> {
-    if tokens.refresh_token.trim().is_empty() {
-        anyhow::bail!("TIDAL session has no refresh token; reconnect TIDAL");
-    }
-    tracing::info!(
-        target: "noor.sync.tidal",
-        event = "session_refresh_start",
-        user_id = %tokens.user_id,
-        "Refreshing TIDAL session"
-    );
-    let mut refreshed =
-        tidal_auth::refresh_token(http, &tokens.refresh_token, tokens.auth_flow.as_deref()).await?;
-    if refreshed.user_id.is_empty() {
-        refreshed.user_id = tokens.user_id.clone();
-    }
-    if refreshed.country_code.is_empty() {
-        refreshed.country_code = tokens.country_code.clone();
-    }
-    if refreshed.auth_flow.is_none() {
-        refreshed.auth_flow = tokens.auth_flow.clone();
-    }
-
-    persist_tidal_tokens(state, &refreshed).await?;
-    let tidal_http_client = state.read().await.tidal_http_client.clone();
-    let validation_client = TidalClient::with_http(
-        tidal_http_client,
-        refreshed.access_token.clone(),
-        refreshed.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
-    validation_client
-        .validate_session(&refreshed.user_id)
-        .await
-        .context("Refreshed TIDAL session still failed validation")?;
-
-    tracing::info!(
-        target: "noor.sync.tidal",
-        event = "session_refresh_success",
-        user_id = %refreshed.user_id,
-        "TIDAL session refresh succeeded"
-    );
-
-    Ok(refreshed)
+    let session = state.read().await.tidal.clone();
+    session.refresh_stale(&tokens.access_token).await
 }
 
 /// Refresh the TIDAL session and hand back a client primed with the new access
@@ -9741,54 +9640,16 @@ pub(super) async fn recover_tidal_client_with_tokens(
     state: &SharedState,
     used_tokens: &tidal_auth::TidalTokens,
 ) -> anyhow::Result<(TidalClient, tidal_auth::TidalTokens)> {
-    let TidalClientRecovery {
-        _permit,
-        current_tokens,
-        http_client,
-        tidal_http_client,
-    } = begin_tidal_client_recovery(state).await;
-
-    if let Some(current) = current_tokens
-        && current.access_token != used_tokens.access_token
-    {
-        let client = TidalClient::with_http(
-            tidal_http_client,
-            current.access_token.clone(),
-            current.country_code.clone(),
-        )
-        .with_metadata_store(state.read().await.db.clone());
-        return Ok((client, current));
-    }
-
-    let refreshed = recover_tidal_session(state, &http_client, used_tokens).await?;
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        refreshed.access_token.clone(),
-        refreshed.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
-    Ok((client, refreshed))
-}
-
-struct TidalClientRecovery {
-    _permit: tokio::sync::OwnedMutexGuard<()>,
-    current_tokens: Option<tidal_auth::TidalTokens>,
-    http_client: reqwest::Client,
-    tidal_http_client: reqwest::Client,
-}
-
-/// Acquire the refresh permit before reading tokens. Keeping these operations
-/// together is what makes the post-wait token check reliable.
-async fn begin_tidal_client_recovery(state: &SharedState) -> TidalClientRecovery {
-    let refresh_lock = state.read().await.tidal_refresh_lock.clone();
-    let permit = refresh_lock.lock_owned().await;
-    let s = state.read().await;
-    TidalClientRecovery {
-        _permit: permit,
-        current_tokens: s.tidal_tokens.clone(),
-        http_client: s.http_client.clone(),
-        tidal_http_client: s.tidal_http_client.clone(),
-    }
+    let (session, db) = {
+        let s = state.read().await;
+        (s.tidal.clone(), s.db.clone())
+    };
+    let tokens = session.refresh_stale(&used_tokens.access_token).await?;
+    let client = session
+        .client()
+        .ok_or(crate::services::tidal::session::SessionExpired)?
+        .with_metadata_store(db);
+    Ok((client, tokens))
 }
 
 pub(super) use crate::services::tidal::auth::error_looks_like_auth;
@@ -9855,10 +9716,7 @@ async fn ensure_playback_runtime_for_track(
 ) -> Result<playback_runtime::PlaybackRuntimeHandle, (StatusCode, Json<Value>)> {
     let access_token = {
         let state = state.read().await;
-        state
-            .tidal_tokens
-            .as_ref()
-            .map(|tokens| tokens.access_token.clone())
+        state.tidal.tokens().map(|tokens| tokens.access_token)
     }
     .ok_or_else(|| {
         (
@@ -10701,11 +10559,8 @@ async fn handle_near_end_prebuffer_next(
             .playback_runtime
             .as_ref()
             .map(|runtime| runtime.access_token.as_str());
-        let current_token = state_guard
-            .tidal_tokens
-            .as_ref()
-            .map(|tokens| tokens.access_token.as_str());
-        if runtime_token != current_token {
+        let current_token = state_guard.tidal.tokens().map(|tokens| tokens.access_token);
+        if runtime_token != current_token.as_deref() {
             info!(
                 "Skipping pre-buffer for next track {} after TIDAL session refresh; next transition will cold-start",
                 next.id
@@ -11780,7 +11635,7 @@ async fn reresolve_tidal_id(state: &SharedState, track_id: i64) -> anyhow::Resul
     let (tokens, http) = {
         let persisted = load_persisted_tidal_tokens(state).await.ok().flatten();
         let s = state.read().await;
-        match s.tidal_tokens.clone().or(persisted) {
+        match s.tidal.tokens().or(persisted) {
             Some(tokens) => (tokens, s.tidal_http_client.clone()),
             None => return Ok(None),
         }
@@ -12593,39 +12448,17 @@ async fn clear_tidal_session(state: &SharedState) -> anyhow::Result<()> {
         tracing::warn!("flush on tidal disconnect failed: {err}");
     }
     s.active_listen_session = None;
-    s.tidal_tokens = None;
-    let _ = s.db.with_conn(|conn| {
-        conn.execute("DELETE FROM service_auth WHERE service='tidal'", [])?;
-        Ok(())
-    });
-    Ok(())
+    let session = s.tidal.clone();
+    drop(s);
+    session.logout().await
 }
 
 async fn persist_tidal_tokens(
     state: &SharedState,
     tokens: &tidal_auth::TidalTokens,
 ) -> anyhow::Result<()> {
-    {
-        let s = state.read().await;
-        s.db.with_conn(|conn| {
-            let token_blob = tidal_auth::encode_persisted_tidal_tokens(&s.master_key, tokens)?;
-            let token_expiry = (chrono::Utc::now()
-                + chrono::Duration::seconds(tokens.expires_in.max(0)))
-            .to_rfc3339();
-            conn.execute(
-                "INSERT INTO service_auth (service, access_token_enc, user_id, token_expiry, connected_at)
-                 VALUES ('tidal', ?1, ?2, ?3, datetime('now'))
-                 ON CONFLICT(service) DO UPDATE SET access_token_enc=excluded.access_token_enc,
-                 user_id=excluded.user_id, token_expiry=excluded.token_expiry, connected_at=excluded.connected_at",
-                rusqlite::params![token_blob, tokens.user_id, token_expiry],
-            )?;
-            Ok(())
-        })?;
-    }
-
-    let mut s = state.write().await;
-    s.tidal_tokens = Some(tokens.clone());
-    Ok(())
+    let session = state.read().await.tidal.clone();
+    session.login(tokens.clone()).await
 }
 
 /// Upsert a TIDAL track (and its artist) and return the local `tracks.id`.

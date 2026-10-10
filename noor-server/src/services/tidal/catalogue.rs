@@ -37,7 +37,7 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
         (
             s.db.clone(),
             s.tidal_http_client.clone(),
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.event_tx.clone(),
         )
     };

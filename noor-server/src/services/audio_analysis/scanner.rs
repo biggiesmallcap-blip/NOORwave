@@ -26,7 +26,7 @@ pub async fn run_preview_scan(
     // Grab auth tokens and HTTP client up-front.
     let (tokens, http_client) = {
         let s = state.read().await;
-        (s.tidal_tokens.clone(), s.http_client.clone())
+        (s.tidal.tokens(), s.http_client.clone())
     };
 
     let Some(tokens) = tokens else {

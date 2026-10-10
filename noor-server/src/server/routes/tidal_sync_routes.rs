@@ -207,8 +207,8 @@ pub async fn trigger_auto_sync(state: &SharedState, service: &str) -> anyhow::Re
     let (tokens, running_flag, cancel_flag, tidal_http_client) = {
         let s = state.read().await;
         let tokens = s
-            .tidal_tokens
-            .clone()
+            .tidal
+            .tokens()
             .or(persisted_tokens)
             .ok_or_else(|| anyhow::anyhow!("No TIDAL tokens available for auto-sync"))?;
         (
@@ -296,8 +296,8 @@ pub(super) async fn tidal_sync_library(
     let (tokens, running_flag, cancel_flag, tidal_http_client) = {
         let s = state.read().await;
         let tokens = s
-            .tidal_tokens
-            .clone()
+            .tidal
+            .tokens()
             .or(persisted_tokens)
             .ok_or(TidalSyncStartError::NotConnected)?;
         (

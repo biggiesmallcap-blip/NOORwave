@@ -493,10 +493,7 @@ pub(super) async fn get_album_credits(
                 .await
                 .unwrap_or_default();
             let s = state.read().await;
-            (
-                s.tidal_tokens.clone().or(persisted),
-                s.tidal_http_client.clone(),
-            )
+            (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
         };
         if let Some(tokens) = tokens {
             let client = TidalClient::with_http(
@@ -848,10 +845,7 @@ pub(super) async fn get_album_tracks(
             .await
             .unwrap_or_default();
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone().or(persisted),
-            s.tidal_http_client.clone(),
-        )
+        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -1866,10 +1860,7 @@ pub(super) async fn get_artist_discography(
             )
         })?;
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone().or(persisted),
-            s.tidal_http_client.clone(),
-        )
+        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -1962,10 +1953,7 @@ pub(super) async fn get_tidal_artist_release_page(
             )
         })?;
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone().or(persisted),
-            s.tidal_http_client.clone(),
-        )
+        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
     };
     let Some(tokens) = tokens else {
         return Err((
@@ -2163,10 +2151,7 @@ pub(super) async fn get_tidal_album_tracks(
             )
         })?;
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone().or(persisted),
-            s.tidal_http_client.clone(),
-        )
+        (s.tidal.tokens().or(persisted), s.tidal_http_client.clone())
     };
 
     let Some(tokens) = tokens else {
@@ -2246,7 +2231,7 @@ pub(super) async fn import_tidal_album(
         })?;
         let s = state.read().await;
         (
-            s.tidal_tokens.clone().or(persisted),
+            s.tidal.tokens().or(persisted),
             s.db.clone(),
             s.tidal_http_client.clone(),
         )

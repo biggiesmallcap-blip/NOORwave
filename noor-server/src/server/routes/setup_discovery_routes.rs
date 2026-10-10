@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 async fn account(state: &SharedState) -> Result<Option<String>, StatusCode> {
-    let tokens = state.read().await.tidal_tokens.clone();
+    let tokens = state.read().await.tidal.tokens();
     let tokens = match tokens {
         Some(tokens) => Some(tokens),
         None => super::load_persisted_tidal_tokens(state)

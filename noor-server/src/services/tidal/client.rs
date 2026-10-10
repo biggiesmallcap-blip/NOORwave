@@ -442,11 +442,6 @@ impl TidalClient {
         self
     }
 
-    pub(crate) fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
-        self.api_base = api_base.into();
-        self
-    }
-
     pub(crate) fn for_session(
         session: crate::services::tidal::session::TidalSession,
         country_code: &str,

@@ -22,7 +22,7 @@ async fn deliver(state: &SharedState) -> anyhow::Result<()> {
         (
             s.db.clone(),
             s.http_client.clone(),
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.event_tx.clone(),
         )
     };
@@ -40,8 +40,8 @@ async fn deliver(state: &SharedState) -> anyhow::Result<()> {
             let session = state
                 .read()
                 .await
-                .tidal_tokens
-                .clone()
+                .tidal
+                .tokens()
                 .ok_or_else(|| anyhow::anyhow!("TIDAL disconnected"))?;
             let result = send(http, &session, &op).await;
             match result {
