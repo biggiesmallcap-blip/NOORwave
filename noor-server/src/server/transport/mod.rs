@@ -12,3 +12,4 @@ pub(crate) mod settings;
 pub(crate) mod snapshot;
 pub(crate) mod start;
 pub(crate) mod stream;
+pub(crate) mod toggle;

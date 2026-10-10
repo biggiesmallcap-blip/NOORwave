@@ -1,15 +1,13 @@
 use super::transport::command as transport_command;
 use super::transport::events::{
-    describe_tidal_playback_error, handle_near_end,
-    mark_armed_dj_transition_manual_seek_suppressed_if_needed, report_playback_failure,
+    describe_tidal_playback_error, handle_near_end, report_playback_failure,
     switch_runtime_to_snapshot_current,
 };
 use super::transport::generation::{
     bump as bump_playback_generation, current as current_playback_generation,
 };
 use super::transport::listen::{
-    flush_active_listen_session_locked, record_transition_if_changed,
-    resume_session_after_snapshot, sync_session_after_snapshot,
+    flush_active_listen_session_locked, record_transition_if_changed, sync_session_after_snapshot,
 };
 use super::transport::pending::{
     resolve_or_skip_pending_current, resolve_pending_row, spawn_pending_queue_resolver,
@@ -20,13 +18,13 @@ use super::transport::settings::{
 };
 use super::transport::snapshot::build_live_playback_snapshot;
 use super::transport::snapshot::{
-    current_live_position_ms, current_playback_track_id, overlay_snapshot_with_external_track,
-    overlay_snapshot_with_external_track_and_position, recently_cleared,
+    current_playback_track_id, overlay_snapshot_with_external_track, recently_cleared,
 };
 use super::transport::start::{Dispatch, StartError};
 use super::transport::stream::{
     TidalPlaybackError, resolve_tidal_playback_stream, runtime_stream_resolver,
 };
+use super::transport::toggle as transport_toggle;
 use crate::db::queries;
 use crate::metadata::discogs::DiscogsClient;
 use crate::metadata::lastfm::LastFmClient;
@@ -4312,70 +4310,9 @@ fn tidal_playback_error_response(
 }
 
 async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    // Deliberately does NOT bump the playback generation. The generation
-    // identifies WHICH playback job is current; a transport toggle does not
-    // start one, so bumping here orphaned the engine that is still loaded:
-    // it keeps the generation it was created with, and every generation-guarded
-    // path then rejected its events for the rest of the track. That silently
-    // broke the end-of-track queue advance (the track played to its final
-    // sample and froze), prepare-next/gapless, the Started event that sets
-    // `audio_active`, and track-error recovery, until the user hit Next.
-    //
-    // The race this was reaching for -- an in-flight resolve starting audio
-    // after the user paused -- is already handled by the play/switch paths
-    // through `with_start_paused(!transport_intent_is_playing(..))`, which
-    // reads the `is_playing` intent that `player::pause` writes below.
-    if let Some(runtime_handle) = current_playback_runtime(&state).await
-        && let Err(error) = runtime_handle.pause()
-    {
-        let message = format!("Failed to pause host audio playback: {error}");
-        report_playback_failure(&state, &message);
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    // Opt-in: free the exclusive WASAPI device on an explicit pause so other
-    // apps can take the DAC without waiting out the idle-release grace. No-op
-    // when exclusive mode is off (the runtime guards on current_exclusive) or
-    // the setting is disabled. Re-grabbed automatically on the next Resume/Play.
-    let release_on_pause = {
-        let guard = state.read().await;
-        guard
-            .db
-            .with_conn(|conn| crate::db::audio_settings::load(conn).map_err(Into::into))
-            .map(|s| s.exclusive_release_on_pause)
-            .unwrap_or(false)
-    };
-    if release_on_pause && let Some(runtime_handle) = current_playback_runtime(&state).await {
-        let _ = runtime_handle.release_exclusive_now();
-    }
-
-    let snapshot = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(player::pause)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    // Flush the in-progress session to listen_history on pause so analytics
-    // shows partial listens without waiting for the next track-change. The
-    // snapshot has is_playing=false, so sync_session_after_snapshot won't
-    // start a new session. resume_session_after_snapshot will reopen one
-    // (reusing the same session_id if the gap is < 30 min).
-    sync_session_after_snapshot(
-        &state,
-        &snapshot,
-        Some(player::ListenSessionEndReason::Stopped),
-    )
-    .await;
-
-    let state_guard = state.read().await;
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-
-    drop(state_guard);
-    let live_position_ms = current_live_position_ms(&state).await;
-    let snapshot =
-        overlay_snapshot_with_external_track_and_position(&state, snapshot, live_position_ms).await;
+    let snapshot = transport_toggle::pause(&state)
+        .await
+        .map_err(toggle_error_status)?;
     Ok(Json(json!({ "state": snapshot.state })))
 }
 
@@ -4387,131 +4324,25 @@ async fn pause_playback(State(state): State<SharedState>) -> Result<Json<Value>,
 async fn release_exclusive_playback(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    if let Some(runtime_handle) = current_playback_runtime(&state).await
-        && let Err(error) = runtime_handle.release_exclusive_now()
-    {
-        tracing::warn!(
-            target = "noor.playback",
-            event = "exclusive_release_failed",
-            "Failed to request exclusive release: {error}"
-        );
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
+    transport_toggle::release_exclusive(&state)
+        .await
+        .map_err(toggle_error_status)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn resume_playback(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    // No generation bump, for the same reason as `pause_playback`: resuming
-    // does not start a new playback job, and bumping here left the engine that
-    // is about to keep playing stranded on a stale generation.
-    let (runtime_handle, runtime_active_track_id, persisted_track_id) = {
-        let state_guard = state.read().await;
-        let runtime_handle = state_guard
-            .playback_runtime
-            .as_ref()
-            .map(|runtime| runtime.handle.clone())
-            .filter(playback_runtime::PlaybackRuntimeHandle::is_healthy);
-        let runtime_active_track_id = state_guard
-            .playback_runtime_info
-            .as_ref()
-            .and_then(|info| info.active_track_id);
-        let persisted_track_id = state_guard
-            .db
-            .with_conn(player::current_track_id)
-            .unwrap_or(None);
-        (runtime_handle, runtime_active_track_id, persisted_track_id)
-    };
-    let runtime_needs_rebuild = if runtime_active_track_id != persisted_track_id {
-        true
-    } else {
-        match runtime_handle {
-            Some(runtime_handle) => match runtime_handle.resume() {
-                Ok(()) => false,
-                Err(error) => {
-                    tracing::warn!(
-                        target: "noor.playback.recovery",
-                        event = "resume_dead_runtime",
-                        error = %error,
-                        "resume found a closed runtime command channel; rebuilding"
-                    );
-                    true
-                }
-            },
-            None => true,
-        }
-    };
-
-    let mut snapshot = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(player::resume)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    if runtime_needs_rebuild {
-        let Some(track) = snapshot.state.current_track.clone() else {
-            snapshot = {
-                let state_guard = state.read().await;
-                state_guard
-                    .db
-                    .with_conn(player::pause)
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            };
-            let state_guard = state.read().await;
-            let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-            let snapshot = overlay_snapshot_with_external_track(&state, snapshot).await;
-            return Ok(Json(json!({ "state": snapshot.state })));
-        };
-
-        if let Err((status, body)) = ensure_playback_runtime_for_track(&state, &track).await {
-            let message = body
-                .0
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Playback runtime could not restart.")
-                .to_string();
-            let state_guard = state.read().await;
-            let _ = state_guard.db.with_conn(player::pause);
-            let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-            drop(state_guard);
-            report_playback_failure(&state, &message);
-            return Err(status);
-        }
-        let generation = {
-            let state_guard = state.read().await;
-            current_playback_generation(&state_guard)
-        };
-        if let Err(error) = switch_runtime_to_snapshot_current(&state, &snapshot, generation).await
-        {
-            let message = format!("Playback runtime could not recover on resume: {error}");
-            let state_guard = state.read().await;
-            let _ = state_guard.db.with_conn(player::pause);
-            let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-            drop(state_guard);
-            report_playback_failure(&state, &message);
-            return Err(StatusCode::BAD_GATEWAY);
-        }
-        tracing::info!(
-            target: "noor.playback.recovery",
-            event = "runtime_rebuilt_on_resume",
-            track_id = track.id,
-            generation,
-            "restored the current queue row in the playback runtime"
-        );
-    }
-
-    resume_session_after_snapshot(&state, &snapshot).await;
-
-    let state_guard = state.read().await;
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-
-    drop(state_guard);
-    let live_position_ms = current_live_position_ms(&state).await;
-    let snapshot =
-        overlay_snapshot_with_external_track_and_position(&state, snapshot, live_position_ms).await;
+    let snapshot = transport_toggle::resume(&state)
+        .await
+        .map_err(toggle_error_status)?;
     Ok(Json(json!({ "state": snapshot.state })))
+}
+
+fn toggle_error_status(error: transport_toggle::ToggleError) -> StatusCode {
+    match error {
+        transport_toggle::ToggleError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        transport_toggle::ToggleError::Runtime(error) => runtime_unavailable_response(error, 0).0,
+        transport_toggle::ToggleError::RecoveryFailed => StatusCode::BAD_GATEWAY,
+    }
 }
 
 // --- Pending-row resolution --------------------------------------------------
@@ -5034,70 +4865,18 @@ async fn set_playback_position(
     State(state): State<SharedState>,
     Json(payload): Json<PositionRequest>,
 ) -> Result<(StatusCode, Json<Value>), StatusCode> {
-    // Option C: route is a dumb dispatcher. The runtime's SeekTo handler
-    // decides in-buffer / segment-restart / reject; we just translate the
-    // outcome to a status code and return a snapshot.
-    //
-    // No runtime active (pre-first-play boot, or runtime crashed): silent OK
-    // with the current snapshot. A seek with no runtime is a UI race we don't
-    // need to fail the response over.
-    let handle = {
-        let g = state.read().await;
-        g.playback_runtime.as_ref().map(|rt| rt.handle.clone())
-    };
-    let outcome = match handle {
-        Some(handle) => {
-            let allow = payload.allow_segment_seek;
-            let pos = payload.position_ms;
-            // `recv_timeout` inside seek_to_segment_aware blocks; run it on a
-            // blocking pool so it doesn't park an async executor thread.
-            tokio::task::spawn_blocking(move || handle.seek_to_segment_aware(pos, allow))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        }
-        None => playback_runtime::SeekToOutcome::RejectedOutOfBuffer,
-    };
-
-    // A fired event remains part of listening history, but an accepted seek
-    // means its rendered overlap is no longer the live visual association.
-    if matches!(
-        outcome,
-        playback_runtime::SeekToOutcome::Dispatched
-            | playback_runtime::SeekToOutcome::DispatchedCrossfadeSuppressed
-    ) && let Some(session) = state.write().await.active_listen_session.as_mut()
-    {
-        session.transition_visual_valid = false;
-    }
-
-    let snapshot = build_live_playback_snapshot(&state)
+    match transport_toggle::seek(&state, payload.position_ms, payload.allow_segment_seek)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let _ = {
-        let g = state.read().await;
-        g.event_tx.send(AppEvent::PlaybackStateChanged)
-    };
-
-    match outcome {
-        playback_runtime::SeekToOutcome::DispatchedCrossfadeSuppressed => {
-            if let Err(error) =
-                mark_armed_dj_transition_manual_seek_suppressed_if_needed(&state).await
-            {
-                warn!("Failed to suppress armed DJ transition after seek: {error}");
-            }
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(json!({ "state": snapshot.state })),
-            ))
-        }
-        playback_runtime::SeekToOutcome::Dispatched => Ok((
+        .map_err(toggle_error_status)?
+    {
+        transport_toggle::SeekResult::Accepted(snapshot) => Ok((
             StatusCode::ACCEPTED,
             Json(json!({ "state": snapshot.state })),
         )),
-        playback_runtime::SeekToOutcome::RejectedOutOfBuffer => Ok((
+        transport_toggle::SeekResult::Rejected(snapshot) => Ok((
             StatusCode::CONFLICT,
             Json(json!({ "state": snapshot.state })),
         )),
-        playback_runtime::SeekToOutcome::Failed => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
