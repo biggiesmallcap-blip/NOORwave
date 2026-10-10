@@ -263,6 +263,70 @@ fn fill_missing_identity(refreshed: &mut TidalTokens, previous: &TidalTokens) {
     }
 }
 
+/// Production adapter: TIDAL's token endpoint, then a validation call so a
+/// refreshed-but-useless token is caught before callers retry with it.
+pub struct AuthEndpointRefresher {
+    auth_http: reqwest::Client,
+    api_http: reqwest::Client,
+}
+
+impl AuthEndpointRefresher {
+    pub fn new(auth_http: reqwest::Client, api_http: reqwest::Client) -> Self {
+        Self {
+            auth_http,
+            api_http,
+        }
+    }
+}
+
+#[async_trait]
+impl TokenRefresher for AuthEndpointRefresher {
+    async fn refresh(&self, current: &TidalTokens) -> Result<TidalTokens> {
+        let mut refreshed = crate::services::tidal::auth::refresh_token(
+            &self.auth_http,
+            &current.refresh_token,
+            current.auth_flow.as_deref(),
+        )
+        .await?;
+        fill_missing_identity(&mut refreshed, current);
+        let validation = TidalClient::with_http(
+            self.api_http.clone(),
+            refreshed.access_token.clone(),
+            refreshed.country_code.clone(),
+        )
+        .validate_session(&refreshed.user_id)
+        .await;
+        match validation {
+            Ok(()) => Ok(refreshed),
+            Err(error) if crate::services::tidal::client::is_auth_failure(&error) => {
+                Err(crate::services::tidal::auth::RefreshRejected {
+                    status: "validation".to_string(),
+                    body: error.to_string(),
+                }
+                .into())
+            }
+            Err(error) => Err(error.context("Refreshed TIDAL session still failed validation")),
+        }
+    }
+}
+
+impl TidalSessionConfig {
+    pub fn production(
+        api_http: reqwest::Client,
+        auth_http: reqwest::Client,
+        store: TokenStore,
+        events: broadcast::Sender<crate::AppEvent>,
+    ) -> Self {
+        Self {
+            refresher: Arc::new(AuthEndpointRefresher::new(auth_http, api_http.clone())),
+            api_http,
+            api_base: crate::services::tidal::client::TIDAL_API_URL.to_string(),
+            store: Some(store),
+            events: Some(events),
+        }
+    }
+}
+
 /// Encrypted persistence of the tokens in `service_auth` (service='tidal').
 #[derive(Clone)]
 pub struct TokenStore {

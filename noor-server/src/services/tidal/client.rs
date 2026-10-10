@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 
-const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
+pub(crate) const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
 const TIDAL_ALBUM_TRACKS_PAGE_SIZE: i32 = 100;
 const TIDAL_ALBUM_TRACKS_MAX_PAGES: usize = 20;
 
