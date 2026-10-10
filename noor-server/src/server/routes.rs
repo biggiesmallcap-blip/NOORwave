@@ -1,3 +1,4 @@
+use super::transport::command as transport_command;
 use super::transport::events::{
     describe_tidal_playback_error, handle_near_end,
     mark_armed_dj_transition_manual_seek_suppressed_if_needed, report_playback_failure,
@@ -5,34 +6,30 @@ use super::transport::events::{
 };
 use super::transport::generation::{
     bump as bump_playback_generation, current as current_playback_generation,
-    is_current as playback_generation_is_current,
 };
 use super::transport::listen::{
     flush_active_listen_session_locked, record_transition_if_changed,
     resume_session_after_snapshot, sync_session_after_snapshot,
 };
 use super::transport::pending::{
-    resolve_or_skip_pending_current, resolve_or_skip_pending_current_previous, resolve_pending_row,
-    spawn_pending_queue_resolver,
+    resolve_or_skip_pending_current, resolve_pending_row, spawn_pending_queue_resolver,
 };
 use super::transport::runtime::{RuntimeUnavailable, current as current_playback_runtime};
 use super::transport::settings::{
-    current_crossfade_ms, effective_crossfade_ms, reissue_current_track_at_new_quality,
-    runtime_output_settings_from_audio_settings,
+    reissue_current_track_at_new_quality, runtime_output_settings_from_audio_settings,
 };
+use super::transport::snapshot::build_live_playback_snapshot;
 use super::transport::snapshot::{
     current_live_position_ms, current_playback_track_id, overlay_snapshot_with_external_track,
     overlay_snapshot_with_external_track_and_position, recently_cleared,
-    restore_after_previous_failure, save_playback_anchor,
 };
-use super::transport::start::{Dispatch, StartError, StartRequest, start_track};
+use super::transport::start::{Dispatch, StartError};
 use super::transport::stream::{
     TidalPlaybackError, resolve_tidal_playback_stream, runtime_stream_resolver,
 };
 use crate::db::queries;
 use crate::metadata::discogs::DiscogsClient;
 use crate::metadata::lastfm::LastFmClient;
-use crate::playback::history::PlayHistoryEntry;
 use crate::playback::{automix, player, queue, runtime as playback_runtime};
 use crate::services::discovery::{DiscoveryCandidateSeed, TidalDiscoveryProvider};
 use crate::services::learning as discovery_learning;
@@ -3049,196 +3046,21 @@ pub(super) async fn spawn_pending_resolvers_for_queue_items(
 pub(super) async fn start_first_radio_queue_item(
     state: &SharedState,
 ) -> Result<player::PlaybackSnapshot, (StatusCode, Json<Value>)> {
-    let playback_generation = bump_playback_generation(state).await;
-
-    let previous_track_id = current_playback_track_id(state).await;
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard
-            .db
-            .with_conn(|conn| player::start_queue_from_beginning(conn, false))
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "playback_state_update_failed",
-                        "message": "Failed to start the radio queue.",
-                    })),
-                )
-            })?
-    };
-
-    start_current_queue_item_playback(
-        state,
-        snapshot,
-        playback_generation,
-        previous_track_id,
-        "start_first_radio_queue_item",
-        "radio",
-    )
-    .await
+    transport_command::start_queue_from_beginning(state)
+        .await
+        .map_err(|error| command_error_response(state, error))
 }
 
-/// Shared "make the anchored queue row audible" tail: resolve (or skip) a
-/// pending current row, resolve the TIDAL stream, switch the runtime to it,
-/// sync the listen session, and emit events. Callers position the anchor
-/// first (start-of-queue, or an explicit row via play_queue_item_anchor).
-async fn start_current_queue_item_playback(
-    state: &SharedState,
-    mut snapshot: player::PlaybackSnapshot,
-    playback_generation: u64,
-    previous_track_id: Option<i64>,
-    context: &'static str,
-    transition_source: &'static str,
-) -> Result<player::PlaybackSnapshot, (StatusCode, Json<Value>)> {
-    snapshot = resolve_or_skip_pending_current(state, snapshot, playback_generation, context)
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                target: "noor.playback.advance",
-                event = "queue_start_pending_advance_failed",
-                context,
-                error = %error,
-                "failed to resolve or skip the current queue item"
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "playback_state_update_failed",
-                    "message": "Failed to start the queue.",
-                })),
-            )
-        })?;
-
-    let play_track = snapshot.state.current_track.clone();
-
-    let end_reason = if play_track.is_some() {
-        Some(player::ListenSessionEndReason::Replaced)
-    } else {
-        Some(player::ListenSessionEndReason::QueueEnded)
-    };
-    sync_session_after_snapshot(state, &snapshot, end_reason).await;
-
-    if let Some(track) = play_track
-        .as_ref()
-        .or(snapshot.state.current_track.as_ref())
-    {
-        let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
-        match start_track(
-            state,
-            StartRequest {
-                track,
-                generation: playback_generation,
-                dispatch: Dispatch::Play,
-                crossfade_ms,
-            },
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(StartError::Superseded) => {
-                return Ok(overlay_snapshot_with_external_track(state, snapshot).await);
-            }
-            Err(error) => {
-                let paused_snapshot = {
-                    let state_guard = state.read().await;
-                    state_guard.db.with_conn(player::pause).ok()
-                };
-                // sync_session_after_snapshot above already opened a session
-                // for this (local) track; flush+drop it so we don't bill a
-                // bogus multi-minute listen the next time the user plays.
-                if matches!(error, StartError::LocalUnsupported)
-                    && let Some(snap) = paused_snapshot
-                {
-                    sync_session_after_snapshot(
-                        state,
-                        &snap,
-                        Some(player::ListenSessionEndReason::Stopped),
-                    )
-                    .await;
-                }
-                return Err(start_error_response(
-                    state,
-                    error,
-                    track.id,
-                    "TIDAL stream could not be resolved while starting radio.",
-                    Some("Playback runtime was not available for starting radio."),
-                ));
-            }
-        }
-    } else if let Some(runtime_handle) = current_playback_runtime(state).await {
-        let _ = runtime_handle.stop();
-    }
-
-    record_transition_if_changed(state, previous_track_id, &snapshot, transition_source, true)
-        .await;
-
-    let state_guard = state.read().await;
-    if let Some(track_id) = play_track
-        .as_ref()
-        .or(snapshot.state.current_track.as_ref())
-        .map(|track| track.id)
-    {
-        let _ = state_guard
-            .event_tx
-            .send(AppEvent::TrackChanged { track_id });
-    }
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-    let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-    drop(state_guard);
-
-    Ok(overlay_snapshot_with_external_track(state, snapshot).await)
-}
-
-/// POST /api/playback/queue/play-item - jump playback to a specific queue row
-/// (library or pending) and start it. The unified click handler for queue
-/// rows: pending rows resolve (import + promote) on the way in, and unlike
-/// play-by-track-id this cannot land on the wrong row when the same track
-/// appears twice in the queue.
+/// POST /api/playback/queue/play-item - jump playback to a specific queue row.
 async fn play_queue_item(
     State(state): State<SharedState>,
     Json(payload): Json<PlayQueueItemRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let playback_generation = bump_playback_generation(&state).await;
-
-    let previous_track_id = current_playback_track_id(&state).await;
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard
-            .db
-            .with_conn(|conn| player::play_queue_item_anchor(conn, payload.queue_item_id))
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "playback_state_update_failed",
-                        "message": "Failed to jump to that queue item.",
-                    })),
-                )
-            })?
-    };
-    let Some(snapshot) = snapshot else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "queue item not found" })),
-        ));
-    };
-
-    let snapshot = start_current_queue_item_playback(
+    command_response(
         &state,
-        snapshot,
-        playback_generation,
-        previous_track_id,
-        "play_queue_item",
-        "queue",
+        transport_command::play_queue_item(&state, payload.queue_item_id).await,
     )
-    .await?;
-    refresh_dj_after_queue_change(state, "play_queue_item").await;
-    Ok(Json(json!({
-        "state": snapshot.state,
-        "queue": snapshot.queue,
-        "queue_revision": snapshot.queue_revision,
-    })))
+    .await
 }
 
 async fn radio_start(
@@ -4156,76 +3978,10 @@ async fn set_album_favorite(
 
 // -- MusicBrainz enrichment -------------------------------------------------
 
-/// Build a `PlaybackSnapshot` whose `state.position_ms`, `state.buffered_ms`,
-/// and `state.is_playing` reflect the live audio runtime (not just the DB
-/// snapshot). Used by `GET /api/playback/state` and the route-side seek ack
-/// in `POST /api/playback/position` so both responses carry a mutually
-/// consistent view: returning a 409 body built from the raw DB snapshot
-/// while the rejection decision was made from a live `buffered_samples`
-/// read would be exactly the inconsistency the codex review flagged.
-async fn build_live_playback_snapshot(
-    state: &SharedState,
-) -> Result<player::PlaybackSnapshot, StatusCode> {
-    let (live_position_ms, live_buffered_ms, live_buffered_start_ms, audio_active) = {
-        let state_guard = state.read().await;
-        let pair = state_guard
-            .playback_runtime
-            .as_ref()
-            .zip(state_guard.playback_runtime_info.as_ref());
-        let live_pos =
-            pair.map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels));
-        let live_buf =
-            pair.map(|(rt, info)| rt.handle.get_buffered_ms(info.sample_rate, info.channels));
-        let live_buf_start = pair.map(|(rt, info)| {
-            rt.handle
-                .get_buffered_start_ms(info.sample_rate, info.channels)
-        });
-        let active = state_guard
-            .audio_active
-            .load(std::sync::atomic::Ordering::Relaxed);
-        (live_pos, live_buf, live_buf_start, active)
-    };
-
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard
-            .db
-            .with_conn(player::load_snapshot)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-    let mut snapshot =
-        overlay_snapshot_with_external_track_and_position(state, snapshot, live_position_ms).await;
-
-    if let Some(buf) = live_buffered_ms {
-        snapshot.state.buffered_ms = buf;
-    }
-    if let Some(buf_start) = live_buffered_start_ms {
-        snapshot.state.buffered_start_ms = buf_start;
-    }
-
-    // Correct a stale is_playing flag before sending to the frontend:
-    // - no runtime at all (server restarted, runtime crashed), OR
-    // - runtime exists but CPAL buffer hasn't started draining yet (buffering phase).
-    if !audio_active || live_position_ms.is_none() {
-        snapshot.state.is_playing = false;
-    }
-
-    Ok(snapshot)
-}
-
-async fn build_live_playback_snapshot_json(
-    state: &SharedState,
-) -> Result<player::PlaybackSnapshot, (StatusCode, Json<Value>)> {
-    build_live_playback_snapshot(state).await.map_err(|status| {
-        (
-            status,
-            Json(json!({ "error": "Playback snapshot unavailable" })),
-        )
-    })
-}
-
 async fn get_playback_state(State(state): State<SharedState>) -> Result<Json<Value>, StatusCode> {
-    let snapshot = build_live_playback_snapshot(&state).await?;
+    let snapshot = build_live_playback_snapshot(&state)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({
         "state": snapshot.state,
         "queue": snapshot.queue,
@@ -4286,235 +4042,96 @@ async fn play_track(
     State(state): State<SharedState>,
     Json(payload): Json<PlaybackTrackRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // This route accepts persisted library track ids only. Pending TIDAL rows are played by their queue item id.
-    if payload.track_id <= 0 {
-        return Err((
+    command_response(
+        &state,
+        transport_command::play(&state, payload.track_id).await,
+    )
+    .await
+}
+
+/// HTTP adapter for a transport command result.
+async fn command_response(
+    state: &SharedState,
+    result: Result<transport_command::Outcome, transport_command::CommandError>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match result {
+        Ok(transport_command::Outcome::Settled(snapshot)) => Ok(Json(json!({
+            "state": snapshot.state,
+            "queue": snapshot.queue,
+            "queue_revision": snapshot.queue_revision
+        }))),
+        Ok(transport_command::Outcome::Current) => current_playback_snapshot_json(state).await,
+        Err(error) => Err(command_error_response(state, error)),
+    }
+}
+
+fn command_error_response(
+    state: &SharedState,
+    error: transport_command::CommandError,
+) -> (StatusCode, Json<Value>) {
+    use transport_command::CommandError;
+    match error {
+        CommandError::StateUpdate(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "playback_state_update_failed",
+                "message": message,
+            })),
+        ),
+        CommandError::Start {
+            error,
+            track_id,
+            stream_context,
+            runtime_message,
+        } => start_error_response(state, error, track_id, stream_context, runtime_message),
+        CommandError::UnplayableAdvance(message) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "status": "playback_runtime_failed",
+                "message": message,
+            })),
+        ),
+        CommandError::InvalidTrackId(track_id) => (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "status": "invalid_track_id",
                 "message": "play_track requires a positive library track id.",
-                "track_id": payload.track_id,
+                "track_id": track_id,
             })),
-        ));
+        ),
+        CommandError::TrackLookupFailed(track_id) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "track_lookup_failed",
+                "message": "Failed to load track before playback.",
+                "track_id": track_id,
+            })),
+        ),
+        CommandError::TrackNotFound(track_id) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "status": "track_not_found",
+                "message": "Track not found.",
+                "track_id": track_id,
+            })),
+        ),
+        CommandError::PlaybackStartFailed(track_id) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "playback_start_failed",
+                "message": "Failed to start playback.",
+                "track_id": track_id,
+            })),
+        ),
+        CommandError::SnapshotUnavailable => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "Playback snapshot unavailable" })),
+        ),
+        CommandError::QueueItemNotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "queue item not found" })),
+        ),
     }
-
-    let previous_track_id = current_playback_track_id(&state).await;
-    let playback_generation = bump_playback_generation(&state).await;
-    // User-driven play; reset the post-clear suppression so automix
-    // re-engages naturally instead of waiting out the 60s window.
-    {
-        let g = state.read().await;
-        g.user_cleared_at
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-    let track = {
-        let state_guard = state.read().await;
-        state_guard
-            .db
-            .with_conn(|conn| queue::get_track_by_id(conn, payload.track_id))
-            .map_err(|error| {
-                tracing::error!(
-                    target: "noor.playback.tidal",
-                    event = "playback_track_lookup_failed",
-                    track_id = payload.track_id,
-                    error = %error,
-                    "failed to load track before playback"
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "track_lookup_failed",
-                        "message": "Failed to load track before playback.",
-                        "track_id": payload.track_id,
-                    })),
-                )
-            })?
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "status": "track_not_found",
-                        "message": "Track not found.",
-                        "track_id": payload.track_id,
-                    })),
-                )
-            })?
-    };
-
-    tracing::info!(
-        target: "noor.playback.tidal",
-        event = "playback_start_requested",
-        track_id = track.id,
-        source = %player::playback_source_kind(&track),
-        "playback start requested"
-    );
-
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard
-            .db
-            .with_conn(|conn| player::play_track_now(conn, payload.track_id))
-            .map_err(|error| {
-                tracing::error!(
-                    target: "noor.playback.tidal",
-                    event = "playback_start_failed",
-                    track_id = payload.track_id,
-                    error = %error,
-                    "failed to start playback"
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "playback_start_failed",
-                        "message": "Failed to start playback.",
-                        "track_id": payload.track_id,
-                    })),
-                )
-            })?
-    };
-
-    let crossfade_ms = current_crossfade_ms(&state).await;
-    let started = match start_track(
-        &state,
-        StartRequest {
-            track: &track,
-            generation: playback_generation,
-            dispatch: Dispatch::Play,
-            crossfade_ms,
-        },
-    )
-    .await
-    {
-        Ok(started) => started,
-        Err(StartError::Superseded) => return current_playback_snapshot_json(&state).await,
-        Err(StartError::Stream(error)) if error.is_track_unplayable() => {
-            // The track the user picked is a dead TIDAL asset. Rather than fail
-            // the whole action, hand off to the skip-aware runtime switch, which
-            // advances past it (and any further dead rows) and starts the next
-            // playable track. Return the state it settles on.
-            switch_runtime_to_snapshot_current(&state, &snapshot, playback_generation)
-                .await
-                .map_err(|error| {
-                    let message = format!("Failed to advance past an unplayable track: {error}");
-                    report_playback_failure(&state, &message);
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({
-                            "status": "playback_runtime_failed",
-                            "message": message,
-                        })),
-                    )
-                })?;
-            return current_playback_snapshot_json(&state).await;
-        }
-        Err(error) => {
-            let paused_snapshot = {
-                let state_guard = state.read().await;
-                state_guard.db.with_conn(player::pause).ok()
-            };
-            // Flush the prior TIDAL session before bailing on a local track,
-            // otherwise the active session keeps accumulating against the
-            // still-playing previous track and the next successful play
-            // records a bogus multi-hour listen.
-            if matches!(error, StartError::LocalUnsupported)
-                && let Some(snap) = paused_snapshot
-            {
-                sync_session_after_snapshot(
-                    &state,
-                    &snap,
-                    Some(player::ListenSessionEndReason::Stopped),
-                )
-                .await;
-            }
-            return Err(start_error_response(
-                &state,
-                error,
-                track.id,
-                "TIDAL stream could not be resolved before playback.",
-                None,
-            ));
-        }
-    };
-    let stream_info = started.stream_info;
-    tracing::info!(
-        target: "noor.playback.tidal",
-        event = "playback_stream_ready",
-        track_id = track.id,
-        "TIDAL stream resolved before playback start"
-    );
-    // Fire-and-forget play event: session health + artist attribution
-    if let Some(tidal_id) = track.tidal_id {
-        let http = {
-            let g = state.read().await;
-            g.http_client.clone()
-        };
-        let token = {
-            let g = state.read().await;
-            g.tidal.tokens().map(|t| t.access_token)
-        };
-        if let Some(token) = token {
-            let quality = stream_info.audio_quality.clone();
-            let duration_ms = track.duration_ms.unwrap_or(0);
-            tokio::spawn(async move {
-                if let Err(e) = crate::services::tidal::play_reporter::report_play(
-                    &http,
-                    &token,
-                    tidal_id,
-                    &quality,
-                    duration_ms,
-                )
-                .await
-                {
-                    tracing::warn!("play report failed: {e}");
-                }
-            });
-        }
-    }
-    record_transition_if_changed(&state, previous_track_id, &snapshot, "user", false).await;
-
-    sync_session_after_snapshot(
-        &state,
-        &snapshot,
-        Some(player::ListenSessionEndReason::Replaced),
-    )
-    .await;
-
-    // If automix is enabled, fill the queue in the background now that
-    // the new current track is committed to DB. Doing this here (rather than
-    // at automix-enable time) ensures the fill uses the correct track context
-    // and doesn't race with this play_track DB operation.
-    if snapshot.state.automix_enabled {
-        let bg_db = {
-            let g = state.read().await;
-            g.db.clone()
-        };
-        let bg_tx = {
-            let g = state.read().await;
-            g.event_tx.clone()
-        };
-        tokio::spawn(async move {
-            // play_track resets `user_cleared_at` to 0 above, so the
-            // suppression window cannot apply to this user-driven fill.
-            let result = bg_db.with_conn(|conn| {
-                automix::ensure_automix_queue_depth(conn, automix::AUTOMIX_MIN_UPCOMING, false)
-            });
-            if result.is_ok() {
-                let _ = bg_tx.send(AppEvent::QueueUpdated);
-            }
-        });
-    }
-
-    let state_guard = state.read().await;
-    let _ = state_guard.event_tx.send(AppEvent::TrackChanged {
-        track_id: payload.track_id,
-    });
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-
-    Ok(Json(json!({
-        "state": snapshot.state,
-        "queue": snapshot.queue,
-        "queue_revision": snapshot.queue_revision
-    })))
 }
 
 /// HTTP response for a failed start. `stream_context` is the message used for
@@ -5404,366 +5021,13 @@ mod version_match_tests {
 async fn next_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let playback_generation = bump_playback_generation(&state).await;
-    let previous_track_id = current_playback_track_id(&state).await;
-    let mut snapshot = {
-        let state = state.read().await;
-        let cleared = recently_cleared(&state);
-        state
-            .db
-            .with_conn(|conn| player::next_track(conn, cleared))
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "playback_state_update_failed",
-                        "message": "Failed to advance playback state.",
-                    })),
-                )
-            })?
-    };
-
-    snapshot =
-        resolve_or_skip_pending_current(&state, snapshot, playback_generation, "manual_next_track")
-            .await
-            .map_err(|error| {
-                tracing::error!(
-                    target: "noor.playback.advance",
-                    event = "manual_next_pending_advance_failed",
-                    error = %error,
-                    "failed to resolve or skip pending row while advancing playback"
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "playback_state_update_failed",
-                        "message": "Failed to advance playback state.",
-                    })),
-                )
-            })?;
-
-    if !playback_generation_is_current(&state, playback_generation).await {
-        return current_playback_snapshot_json(&state).await;
-    }
-
-    record_transition_if_changed(&state, previous_track_id, &snapshot, "queue", true).await;
-
-    let end_reason = if snapshot.state.current_track.is_some() {
-        Some(player::ListenSessionEndReason::Replaced)
-    } else {
-        Some(player::ListenSessionEndReason::QueueEnded)
-    };
-    sync_session_after_snapshot(&state, &snapshot, end_reason).await;
-
-    let play_track = snapshot.state.current_track.as_ref();
-
-    if let Some(track) = play_track {
-        let crossfade_ms = effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await;
-        match start_track(
-            &state,
-            StartRequest {
-                track,
-                generation: playback_generation,
-                dispatch: Dispatch::Switch,
-                crossfade_ms,
-            },
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(StartError::Superseded) => return current_playback_snapshot_json(&state).await,
-            Err(StartError::Stream(error)) if error.is_track_unplayable() => {
-                // Dead asset: hand off to the skip-aware runtime switch, which
-                // advances past this row (and any further dead ones) and starts
-                // the next playable track. Return the state it settles on.
-                switch_runtime_to_snapshot_current(&state, &snapshot, playback_generation)
-                    .await
-                    .map_err(|error| {
-                        let message =
-                            format!("Failed to advance past an unplayable track: {error}");
-                        report_playback_failure(&state, &message);
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({
-                                "status": "playback_runtime_failed",
-                                "message": message,
-                            })),
-                        )
-                    })?;
-                return current_playback_snapshot_json(&state).await;
-            }
-            Err(error) => {
-                return Err(start_error_response(
-                    &state,
-                    error,
-                    track.id,
-                    "TIDAL stream could not be resolved while advancing playback.",
-                    Some("Playback runtime was not available for advancing playback."),
-                ));
-            }
-        }
-    } else if let Some(runtime_handle) = current_playback_runtime(&state).await {
-        let _ = runtime_handle.stop();
-    }
-
-    let state_guard = state.read().await;
-    let event_track_id = snapshot.state.current_track.as_ref().map(|t| t.id);
-    if let Some(track_id) = event_track_id {
-        let _ = state_guard
-            .event_tx
-            .send(AppEvent::TrackChanged { track_id });
-    }
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-    let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
-
-    Ok(Json(json!({
-        "state": snapshot.state,
-        "queue": snapshot.queue,
-        "queue_revision": snapshot.queue_revision
-    })))
-}
-
-/// Restart whatever is audibly playing from the top via a segment-aware
-/// runtime seek: no stream re-resolve, no engine cold start. Works for
-/// persisted queue playback and preserves pause state. While paused the audio callback does not consume the seek
-/// until resume, so the reported position may hold its old value until then.
-async fn restart_current_in_place(
-    state: &SharedState,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let handle = {
-        let state_guard = state.read().await;
-        state_guard
-            .playback_runtime
-            .as_ref()
-            .map(|rt| rt.handle.clone())
-    };
-    if let Some(handle) = handle {
-        // Segment-aware restart to 0, same path the seek route uses.
-        let _ = tokio::task::spawn_blocking(move || handle.seek_to_segment_aware(0, true)).await;
-    }
-    {
-        let state_guard = state.read().await;
-        let _ = state_guard.db.with_conn(|conn| {
-            conn.execute("UPDATE playback_state SET position_ms = 0 WHERE id = 1", [])?;
-            Ok::<_, anyhow::Error>(())
-        });
-    }
-
-    let snapshot = build_live_playback_snapshot_json(state).await?;
-    {
-        let state_guard = state.read().await;
-        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-    }
-    Ok(Json(json!({
-        "state": snapshot.state,
-        "queue": snapshot.queue,
-        "queue_revision": snapshot.queue_revision
-    })))
+    command_response(&state, transport_command::next(&state).await).await
 }
 
 async fn previous_track(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // Past the threshold: "previous" means restart the playing track.
-    let live_position_ms = current_live_position_ms(&state).await;
-    if live_position_ms.unwrap_or(0) >= player::PREVIOUS_RESTART_THRESHOLD_MS {
-        return restart_current_in_place(&state).await;
-    }
-
-    previous_via_persisted_queue(&state, live_position_ms).await
-}
-
-async fn previous_via_persisted_queue(
-    state: &SharedState,
-    live_position_ms: Option<i64>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let playback_generation = bump_playback_generation(state).await;
-    let previous_track_id = current_playback_track_id(state).await;
-    let saved_anchor = save_playback_anchor(state).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "playback_state_update_failed",
-                "message": "Failed to move to the previous track.",
-            })),
-        )
-    })?;
-
-    // Walk play history for the most recent entry that still resolves
-    // against the live queue, so "previous" follows what actually played
-    // across shuffle, manual jumps, and automix insertions. Entries whose
-    // rows are gone are consumed: retrying them can never succeed.
-    const PREVIOUS_HISTORY_POP_LIMIT: usize = 12;
-    let mut history_anchor: Option<player::HistoryAnchor> = None;
-    let mut popped_entry: Option<PlayHistoryEntry> = None;
-    for _ in 0..PREVIOUS_HISTORY_POP_LIMIT {
-        let entry = {
-            let mut state_guard = state.write().await;
-            state_guard.play_history.pop_previous()
-        };
-        match entry {
-            None => break,
-            Some(PlayHistoryEntry::Persisted {
-                queue_item_id,
-                track_id,
-            }) => {
-                let row_matches = {
-                    let state_guard = state.read().await;
-                    state_guard
-                        .db
-                        .with_conn(move |conn| {
-                            Ok(conn
-                                .query_row(
-                                    "SELECT track_id FROM queue WHERE id = ?1",
-                                    params![queue_item_id],
-                                    |row| row.get::<_, Option<i64>>(0),
-                                )
-                                .optional()?)
-                        })
-                        .ok()
-                        .flatten()
-                        == Some(Some(track_id))
-                };
-                if row_matches {
-                    history_anchor = Some(player::HistoryAnchor {
-                        queue_item_id,
-                        track_id: Some(track_id),
-                    });
-                    popped_entry = Some(PlayHistoryEntry::Persisted {
-                        queue_item_id,
-                        track_id,
-                    });
-                    break;
-                }
-            }
-        }
-    }
-
-    let outcome = {
-        let anchor = history_anchor;
-        let live = live_position_ms.unwrap_or(0);
-        let state_guard = state.read().await;
-        state_guard
-            .db
-            .with_conn(move |conn| player::previous_track(conn, live, anchor.as_ref()))
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "playback_state_update_failed",
-                        "message": "Failed to move to the previous track.",
-                    })),
-                )
-            })?
-    };
-
-    if outcome.restart_in_place && live_position_ms.is_some() {
-        // Head of the queue with no history while audio is live: restart via
-        // seek. With no runtime (stopped), fall through to the switch path so
-        // pressing previous still starts audio, as before.
-        return restart_current_in_place(state).await;
-    }
-    let mut snapshot = outcome.snapshot;
-    snapshot = resolve_or_skip_pending_current_previous(
-        state,
-        snapshot,
-        playback_generation,
-        "manual_previous_track",
-        saved_anchor,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!(
-            target: "noor.playback.advance",
-            event = "manual_previous_pending_advance_failed",
-            error = %error,
-            "failed to resolve or skip pending row while moving to previous playback item"
-        );
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "playback_state_update_failed",
-                "message": "Failed to move to the previous track.",
-            })),
-        )
-    })?;
-
-    if !playback_generation_is_current(state, playback_generation).await {
-        return current_playback_snapshot_json(state).await;
-    }
-
-    record_transition_if_changed(state, previous_track_id, &snapshot, "user", false).await;
-
-    sync_session_after_snapshot(
-        state,
-        &snapshot,
-        Some(player::ListenSessionEndReason::Replaced),
-    )
-    .await;
-
-    let play_track = snapshot.state.current_track.as_ref();
-
-    if let Some(track) = play_track {
-        {
-            // Back-navigation: the incoming Started event must not push the
-            // track being navigated away from onto play history, or two prev
-            // presses would ping-pong between the same two tracks.
-            let mut state_guard = state.write().await;
-            state_guard
-                .play_history
-                .suppress_push_for_generation(playback_generation);
-        }
-        let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
-        match start_track(
-            state,
-            StartRequest {
-                track,
-                generation: playback_generation,
-                dispatch: Dispatch::Switch,
-                crossfade_ms,
-            },
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(StartError::Superseded) => return current_playback_snapshot_json(state).await,
-            Err(error) => {
-                // The anchor moved but the audio did not: roll back so state
-                // and audio agree instead of leaving the DB pointing at a
-                // track the runtime never switched to.
-                restore_after_previous_failure(
-                    state,
-                    saved_anchor,
-                    popped_entry,
-                    playback_generation,
-                )
-                .await;
-                return Err(start_error_response(
-                    state,
-                    error,
-                    track.id,
-                    "TIDAL stream could not be resolved while moving to the previous track.",
-                    Some("Playback runtime was not available for moving to the previous track."),
-                ));
-            }
-        }
-    }
-
-    let state_guard = state.read().await;
-    let event_track_id = snapshot.state.current_track.as_ref().map(|t| t.id);
-    if let Some(track_id) = event_track_id {
-        let _ = state_guard
-            .event_tx
-            .send(AppEvent::TrackChanged { track_id });
-    }
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
-
-    let snapshot = overlay_snapshot_with_external_track(state, snapshot).await;
-    Ok(Json(json!({
-        "state": snapshot.state,
-        "queue": snapshot.queue,
-        "queue_revision": snapshot.queue_revision
-    })))
+    command_response(&state, transport_command::previous(&state).await).await
 }
 
 async fn set_playback_position(
@@ -5805,7 +5069,9 @@ async fn set_playback_position(
         session.transition_visual_valid = false;
     }
 
-    let snapshot = build_live_playback_snapshot(&state).await?;
+    let snapshot = build_live_playback_snapshot(&state)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = {
         let g = state.read().await;
         g.event_tx.send(AppEvent::PlaybackStateChanged)

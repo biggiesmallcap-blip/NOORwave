@@ -221,3 +221,57 @@ pub(crate) struct SavedPlaybackAnchor {
     pub(crate) position_ms: i64,
     pub(crate) is_playing: bool,
 }
+
+/// Build a `PlaybackSnapshot` whose `state.position_ms`, `state.buffered_ms`,
+/// and `state.is_playing` reflect the live audio runtime (not just the DB
+/// snapshot). Used by `GET /api/playback/state` and the route-side seek ack
+/// in `POST /api/playback/position` so both responses carry a mutually
+/// consistent view: returning a 409 body built from the raw DB snapshot
+/// while the rejection decision was made from a live `buffered_samples`
+/// read would be exactly the inconsistency the codex review flagged.
+pub(crate) async fn build_live_playback_snapshot(
+    state: &SharedState,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    let (live_position_ms, live_buffered_ms, live_buffered_start_ms, audio_active) = {
+        let state_guard = state.read().await;
+        let pair = state_guard
+            .playback_runtime
+            .as_ref()
+            .zip(state_guard.playback_runtime_info.as_ref());
+        let live_pos =
+            pair.map(|(rt, info)| rt.handle.get_position_ms(info.sample_rate, info.channels));
+        let live_buf =
+            pair.map(|(rt, info)| rt.handle.get_buffered_ms(info.sample_rate, info.channels));
+        let live_buf_start = pair.map(|(rt, info)| {
+            rt.handle
+                .get_buffered_start_ms(info.sample_rate, info.channels)
+        });
+        let active = state_guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Relaxed);
+        (live_pos, live_buf, live_buf_start, active)
+    };
+
+    let snapshot = {
+        let state_guard = state.read().await;
+        state_guard.db.with_conn(player::load_snapshot)?
+    };
+    let mut snapshot =
+        overlay_snapshot_with_external_track_and_position(state, snapshot, live_position_ms).await;
+
+    if let Some(buf) = live_buffered_ms {
+        snapshot.state.buffered_ms = buf;
+    }
+    if let Some(buf_start) = live_buffered_start_ms {
+        snapshot.state.buffered_start_ms = buf_start;
+    }
+
+    // Correct a stale is_playing flag before sending to the frontend:
+    // - no runtime at all (server restarted, runtime crashed), OR
+    // - runtime exists but CPAL buffer hasn't started draining yet (buffering phase).
+    if !audio_active || live_position_ms.is_none() {
+        snapshot.state.is_playing = false;
+    }
+
+    Ok(snapshot)
+}

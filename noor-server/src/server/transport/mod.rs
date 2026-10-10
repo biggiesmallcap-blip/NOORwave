@@ -2,6 +2,7 @@
 //! See CONTEXT.md "Transport". It alone bumps and checks the playback
 //! generation; HTTP handlers, the phone remote and runtime events go through it.
 
+pub(crate) mod command;
 pub(crate) mod events;
 pub(crate) mod generation;
 pub(crate) mod listen;
