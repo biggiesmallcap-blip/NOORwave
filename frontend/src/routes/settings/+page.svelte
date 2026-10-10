@@ -82,6 +82,7 @@
 		shouldRefreshAfterTerminalDiscoveryProgress
 	} from '$lib/components/settings/discovery_status';
 	import { portal } from '$lib/actions/portal';
+	import { openWhile } from '$lib/actions/open-while';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { WALLPAPERS, WALLPAPER_GROUPS, type WallpaperOption } from '$lib/components/wallpaper/shaders';
 	import {
@@ -2853,7 +2854,7 @@
 
 
 				</div>
-			</section><details data-setting-id="discovery-engine" class="glass-tile section-panel" open={discoveryIsRunning}><summary>Discovery<span class="disclosure-status">{discoveryIsRunning ? "Training - " + Math.round((discoveryStatus?.latest_run?.progress ?? 0) * 100) + "%" : discoveryUpgrade?.pending ? "Upgrade pending" : discoveryStatus ? Math.round(discoveryStatus.coverage_ratio * 100) + "% coverage" : "Status unavailable"}</span></summary><p class="setting-status">Manual runs can use substantial CPU: check the estimate and safety profile first. You can stop any run. After an update that changes how recommendations learn, NOOR relearns once on its own at low priority.</p>
+			</section><details data-setting-id="discovery-engine" class="glass-tile section-panel" use:openWhile={discoveryIsRunning}><summary>Discovery<span class="disclosure-status">{discoveryIsRunning ? "Training - " + Math.round((discoveryStatus?.latest_run?.progress ?? 0) * 100) + "%" : discoveryUpgrade?.pending ? "Upgrade pending" : discoveryStatus ? Math.round(discoveryStatus.coverage_ratio * 100) + "% coverage" : "Status unavailable"}</span></summary><p class="setting-status">Manual runs can use substantial CPU: check the estimate and safety profile first. You can stop any run. After an update that changes how recommendations learn, NOOR relearns once on its own at low priority.</p>
 
 				<details class="discovery-guide"><summary>About discovery training</summary><p class="setting-status">Training finds connections across your library. Refresh after adding music or listening history; a full retrain also rebuilds cached audio features.</p><p class="setting-status">A finished run replaces the active model only if it predicts your listening at least as well; otherwise the current model stays in use.</p></details>
 
@@ -3014,7 +3015,7 @@
 					{#if discoveryIsRunning}
 						<button class="btn btn-glass" onclick={() => void stopDiscoveryTraining()}>Stop training</button>
 					{/if}
-				</div></details><details data-setting-id="radio-similarity-index" class="glass-tile section-panel" open={radioSimilarityBusy}><summary>Radio index<span class="disclosure-status">{radioSimilarityRowCount === null ? "Unknown" : radioSimilarityRowCount.toLocaleString() + " pairs"}</span></summary><p class="setting-status">A separate radio index. Automatic rebuilds wait while the app is busy.</p><details><summary>Automatic rebuilds</summary><p class="setting-status">Rebuilds may wait for playback, sync, enrichment, analysis or training. The scheduler checks hourly after a six-hour rebuild interval; startup checks are delayed.</p></details>
+				</div></details><details data-setting-id="radio-similarity-index" class="glass-tile section-panel" use:openWhile={radioSimilarityBusy}><summary>Radio index<span class="disclosure-status">{radioSimilarityRowCount === null ? "Unknown" : radioSimilarityRowCount.toLocaleString() + " pairs"}</span></summary><p class="setting-status">A separate radio index. Automatic rebuilds wait while the app is busy.</p><details><summary>Automatic rebuilds</summary><p class="setting-status">Rebuilds may wait for playback, sync, enrichment, analysis or training. The scheduler checks hourly after a six-hour rebuild interval; startup checks are delayed.</p></details>
 				<div class="info-list">
 					<div class="info-row">
 						<span>Indexed pairs</span>
@@ -3081,7 +3082,7 @@
 <SettingRow label="Clear audio analysis" hint="Remove saved BPM, key and energy analysis. Your music and listening history stay.">
 	<button class="btn btn-glass danger" onclick={clearAllAnalysis}>Clear analysis</button>
 </SettingRow>
-{#if $audioAnalysisError}<p class="error" role="alert">{$audioAnalysisError}</p>{/if}{#if recleanSummary}<p class="setting-status">{recleanSummary}</p>{/if}{#if lastfmError}<p class="error" role="alert">{lastfmError}</p>{/if}<details data-setting-id="database-size" class="glass-tile section-panel" open={databaseCompacting}><summary>Database storage</summary>{#if databaseStats}
+{#if $audioAnalysisError}<p class="error" role="alert">{$audioAnalysisError}</p>{/if}{#if recleanSummary}<p class="setting-status">{recleanSummary}</p>{/if}{#if lastfmError}<p class="error" role="alert">{lastfmError}</p>{/if}<details data-setting-id="database-size" class="glass-tile section-panel" use:openWhile={databaseCompacting}><summary>Database storage</summary>{#if databaseStats}
 					<p class="page-copy database-size-headline">
 						<strong>{formatBytes(databaseStats.file_bytes)}</strong>
 						{#if databaseStats.estimated_reclaimable_bytes > 0}
@@ -3132,7 +3133,7 @@
 					>
 						{databaseCompacting ? 'Compacting…' : 'Compact database'}
 					</button>
-				</div></details><details data-setting-id="clear-non-library-entries" class="glass-tile section-panel" open={purgeRunning}><summary>Remove unused recommendations</summary><p class="setting-status">Remove recommendations never played, liked, queued or added to playlists.</p>
+				</div></details><details data-setting-id="clear-non-library-entries" class="glass-tile section-panel" use:openWhile={purgeRunning}><summary>Remove unused recommendations</summary><p class="setting-status">Remove recommendations never played, liked, queued or added to playlists.</p>
 				<p class="setting-status">Associated trained data is also removed. Review the confirmation before continuing.</p>
 				{#if purgeLastDeleted !== null}
 					<p class="page-copy">
