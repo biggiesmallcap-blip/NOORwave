@@ -128,6 +128,24 @@ impl TidalTokens {
     }
 }
 
+/// The auth endpoint definitively refused the refresh token (revoked,
+/// rotated away, invalid_grant). Retrying cannot help; the TIDAL session
+/// latches into needs-reconnect. Network errors and 5xx are NOT this.
+#[derive(Debug, thiserror::Error)]
+#[error("TIDAL refresh failed with {status}: {body}")]
+pub struct RefreshRejected {
+    pub status: String,
+    pub body: String,
+}
+
+pub(crate) fn refresh_status_is_rejection(status: u16) -> bool {
+    matches!(status, 400 | 401)
+}
+
+pub fn is_refresh_rejected(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<RefreshRejected>())
+}
+
 pub enum PersistedTidalTokens {
     Encrypted(TidalTokens),
     LegacyPlaintext(TidalTokens),
@@ -596,6 +614,13 @@ pub async fn refresh_token(
     let status = resp.status();
     let raw = resp.text().await?;
     if !status.is_success() {
+        if refresh_status_is_rejection(status.as_u16()) {
+            return Err(RefreshRejected {
+                status: status.to_string(),
+                body: redact_tidal_auth_body(&raw),
+            }
+            .into());
+        }
         anyhow::bail!(
             "TIDAL refresh failed with {}: {}",
             status,
@@ -646,6 +671,22 @@ pub fn error_looks_like_auth(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_rejection_is_only_400_and_401() {
+        assert!(refresh_status_is_rejection(400));
+        assert!(refresh_status_is_rejection(401));
+        assert!(!refresh_status_is_rejection(429));
+        assert!(!refresh_status_is_rejection(500));
+        assert!(!refresh_status_is_rejection(503));
+        let err: anyhow::Error = RefreshRejected {
+            status: "400 Bad Request".to_string(),
+            body: "invalid_grant".to_string(),
+        }
+        .into();
+        assert!(is_refresh_rejected(&err.context("refreshing")));
+        assert!(!is_refresh_rejected(&anyhow::anyhow!("connection reset")));
+    }
 
     #[test]
     fn pkce_code_challenge_uses_url_safe_sha256_without_padding() {
