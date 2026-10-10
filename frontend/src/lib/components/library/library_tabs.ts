@@ -1,4 +1,4 @@
-// Library views. Songs is your liked songs, as in TIDAL and Spotify, where the
+// Library views. Songs is your liked songs, where the
 // heart is the save. The old Liked tab listed ~92% of the same songs as
 // Tracks, so it is gone; Settings > Library can widen Songs to every library
 // song (librarySongsScope). Saved sessions from before keep working.

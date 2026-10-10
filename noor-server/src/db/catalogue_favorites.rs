@@ -146,7 +146,31 @@ pub fn finish(conn: &Connection, op: &Operation, error: Option<&str>) -> Result<
         &format!("UPDATE {table} SET is_favorite=?2 WHERE id=?1"),
         params![op.local_id, op.favorite as i32],
     )?;
+    if op.entity == "track" {
+        settle_delivered(conn, Some(op.local_id))?;
+    }
     Ok(())
+}
+
+/// A fully delivered explicit action is provider evidence. Once every
+/// operation succeeded and the aliases agree with the intent, the track is no
+/// longer `unresolved` (which the library shows as "Saved locally").
+/// Idempotent; runs after each delivery and at startup to heal older rows.
+pub fn settle_delivered(conn: &Connection, local_id: Option<i64>) -> Result<usize> {
+    if !enabled(conn)? {
+        return Ok(0);
+    }
+    Ok(conn.execute(
+        "UPDATE tracks SET remote_favorite_state=(SELECT CASE WHEN i.favorite=1 THEN 'favorite' ELSE 'not_favorite' END
+            FROM tidal_favorite_intents i WHERE i.entity='track' AND i.local_id=tracks.id)
+        WHERE remote_favorite_state='unresolved' AND (?1 IS NULL OR id=?1)
+        AND EXISTS(SELECT 1 FROM tidal_favorite_intents i WHERE i.entity='track' AND i.local_id=tracks.id
+            AND i.completed_at IS NOT NULL
+            AND i.favorite=EXISTS(SELECT 1 FROM tidal_track_aliases a WHERE a.track_id=tracks.id AND a.is_favorite=1))
+        AND NOT EXISTS(SELECT 1 FROM tidal_favorite_operations o
+            WHERE o.entity='track' AND o.local_id=tracks.id AND o.done=0)",
+        [local_id],
+    )?)
 }
 
 /// Apply only a complete snapshot. Its start time is the trust boundary: a
@@ -224,6 +248,9 @@ pub fn protect_snapshot(conn: &Connection, entity: &str, started: &str) -> Resul
                 ],
             )?;
         }
+    }
+    if entity == "track" {
+        settle_delivered(conn, None)?;
     }
     Ok(())
 }

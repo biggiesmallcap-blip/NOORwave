@@ -2529,7 +2529,7 @@
 					<p class="runtime-error">{playbackRuntime.last_error}</p>
 				{/if}</details>{#if playbackRuntime?.last_error}<p class="error" role="alert">{playbackRuntime.last_error}</p>{/if}
 {:else if activeCategory === 'library'}
-<SettingGroup title="Songs"><SettingRow label="Songs tab shows" id="library-songs-scope" hint="Liked songs, as in TIDAL and Spotify, or every song in your library, including tracks from saved albums and local imports."><Segmented
+<SettingGroup title="Songs"><SettingRow label="Songs tab shows" id="library-songs-scope" hint="Just the songs you've liked, or every song in your library, including tracks from saved albums and local imports."><Segmented
 	label="Songs tab shows"
 	options={[{ value: 'liked', label: 'Liked songs' }, { value: 'library', label: 'All library songs' }]}
 	value={$librarySongsScope}
