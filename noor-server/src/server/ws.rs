@@ -10,8 +10,36 @@ use axum::{
     routing::get,
 };
 use serde_json::json;
+use std::time::Duration;
 use tokio::sync::watch;
 use tracing::info;
+
+/// App-level heartbeat so clients can tell a live socket from one a phone's
+/// OS silently killed while suspended (browsers hide protocol pings from JS).
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+/// A peer that cannot take a frame within this window (phone Wi-Fi asleep,
+/// client gone without a FIN) is dropped instead of stalling every other
+/// event behind a blocked send; the client reconnects and resyncs.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn send_text(socket: &mut WebSocket, text: String) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, socket.send(Message::Text(text.into()))).await,
+        Ok(Ok(()))
+    )
+}
+
+/// Clients opt in to the ~30 Hz visualiser stream with
+/// `{"type":"spectrum","enabled":true}`. Only the desktop shader wallpaper
+/// reads it; the phone remote never does, and pushing it over Wi-Fi starved
+/// the events the remote actually needs.
+fn spectrum_request(text: &str) -> Option<bool> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("type")?.as_str()? != "spectrum" {
+        return None;
+    }
+    value.get("enabled")?.as_bool()
+}
 
 pub fn ws_routes(state: SharedState, shutdown: watch::Receiver<bool>) -> Router {
     Router::new()
@@ -85,6 +113,12 @@ async fn handle_socket(
     let mut spectrum_ticker = tokio::time::interval(std::time::Duration::from_millis(33));
     spectrum_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_spectrum_seq: u64 = 0;
+    let mut spectrum_enabled = false;
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + HEARTBEAT_INTERVAL,
+        HEARTBEAT_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Forward events to the client
     loop {
@@ -123,12 +157,17 @@ async fn handle_socket(
                 break;
             }
             // Real-time audio spectrum frames
-            _ = spectrum_ticker.tick() => {
+            _ = spectrum_ticker.tick(), if spectrum_enabled => {
                 if let Some(bands) = crate::playback::spectrum::global().poll(&mut last_spectrum_seq) {
                     let msg = json!({"type": "audio_spectrum", "bands": bands});
-                    if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                    if !send_text(&mut socket, msg.to_string()).await {
                         break;
                     }
+                }
+            }
+            _ = heartbeat.tick() => {
+                if !send_text(&mut socket, json!({"type": "heartbeat"}).to_string()).await {
+                    break;
                 }
             }
             // Events from the app
@@ -137,7 +176,9 @@ async fn handle_socket(
                     Ok(e) => e,
                     // Channel lagged (burst of events exceeded capacity) — re-sync client state.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = socket.send(Message::Text(json!({"type": "playback_changed"}).to_string().into())).await;
+                        if !send_text(&mut socket, json!({"type": "playback_changed"}).to_string()).await {
+                            break;
+                        }
                         continue;
                     }
                     // All senders dropped — server shutting down.
@@ -230,14 +271,20 @@ async fn handle_socket(
                         "failed": failed,
                     }),
                 };
-                if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                if !send_text(&mut socket, msg.to_string()).await {
                     break;
                 }
             }
             // Messages from the client
             client_msg = socket.recv() => {
                 match client_msg {
-                    Some(Ok(Message::Text(text))) => tracing::debug!("WS client: {}", text),
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some(enabled) = spectrum_request(&text) {
+                            spectrum_enabled = enabled;
+                        } else {
+                            tracing::debug!("WS client: {}", text);
+                        }
+                    }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
@@ -247,4 +294,24 @@ async fn handle_socket(
     }
 
     info!("WebSocket client disconnected");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spectrum_request;
+
+    #[test]
+    fn spectrum_subscription_parses_only_the_opt_in_message() {
+        assert_eq!(
+            spectrum_request(r#"{"type":"spectrum","enabled":true}"#),
+            Some(true)
+        );
+        assert_eq!(
+            spectrum_request(r#"{"type":"spectrum","enabled":false}"#),
+            Some(false)
+        );
+        assert_eq!(spectrum_request(r#"{"type":"spectrum"}"#), None);
+        assert_eq!(spectrum_request(r#"{"type":"other","enabled":true}"#), None);
+        assert_eq!(spectrum_request("not json"), None);
+    }
 }

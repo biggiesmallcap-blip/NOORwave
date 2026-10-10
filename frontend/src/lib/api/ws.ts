@@ -49,6 +49,77 @@ let queueRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAllowed = true;
 const reconnectScheduler = new ReconnectScheduler(() => connectWebSocket());
 
+// Liveness. The server sends {"type":"heartbeat"} every 15 s; a socket that
+// has proven it gets heartbeats and then goes quiet is dead (typically a
+// phone whose OS dropped it while suspended, which the browser still reports
+// as OPEN). Sockets from an older server never send one and are left alone.
+export const HEARTBEAT_STALE_MS = 40_000;
+const RESUME_STALE_MS = 20_000;
+let lastMessageAt = 0;
+let heartbeatSeen = false;
+let lifecycleInstalled = false;
+
+// Visualiser frames are opt-in so the phone remote never receives them.
+let spectrumSubscribers = 0;
+
+function sendSpectrumPreference(): void {
+	if (socket?.readyState !== WebSocket.OPEN) return;
+	try { socket.send(JSON.stringify({ type: 'spectrum', enabled: spectrumSubscribers > 0 })); } catch { /* reconnect resends */ }
+}
+
+/** Ask the server for audio_spectrum frames while the returned release is held. */
+export function subscribeAudioSpectrum(): () => void {
+	spectrumSubscribers += 1;
+	if (spectrumSubscribers === 1) sendSpectrumPreference();
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		spectrumSubscribers -= 1;
+		if (spectrumSubscribers === 0) sendSpectrumPreference();
+	};
+}
+
+/** Drop the current socket without waiting for a close handshake a dead peer will never answer. */
+function abandonSocket(): void {
+	const current = socket;
+	socket = null;
+	if (!current) return;
+	current.onopen = current.onmessage = current.onerror = current.onclose = null;
+	try { current.close(); } catch { /* already closed */ }
+}
+
+function reconnectNow(): void {
+	if (!reconnectAllowed) return;
+	abandonSocket();
+	wsConnected.set(false);
+	reconnectScheduler.clear();
+	connectWebSocket();
+}
+
+export function socketIsStale(now: number, lastMessage: number, sawHeartbeat: boolean, limitMs = HEARTBEAT_STALE_MS): boolean {
+	return sawHeartbeat && now - lastMessage > limitMs;
+}
+
+function installLifecycle(): void {
+	if (lifecycleInstalled || typeof window === 'undefined') return;
+	lifecycleInstalled = true;
+	setInterval(() => {
+		if (socket?.readyState === WebSocket.OPEN && socketIsStale(Date.now(), lastMessageAt, heartbeatSeen)) reconnectNow();
+	}, 5000);
+	// Coming back from a locked screen or background tab: don't sit out the
+	// backoff timer or trust a socket that may have died while suspended.
+	const resume = () => {
+		if (document.visibilityState === 'hidden' || !reconnectAllowed) return;
+		const open = socket?.readyState === WebSocket.OPEN;
+		if (!open || socketIsStale(Date.now(), lastMessageAt, heartbeatSeen, RESUME_STALE_MS)) reconnectNow();
+		else void refreshPlaybackState();
+	};
+	document.addEventListener('visibilitychange', resume);
+	window.addEventListener('pageshow', resume);
+	window.addEventListener('online', resume);
+}
+
 function scheduleQueueRefresh() {
 	if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
 	queueRefreshTimer = setTimeout(() => {
@@ -75,16 +146,26 @@ export function connectWebSocket() {
 	// a second socket while the first is mid-handshake.
 	if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
 
+	installLifecycle();
 	socket = new WebSocket(getWebSocketUrl());
+	heartbeatSeen = false;
+	lastMessageAt = Date.now();
 
 	socket.onopen = () => {
 		reconnectScheduler.succeeded();
 		wsConnected.set(true);
+		lastMessageAt = Date.now();
+		if (spectrumSubscribers > 0) sendSpectrumPreference();
 	};
 
 	socket.onmessage = (event) => {
+		lastMessageAt = Date.now();
 		try {
 			const data = JSON.parse(event.data);
+			if (data?.type === 'heartbeat') {
+				heartbeatSeen = true;
+				return;
+			}
 			// High-rate visualiser frames bypass the message log and cache path
 			// entirely, straight into a dedicated store.
 			if (data?.type === 'audio_spectrum') {

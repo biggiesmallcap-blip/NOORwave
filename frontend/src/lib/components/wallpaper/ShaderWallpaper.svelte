@@ -13,6 +13,7 @@
 	} from '$lib/stores/wallpaper';
 	import { artPalette, type ArtPalette } from '$lib/stores/artPalette';
 	import { audioSpectrum, NUM_BANDS } from '$lib/stores/audioSpectrum';
+	import { subscribeAudioSpectrum } from '$lib/api/ws';
 
 	type Props = {
 		shader: string;
@@ -191,6 +192,7 @@ float peakAt(float t){
 			artColors = v;
 			needsPaint = true;
 		});
+		const releaseSpectrumStream = subscribeAudioSpectrum();
 		const unsubSpectrum = audioSpectrum.subscribe((v) => {
 			liveSpectrum = v;
 		});
@@ -634,6 +636,7 @@ float peakAt(float t){
 			unsubIdle();
 			unsubArt();
 			unsubSpectrum();
+			releaseSpectrumStream();
 			canvas.removeEventListener('webglcontextlost', onContextLost);
 			canvas.removeEventListener('webglcontextrestored', onContextRestored);
 			document.removeEventListener('visibilitychange', onVisibility);
