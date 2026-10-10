@@ -5,6 +5,7 @@ use super::home_routes::{
 use super::*;
 use crate::db::{Database, schema};
 use crate::metadata::lastfm::{LastFmChartAlbum, LastFmChartArtist, LastFmChartTrack};
+use crate::server::transport::stream::ensure_tidal_content_allowed;
 use crate::services::tidal::client::TidalAlbum;
 use axum::{body::Body, http::Request};
 use std::collections::HashMap;
@@ -1745,6 +1746,7 @@ pub(in crate::server) fn fresh_test_state(db: Database) -> crate::AppState {
         http_client: reqwest::Client::new(),
         tidal_http_client: reqwest::Client::new(),
         tidal: crate::services::tidal::session::TidalSession::disconnected_for_tests(),
+        stream_source: crate::server::transport::stream::ScriptedStreamSource::offline(),
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
         home_picks_cache: Arc::new(std::sync::Mutex::new(None)),

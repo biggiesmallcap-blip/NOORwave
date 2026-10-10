@@ -67,6 +67,8 @@ pub struct AppState {
     /// Per-request `TidalClient` instances reuse this via `with_http` to skip
     /// per-call TLS pool setup. Token + country_code are stitched in per-call.
     pub tidal_http_client: reqwest::Client,
+    /// Resolves playback streams. TIDAL in production, scripted in tests.
+    pub stream_source: std::sync::Arc<dyn server::transport::stream::StreamSource>,
     /// Sole owner of the TIDAL tokens and their lifecycle. See CONTEXT.md.
     pub tidal: services::tidal::session::TidalSession,
     /// 6h TTL cache for the home Your Mixes shelf. TIDAL builds these on a
@@ -714,11 +716,15 @@ async fn main() -> Result<()> {
         tidal_tokens,
     );
 
+    let stream_source: Arc<dyn server::transport::stream::StreamSource> = Arc::new(
+        server::transport::stream::TidalStreamSource::new(http_client.clone()),
+    );
     let state = Arc::new(RwLock::new(AppState {
         db,
         event_tx,
         http_client,
         tidal_http_client,
+        stream_source,
         tidal,
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),

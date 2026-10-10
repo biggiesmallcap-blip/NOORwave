@@ -1496,7 +1496,7 @@ pub(super) fn record_unavailable_tidal_source(tidal_id: i64) {
     );
 }
 
-pub(super) fn clear_unavailable_tidal_source(tidal_id: i64) {
+pub(crate) fn clear_unavailable_tidal_source(tidal_id: i64) {
     let key = format!("tidal_track:{tidal_id}");
     if let Ok(mut guard) = profile_rebuild_failures().lock()
         && guard
@@ -3395,6 +3395,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             tidal_http_client: reqwest::Client::new(),
             tidal: crate::services::tidal::session::TidalSession::disconnected_for_tests(),
+            stream_source: crate::server::transport::stream::ScriptedStreamSource::offline(),
             tidal_mixes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tidal_radio_stations_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             home_picks_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
