@@ -493,15 +493,18 @@ pub(super) async fn get_discovery_training_status(
 
     // Build a synthetic per-stage breakdown so the frontend can render a
     // pipeline view without needing multi-row stage history in the schema.
+    // Upper progress bound of each stage, matching what the trainer reports.
     const STAGE_ORDER: &[&str] = &[
         "corpus",
         "behavioral",
         "audio",
         "fusion",
         "neighbors",
+        "in_degree",
         "evaluate",
+        crate::services::learning::SAVING_STAGE,
     ];
-    const STAGE_THRESHOLDS: &[f64] = &[0.05, 0.2, 0.55, 0.72, 0.88, 0.96];
+    const STAGE_THRESHOLDS: &[f64] = &[0.2, 0.4, 0.55, 0.7, 0.95, 0.96, 0.965, 1.0];
 
     let stages: Vec<Value> = if let Some(ref r) = run {
         let current_stage_idx = STAGE_ORDER.iter().position(|&s| s == r.stage).unwrap_or(0);
