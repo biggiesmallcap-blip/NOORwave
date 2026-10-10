@@ -821,4 +821,37 @@ mod tests {
         client.get_track(1).await.unwrap();
         assert_eq!(*seen.lock().unwrap(), vec!["Bearer fresh"]);
     }
+
+    #[tokio::test]
+    async fn mutation_refreshes_and_retries_once() {
+        let (base, seen) = fake_tidal(vec![(401, r#"{"status":401}"#), (200, "{}")]).await;
+        let refresher = ScriptedRefresher::new(vec![Outcome::Ok(tokens("new"))]);
+        let session = session_at(base, tokens("old"), refresher.clone());
+        let client = session.client().unwrap();
+        crate::services::tidal::mutations::add_favorite_track_unchecked(&client, "user-1", 42)
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec!["Bearer old", "Bearer new"]);
+        assert_eq!(refresher.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn mutation_keeps_non_auth_statuses_for_the_caller() {
+        // A stale ETag (412) must reach the playlist code untouched so it can
+        // re-read the tag; it is not an auth failure and must not refresh.
+        let (base, seen) = fake_tidal(vec![(412, "{}")]).await;
+        let refresher = ScriptedRefresher::new(vec![]);
+        let session = session_at(base, tokens("old"), refresher.clone());
+        let client = session.client().unwrap();
+        let resp = client
+            .send_authed(|http, api_base, bearer| {
+                http.post(format!("{api_base}/playlists/x"))
+                    .header("Authorization", bearer)
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+        assert_eq!(refresher.call_count(), 0);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
 }

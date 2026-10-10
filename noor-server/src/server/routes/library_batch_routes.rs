@@ -132,24 +132,19 @@ pub(super) async fn batch_add_to_playlist(
             return Err(StatusCode::BAD_REQUEST);
         }
 
-        let (http, tokens) = {
-            let state = state.read().await;
-            let tokens = state.tidal.tokens().ok_or(StatusCode::UNAUTHORIZED)?;
-            (state.http_client.clone(), tokens)
-        };
+        let client = state
+            .read()
+            .await
+            .tidal
+            .client()
+            .ok_or(StatusCode::UNAUTHORIZED)?;
 
-        tidal_mutations::add_to_playlist(
-            &http,
-            &tokens.access_token,
-            playlist_uuid,
-            &tidal_track_ids,
-            &tokens.country_code,
-        )
-        .await
-        .map_err(|error| {
-            tracing::error!("Batch add to playlist failed: {error}");
-            StatusCode::BAD_GATEWAY
-        })?;
+        tidal_mutations::add_to_playlist(&client, playlist_uuid, &tidal_track_ids)
+            .await
+            .map_err(|error| {
+                tracing::error!("Batch add to playlist failed: {error}");
+                StatusCode::BAD_GATEWAY
+            })?;
 
         track_pairs.iter().map(|(track_id, _)| *track_id).collect()
     } else {
@@ -234,44 +229,36 @@ pub(super) async fn batch_delete_items(
         if remote_track_ids.is_empty() && remote_album_ids.is_empty() {
             (0, 0)
         } else {
-            let (http, tokens) = {
+            let (client, tokens) = {
                 let state = state.read().await;
                 let tokens = state.tidal.tokens().ok_or(StatusCode::UNAUTHORIZED)?;
-                (state.http_client.clone(), tokens)
+                let client = crate::services::tidal::client::TidalClient::for_session(
+                    state.tidal.clone(),
+                    &tokens.country_code,
+                );
+                (client, tokens)
             };
 
             let removed_tracks = if remote_track_ids.is_empty() {
                 0
             } else {
-                tidal_mutations::remove_favorite_tracks(
-                    &http,
-                    &tokens.access_token,
-                    &tokens.user_id,
-                    &remote_track_ids,
-                    &tokens.country_code,
-                )
-                .await
-                .map_err(|error| {
-                    tracing::error!("Batch delete tracks failed: {error}");
-                    StatusCode::BAD_GATEWAY
-                })?
+                tidal_mutations::remove_favorite_tracks(&client, &tokens.user_id, &remote_track_ids)
+                    .await
+                    .map_err(|error| {
+                        tracing::error!("Batch delete tracks failed: {error}");
+                        StatusCode::BAD_GATEWAY
+                    })?
             };
 
             let removed_albums = if remote_album_ids.is_empty() {
                 0
             } else {
-                tidal_mutations::remove_favorite_albums(
-                    &http,
-                    &tokens.access_token,
-                    &tokens.user_id,
-                    &remote_album_ids,
-                    &tokens.country_code,
-                )
-                .await
-                .map_err(|error| {
-                    tracing::error!("Batch delete albums failed: {error}");
-                    StatusCode::BAD_GATEWAY
-                })?
+                tidal_mutations::remove_favorite_albums(&client, &tokens.user_id, &remote_album_ids)
+                    .await
+                    .map_err(|error| {
+                        tracing::error!("Batch delete albums failed: {error}");
+                        StatusCode::BAD_GATEWAY
+                    })?
             };
 
             (removed_tracks, removed_albums)

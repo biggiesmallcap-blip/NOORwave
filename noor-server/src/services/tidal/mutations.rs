@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
+use super::client::TidalClient;
 
 fn writes_allowed(policy: Option<&str>, development: bool) -> bool {
     match policy {
@@ -39,190 +39,153 @@ mod write_policy_tests {
     }
 }
 
+/// Turn a non-success mutation answer into an error, feeding the backoff gate.
+async fn ensure_success(resp: reqwest::Response) -> Result<()> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
+    let body = resp.text().await.unwrap_or_default();
+    crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
+    anyhow::bail!("TIDAL mutation error {}: {}", status, body);
+}
+
 /// Add a track to TIDAL favorites.
-pub async fn add_favorite_track(
-    http: &reqwest::Client,
-    access_token: &str,
+pub async fn add_favorite_track(client: &TidalClient, user_id: &str, track_id: i64) -> Result<()> {
+    check_library_writes()?;
+    add_favorite_track_unchecked(client, user_id, track_id).await
+}
+
+/// `add_favorite_track` without the write-policy gate (tests call this).
+pub(crate) async fn add_favorite_track_unchecked(
+    client: &TidalClient,
     user_id: &str,
     track_id: i64,
-    country_code: &str,
 ) -> Result<()> {
-    check_library_writes()?;
-    crate::services::tidal::backoff::global().check()?;
-    let resp = http
-        .post(format!(
-            "{}/users/{}/favorites/tracks?countryCode={}",
-            TIDAL_API_URL, user_id, country_code
-        ))
-        .header("Authorization", format!("Bearer {}", access_token))
-        .form(&[("trackIds", track_id.to_string())])
-        .send()
+    let country_code = client.country_code().to_string();
+    let resp = client
+        .send_authed(|http, api_base, bearer| {
+            http.post(format!(
+                "{}/users/{}/favorites/tracks?countryCode={}",
+                api_base, user_id, country_code
+            ))
+            .header("Authorization", bearer)
+            .form(&[("trackIds", track_id.to_string())])
+        })
         .await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
-    }
-
-    Ok(())
+    ensure_success(resp).await
 }
 
 /// Remove a track from TIDAL favorites.
 pub async fn remove_favorite_track(
-    http: &reqwest::Client,
-    access_token: &str,
+    client: &TidalClient,
     user_id: &str,
     track_id: i64,
-    country_code: &str,
 ) -> Result<()> {
     check_library_writes()?;
-    crate::services::tidal::backoff::global().check()?;
-    let resp = http
-        .delete(format!(
-            "{}/users/{}/favorites/tracks/{}?countryCode={}",
-            TIDAL_API_URL, user_id, track_id, country_code
-        ))
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
+    let country_code = client.country_code().to_string();
+    let resp = client
+        .send_authed(|http, api_base, bearer| {
+            http.delete(format!(
+                "{}/users/{}/favorites/tracks/{}?countryCode={}",
+                api_base, user_id, track_id, country_code
+            ))
+            .header("Authorization", bearer)
+        })
         .await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
-    }
-
-    Ok(())
+    ensure_success(resp).await
 }
 
 /// Add an album to TIDAL favorites.
-pub async fn add_favorite_album(
-    http: &reqwest::Client,
-    access_token: &str,
-    user_id: &str,
-    album_id: i64,
-    country_code: &str,
-) -> Result<()> {
+pub async fn add_favorite_album(client: &TidalClient, user_id: &str, album_id: i64) -> Result<()> {
     check_library_writes()?;
-    crate::services::tidal::backoff::global().check()?;
-    let resp = http
-        .post(format!(
-            "{}/users/{}/favorites/albums?countryCode={}",
-            TIDAL_API_URL, user_id, country_code
-        ))
-        .header("Authorization", format!("Bearer {}", access_token))
-        .form(&[("albumIds", album_id.to_string())])
-        .send()
+    let country_code = client.country_code().to_string();
+    let resp = client
+        .send_authed(|http, api_base, bearer| {
+            http.post(format!(
+                "{}/users/{}/favorites/albums?countryCode={}",
+                api_base, user_id, country_code
+            ))
+            .header("Authorization", bearer)
+            .form(&[("albumIds", album_id.to_string())])
+        })
         .await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
-    }
-
-    Ok(())
+    ensure_success(resp).await
 }
 
 /// Remove an album from TIDAL favorites.
 pub async fn remove_favorite_album(
-    http: &reqwest::Client,
-    access_token: &str,
+    client: &TidalClient,
     user_id: &str,
     album_id: i64,
-    country_code: &str,
 ) -> Result<()> {
     check_library_writes()?;
-    crate::services::tidal::backoff::global().check()?;
-    let resp = http
-        .delete(format!(
-            "{}/users/{}/favorites/albums/{}?countryCode={}",
-            TIDAL_API_URL, user_id, album_id, country_code
-        ))
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
+    let country_code = client.country_code().to_string();
+    let resp = client
+        .send_authed(|http, api_base, bearer| {
+            http.delete(format!(
+                "{}/users/{}/favorites/albums/{}?countryCode={}",
+                api_base, user_id, album_id, country_code
+            ))
+            .header("Authorization", bearer)
+        })
         .await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
-    }
-
-    Ok(())
+    ensure_success(resp).await
 }
 
 /// Add tracks to a TIDAL playlist.
 pub async fn add_to_playlist(
-    http: &reqwest::Client,
-    access_token: &str,
+    client: &TidalClient,
     playlist_uuid: &str,
     track_ids: &[i64],
-    country_code: &str,
 ) -> Result<()> {
-    crate::services::tidal::backoff::global().check()?;
     let ids: String = track_ids
         .iter()
         .map(|id| id.to_string())
         .collect::<Vec<_>>()
         .join(",");
-
-    let resp = http
-        .post(format!(
-            "{}/playlists/{}/items?countryCode={}",
-            TIDAL_API_URL, playlist_uuid, country_code
-        ))
-        .header("Authorization", format!("Bearer {}", access_token))
-        .form(&[("trackIds", ids)])
-        .send()
+    let country_code = client.country_code().to_string();
+    let resp = client
+        .send_authed(|http, api_base, bearer| {
+            http.post(format!(
+                "{}/playlists/{}/items?countryCode={}",
+                api_base, playlist_uuid, country_code
+            ))
+            .header("Authorization", bearer)
+            .form(&[("trackIds", ids.clone())])
+        })
         .await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
-        crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-        anyhow::bail!("TIDAL mutation error {}: {}", status, body);
-    }
-
-    Ok(())
+    ensure_success(resp).await
 }
 
 pub async fn remove_favorite_tracks(
-    http: &reqwest::Client,
-    access_token: &str,
+    client: &TidalClient,
     user_id: &str,
     track_ids: &[i64],
-    country_code: &str,
 ) -> Result<usize> {
     let mut removed = 0;
     for track_id in track_ids {
-        remove_favorite_track(http, access_token, user_id, *track_id, country_code).await?;
+        remove_favorite_track(client, user_id, *track_id).await?;
         removed += 1;
     }
     Ok(removed)
 }
 
 pub async fn remove_favorite_albums(
-    http: &reqwest::Client,
-    access_token: &str,
+    client: &TidalClient,
     user_id: &str,
     album_ids: &[i64],
-    country_code: &str,
 ) -> Result<usize> {
     let mut removed = 0;
     for album_id in album_ids {
-        remove_favorite_album(http, access_token, user_id, *album_id, country_code).await?;
+        remove_favorite_album(client, user_id, *album_id).await?;
         removed += 1;
     }
     Ok(removed)
 }
 
-// ─── Playlist edits ──────────────────────────────────────────────────────────
+// --- Playlist edits ----------------------------------------------------------
 //
 // TIDAL guards every mutating playlist call with an optimistic-concurrency
 // ETag: read the playlist's current tag, send it back as `If-None-Match`, and
@@ -248,20 +211,16 @@ impl std::error::Error for PlaylistConflict {}
 ///
 /// `TidalClient::get_json` discards response headers, so this issues its own
 /// request. `limit=1` keeps the body trivial; only the header is wanted.
-pub async fn get_playlist_etag(
-    http: &reqwest::Client,
-    access_token: &str,
-    playlist_uuid: &str,
-    country_code: &str,
-) -> Result<String> {
-    crate::services::tidal::backoff::global().check()?;
-    let resp = http
-        .get(format!(
-            "{}/playlists/{}/items?countryCode={}&limit=1&offset=0",
-            TIDAL_API_URL, playlist_uuid, country_code
-        ))
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
+pub async fn get_playlist_etag(client: &TidalClient, playlist_uuid: &str) -> Result<String> {
+    let country_code = client.country_code().to_string();
+    let resp = client
+        .send_authed(|http, api_base, bearer| {
+            http.get(format!(
+                "{}/playlists/{}/items?countryCode={}&limit=1&offset=0",
+                api_base, playlist_uuid, country_code
+            ))
+            .header("Authorization", bearer)
+        })
         .await?;
     let status = resp.status();
     if !status.is_success() {
@@ -278,21 +237,17 @@ pub async fn get_playlist_etag(
 }
 
 /// Run a playlist mutation under ETag concurrency control, refetching the tag
-/// once on a 412 before giving up. `send` receives the tag and issues the call.
-async fn with_playlist_etag<F, Fut>(
-    http: &reqwest::Client,
-    access_token: &str,
-    playlist_uuid: &str,
-    country_code: &str,
-    send: F,
-) -> Result<()>
+/// once on a 412 before giving up. `build(http, api_base, bearer, etag)`
+/// builds the request.
+async fn with_playlist_etag<F>(client: &TidalClient, playlist_uuid: &str, build: F) -> Result<()>
 where
-    F: Fn(String) -> Fut,
-    Fut: std::future::Future<Output = Result<reqwest::Response>>,
+    F: Fn(&reqwest::Client, &str, &str, &str) -> reqwest::RequestBuilder,
 {
     for attempt in 0..2 {
-        let etag = get_playlist_etag(http, access_token, playlist_uuid, country_code).await?;
-        let resp = send(etag).await?;
+        let etag = get_playlist_etag(client, playlist_uuid).await?;
+        let resp = client
+            .send_authed(|http, api_base, bearer| build(http, api_base, bearer, &etag))
+            .await?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());
@@ -319,11 +274,9 @@ where
 /// load-bearing - removing a low index shifts everything after it down, so
 /// highest-first keeps the remaining indices valid within the one call.
 pub async fn remove_playlist_items(
-    http: &reqwest::Client,
-    access_token: &str,
+    client: &TidalClient,
     playlist_uuid: &str,
     positions: &[i64],
-    country_code: &str,
 ) -> Result<()> {
     if positions.is_empty() {
         return Ok(());
@@ -336,106 +289,78 @@ pub async fn remove_playlist_items(
         .map(|index| index.to_string())
         .collect::<Vec<_>>()
         .join(",");
-
-    with_playlist_etag(http, access_token, playlist_uuid, country_code, |etag| {
-        let indices = indices.clone();
-        async move {
-            Ok(http
-                .delete(format!(
-                    "{}/playlists/{}/items/{}?countryCode={}",
-                    TIDAL_API_URL, playlist_uuid, indices, country_code
-                ))
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("If-None-Match", etag)
-                .send()
-                .await?)
-        }
+    let country_code = client.country_code().to_string();
+    with_playlist_etag(client, playlist_uuid, |http, api_base, bearer, etag| {
+        http.delete(format!(
+            "{}/playlists/{}/items/{}?countryCode={}",
+            api_base, playlist_uuid, indices, country_code
+        ))
+        .header("Authorization", bearer)
+        .header("If-None-Match", etag)
     })
     .await
 }
 
 /// Move a playlist item from one zero-based index to another.
 pub async fn move_playlist_item(
-    http: &reqwest::Client,
-    access_token: &str,
+    client: &TidalClient,
     playlist_uuid: &str,
     from: i64,
     to: i64,
-    country_code: &str,
 ) -> Result<()> {
-    with_playlist_etag(
-        http,
-        access_token,
-        playlist_uuid,
-        country_code,
-        |etag| async move {
-            Ok(http
-                .post(format!(
-                    "{}/playlists/{}/items/{}?countryCode={}",
-                    TIDAL_API_URL, playlist_uuid, from, country_code
-                ))
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("If-None-Match", etag)
-                .form(&[("toIndex", to.to_string())])
-                .send()
-                .await?)
-        },
-    )
+    let country_code = client.country_code().to_string();
+    with_playlist_etag(client, playlist_uuid, |http, api_base, bearer, etag| {
+        http.post(format!(
+            "{}/playlists/{}/items/{}?countryCode={}",
+            api_base, playlist_uuid, from, country_code
+        ))
+        .header("Authorization", bearer)
+        .header("If-None-Match", etag)
+        .form(&[("toIndex", to.to_string())])
+    })
     .await
 }
 
 /// Rename a TIDAL playlist and/or replace its description.
 pub async fn rename_playlist(
-    http: &reqwest::Client,
-    access_token: &str,
+    client: &TidalClient,
     playlist_uuid: &str,
     title: &str,
     description: Option<&str>,
-    country_code: &str,
 ) -> Result<()> {
     let description = description.unwrap_or_default().to_string();
-    with_playlist_etag(http, access_token, playlist_uuid, country_code, |etag| {
-        let description = description.clone();
-        async move {
-            Ok(http
-                .post(format!(
-                    "{}/playlists/{}?countryCode={}",
-                    TIDAL_API_URL, playlist_uuid, country_code
-                ))
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("If-None-Match", etag)
-                .form(&[("title", title.to_string()), ("description", description)])
-                .send()
-                .await?)
-        }
+    let country_code = client.country_code().to_string();
+    with_playlist_etag(client, playlist_uuid, |http, api_base, bearer, etag| {
+        http.post(format!(
+            "{}/playlists/{}?countryCode={}",
+            api_base, playlist_uuid, country_code
+        ))
+        .header("Authorization", bearer)
+        .header("If-None-Match", etag)
+        .form(&[
+            ("title", title.to_string()),
+            ("description", description.clone()),
+        ])
     })
     .await
 }
 
 /// Delete a TIDAL playlist outright. No ETag: there is nothing left to conflict
 /// with once the whole playlist is going away.
-pub async fn delete_playlist(
-    http: &reqwest::Client,
-    access_token: &str,
-    playlist_uuid: &str,
-    country_code: &str,
-) -> Result<()> {
-    crate::services::tidal::backoff::global().check()?;
-    let resp = http
-        .delete(format!(
-            "{}/playlists/{}?countryCode={}",
-            TIDAL_API_URL, playlist_uuid, country_code
-        ))
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
+pub async fn delete_playlist(client: &TidalClient, playlist_uuid: &str) -> Result<()> {
+    let country_code = client.country_code().to_string();
+    let resp = client
+        .send_authed(|http, api_base, bearer| {
+            http.delete(format!(
+                "{}/playlists/{}?countryCode={}",
+                api_base, playlist_uuid, country_code
+            ))
+            .header("Authorization", bearer)
+        })
         .await?;
-    let status = resp.status();
     // A playlist that is already gone is the outcome the caller wanted.
-    if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(());
     }
-    let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
-    let body = resp.text().await.unwrap_or_default();
-    crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-    anyhow::bail!("TIDAL mutation error {}: {}", status, body);
+    ensure_success(resp).await
 }

@@ -195,6 +195,11 @@ enum ClientAuth {
     Session(crate::services::tidal::session::TidalSession),
 }
 
+enum SendOutcome {
+    Response(reqwest::Response),
+    AuthFailure(TidalApiError),
+}
+
 #[derive(Clone)]
 pub struct TidalClient {
     http: reqwest::Client,
@@ -485,18 +490,58 @@ impl TidalClient {
         Self::with_http(Self::build_http_client(), access_token, country_code)
     }
 
-    /// Remove a favorite using this client's authenticated transport. Keeping
-    /// the credentials inside `TidalClient` lets recovery callers retry a
-    /// mutation without unpacking or rebuilding the refreshed session.
+    pub(crate) fn country_code(&self) -> &str {
+        &self.country_code
+    }
+
+    /// Remove a track from the user's TIDAL favorites.
     pub async fn remove_favorite_track(&self, user_id: &str, track_id: i64) -> Result<()> {
-        super::mutations::remove_favorite_track(
-            &self.http,
-            &self.access_token()?,
-            user_id,
-            track_id,
-            &self.country_code,
-        )
-        .await
+        super::mutations::remove_favorite_track(self, user_id, track_id).await
+    }
+
+    /// Send a request built by `build(http, api_base, bearer)`. On an auth
+    /// failure a session-bound client refreshes once and resends once. Every
+    /// other answer is returned as-is for the caller to interpret (a 412 on a
+    /// playlist edit means "re-read the ETag"), except a 400/401 that is not an
+    /// auth failure: its body was read to classify it, so it comes back as
+    /// `TidalApiError`.
+    pub(crate) async fn send_authed<F>(&self, build: F) -> Result<reqwest::Response>
+    where
+        F: Fn(&reqwest::Client, &str, &str) -> reqwest::RequestBuilder,
+    {
+        let token = self.access_token()?;
+        let auth_failure = match self.send_once(&build, &token).await? {
+            SendOutcome::Response(resp) => return Ok(resp),
+            SendOutcome::AuthFailure(error) => error,
+        };
+        let fresh = match self.recover_after_auth_failure(&token).await {
+            None => return Err(auth_failure.into()),
+            Some(result) => result?,
+        };
+        match self.send_once(&build, &fresh).await? {
+            SendOutcome::Response(resp) => Ok(resp),
+            SendOutcome::AuthFailure(error) => Err(error.into()),
+        }
+    }
+
+    async fn send_once<F>(&self, build: &F, token: &str) -> Result<SendOutcome>
+    where
+        F: Fn(&reqwest::Client, &str, &str) -> reqwest::RequestBuilder,
+    {
+        crate::services::tidal::backoff::global().check()?;
+        let bearer = format!("Bearer {token}");
+        let resp = build(&self.http, &self.api_base, &bearer).send().await?;
+        let status = resp.status();
+        if !matches!(status.as_u16(), 400 | 401) {
+            return Ok(SendOutcome::Response(resp));
+        }
+        let body = resp.text().await.unwrap_or_default();
+        let error = TidalApiError::from_response_parts(status, body);
+        if error.is_auth_failure() {
+            Ok(SendOutcome::AuthFailure(error))
+        } else {
+            Err(error.into())
+        }
     }
 
     /// Make an authenticated GET request and deserialize the response.

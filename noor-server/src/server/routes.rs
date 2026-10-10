@@ -3704,10 +3704,8 @@ pub(super) async fn tidal_discovery_provider(
 
     Ok(TidalDiscoveryProvider::new(
         state_guard.tidal.clone(),
-        tokens.access_token,
         tokens.user_id,
         tokens.country_code,
-        state_guard.tidal_http_client.clone(),
         state_guard.db.clone(),
     ))
 }

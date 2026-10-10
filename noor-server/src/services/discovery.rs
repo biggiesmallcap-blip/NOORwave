@@ -71,29 +71,21 @@ pub trait DiscoveryProvider: Send + Sync {
 pub struct TidalDiscoveryProvider {
     client: TidalClient,
     db: crate::db::Database,
-    http: reqwest::Client,
-    access_token: String,
     user_id: String,
-    country_code: String,
 }
 
 impl TidalDiscoveryProvider {
     pub fn new(
         session: crate::services::tidal::session::TidalSession,
-        access_token: String,
         user_id: String,
         country_code: String,
-        http: reqwest::Client,
         db: crate::db::Database,
     ) -> Self {
         Self {
             client: TidalClient::for_session(session, &country_code)
                 .with_metadata_store(db.clone()),
             db,
-            http,
-            access_token,
             user_id,
-            country_code,
         }
     }
 
@@ -282,14 +274,7 @@ impl DiscoveryProvider for TidalDiscoveryProvider {
 
     async fn save_track(&self, provider_track_id: &str) -> Result<()> {
         let track_id = provider_track_id.parse::<i64>()?;
-        tidal_mutations::add_favorite_track(
-            &self.http,
-            &self.access_token,
-            &self.user_id,
-            track_id,
-            &self.country_code,
-        )
-        .await
+        tidal_mutations::add_favorite_track(&self.client, &self.user_id, track_id).await
     }
 }
 

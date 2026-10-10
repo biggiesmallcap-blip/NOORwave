@@ -1,6 +1,5 @@
 use crate::SharedState;
 use crate::db::queries;
-use crate::services::tidal::auth::TidalTokens;
 use crate::services::tidal::mutations as tidal_mutations;
 use crate::smart::playlists::{
     PlaylistEvaluationContext, SmartPlaylistDefinition, TrackDspFeatures, evaluate_playlist,
@@ -167,12 +166,12 @@ fn tidal_write_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     )
 }
 
-/// The TIDAL credentials needed for a playlist write, or `None` when TIDAL is
+/// A session-bound TIDAL client for a playlist write, or `None` when TIDAL is
 /// not connected. A local-only playlist never needs these.
-async fn tidal_write_context(state: &SharedState) -> Option<(reqwest::Client, TidalTokens)> {
-    let state = state.read().await;
-    let tokens = state.tidal.tokens()?;
-    Some((state.http_client.clone(), tokens))
+async fn tidal_write_context(
+    state: &SharedState,
+) -> Option<crate::services::tidal::client::TidalClient> {
+    state.read().await.tidal.client()
 }
 
 /// Load a playlist or 404. Returns the row so callers can branch on
@@ -240,22 +239,15 @@ pub(super) async fn update_playlist_route(
 
     let playlist = load_playlist(&state, id).await?;
     if let Some(uuid) = playlist.tidal_uuid.as_deref() {
-        let (http, tokens) = tidal_write_context(&state).await.ok_or_else(|| {
+        let client = tidal_write_context(&state).await.ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "message": "Connect TIDAL to edit a synced playlist" })),
             )
         })?;
-        tidal_mutations::rename_playlist(
-            &http,
-            &tokens.access_token,
-            uuid,
-            &name,
-            description,
-            &tokens.country_code,
-        )
-        .await
-        .map_err(tidal_write_error)?;
+        tidal_mutations::rename_playlist(&client, uuid, &name, description)
+            .await
+            .map_err(tidal_write_error)?;
     }
 
     let response = {
@@ -284,13 +276,13 @@ pub(super) async fn delete_playlist_route(
 
     let playlist = load_playlist(&state, id).await?;
     if let Some(uuid) = playlist.tidal_uuid.as_deref() {
-        let (http, tokens) = tidal_write_context(&state).await.ok_or_else(|| {
+        let client = tidal_write_context(&state).await.ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "message": "Connect TIDAL to delete a synced playlist" })),
             )
         })?;
-        tidal_mutations::delete_playlist(&http, &tokens.access_token, uuid, &tokens.country_code)
+        tidal_mutations::delete_playlist(&client, uuid)
             .await
             .map_err(tidal_write_error)?;
     }
@@ -339,21 +331,15 @@ pub(super) async fn remove_playlist_tracks_route(
         ));
     }
     if let Some(uuid) = playlist.tidal_uuid.as_deref() {
-        let (http, tokens) = tidal_write_context(&state).await.ok_or_else(|| {
+        let client = tidal_write_context(&state).await.ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "message": "Connect TIDAL to edit a synced playlist" })),
             )
         })?;
-        tidal_mutations::remove_playlist_items(
-            &http,
-            &tokens.access_token,
-            uuid,
-            &payload.positions,
-            &tokens.country_code,
-        )
-        .await
-        .map_err(tidal_write_error)?;
+        tidal_mutations::remove_playlist_items(&client, uuid, &payload.positions)
+            .await
+            .map_err(tidal_write_error)?;
     }
 
     let response = {
@@ -393,22 +379,15 @@ pub(super) async fn move_playlist_track_route(
         ));
     }
     if let Some(uuid) = playlist.tidal_uuid.as_deref() {
-        let (http, tokens) = tidal_write_context(&state).await.ok_or_else(|| {
+        let client = tidal_write_context(&state).await.ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "message": "Connect TIDAL to edit a synced playlist" })),
             )
         })?;
-        tidal_mutations::move_playlist_item(
-            &http,
-            &tokens.access_token,
-            uuid,
-            payload.from,
-            payload.to,
-            &tokens.country_code,
-        )
-        .await
-        .map_err(tidal_write_error)?;
+        tidal_mutations::move_playlist_item(&client, uuid, payload.from, payload.to)
+            .await
+            .map_err(tidal_write_error)?;
     }
 
     let response = {
@@ -444,18 +423,13 @@ pub(super) async fn refresh_playlist_route(
             Json(json!({ "message": "This playlist is not synced from TIDAL" })),
         ));
     };
-    let (_http, tokens) = tidal_write_context(&state).await.ok_or_else(|| {
+    let client = tidal_write_context(&state).await.ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "message": "Connect TIDAL to refresh a synced playlist" })),
         )
     })?;
-
-    let client = crate::services::tidal::client::TidalClient::for_session(
-        state.read().await.tidal.clone(),
-        &tokens.country_code,
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = client.with_metadata_store(state.read().await.db.clone());
     let never_cancelled = || -> anyhow::Result<()> { Ok(()) };
     let tracks =
         super::tidal_sync_routes::fetch_tidal_playlist_tracks(&client, &uuid, &never_cancelled)
