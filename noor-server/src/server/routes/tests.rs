@@ -9020,11 +9020,9 @@ async fn tidal_discover_module_items_valid_id_still_requires_session() {
     }
 }
 
-// Note: an integration test for the recover_tidal_session path on a 401 upstream
-// response is deferred - it requires intercepting the reqwest::Client, which
-// requires wiremock or a trait-based http client. Until that infra lands, the
-// refresh-on-auth path in tidal_search / tidal_video_playback / tidal_playlist_*
-// remains uncovered.
+// Refresh-on-auth for every TIDAL catalog call and mutation lives in the
+// session-bound client; services/tidal/session.rs tests it against a local fake
+// TIDAL server (401 -> refresh -> retry, 4005 not refreshed, latch fails fast).
 
 // Library-track filter predicate (favorite_only / liked_only) is already
 // covered by characterization-grade tests in db/queries.rs:

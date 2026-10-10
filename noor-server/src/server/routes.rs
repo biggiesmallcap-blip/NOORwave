@@ -4684,11 +4684,13 @@ async fn resolve_tidal_runtime_stream(
     request: tidal_stream::StreamRequest,
 ) -> anyhow::Result<tidal_stream::StreamInfo> {
     ensure_tidal_content_allowed(state, request.track_id).await?;
-    let tokens = {
-        let state_guard = state.read().await;
-        state_guard.tidal.tokens()
+    let session = state.read().await.tidal.clone();
+    if session.needs_reconnect() {
+        return Err(crate::services::tidal::session::SessionExpired.into());
     }
-    .ok_or_else(|| anyhow::anyhow!("TIDAL is not connected."))?;
+    let tokens = session
+        .tokens()
+        .ok_or_else(|| anyhow::anyhow!("TIDAL is not connected."))?;
 
     let http = {
         let state_guard = state.read().await;
@@ -4708,14 +4710,14 @@ async fn resolve_tidal_runtime_stream(
                 error = %error,
                 "TIDAL session expired in playback decoder; refreshing session"
             );
-            let refreshed = recover_tidal_session(state, &http, &tokens).await?;
+            let refreshed = session.refresh_stale(&tokens.access_token).await?;
             match tidal_stream::resolve_stream(&http, &refreshed.access_token, &request).await {
                 Ok(info) => {
                     dj_routes::clear_unavailable_tidal_source(request.track_id);
                     Ok(info)
                 }
                 Err(retry_error) if retry_error.is_session_expired() => {
-                    let _ = clear_tidal_session(state).await;
+                    session.mark_needs_reconnect("runtime stream still rejected after refresh");
                     Err(anyhow::anyhow!(
                         "TIDAL session expired after refresh while resolving runtime stream: {retry_error}"
                     ))
@@ -4764,11 +4766,11 @@ async fn resolve_tidal_playback_stream(
             },
         ));
     }
-    let tokens = {
-        let state_guard = state.read().await;
-        state_guard.tidal.tokens()
+    let session = state.read().await.tidal.clone();
+    if session.needs_reconnect() {
+        return Err(TidalPlaybackError::NotConnected);
     }
-    .ok_or(TidalPlaybackError::NotConnected)?;
+    let tokens = session.tokens().ok_or(TidalPlaybackError::NotConnected)?;
 
     let http = {
         let state_guard = state.read().await;
@@ -4789,7 +4791,7 @@ async fn resolve_tidal_playback_stream(
                 "TIDAL session expired while resolving playback stream"
             );
 
-            let refreshed = match recover_tidal_session(state, &http, &tokens).await {
+            let refreshed = match session.refresh_stale(&tokens.access_token).await {
                 Ok(tokens) => tokens,
                 Err(recover_err) => {
                     // Do NOT clear the session here. A transient network error during
@@ -4821,15 +4823,15 @@ async fn resolve_tidal_playback_stream(
                     Ok(info)
                 }
                 Err(retry_err) if retry_err.is_session_expired() => {
-                    // Still expired after a successful refresh: TIDAL revoked the account.
-                    // Only clear now since we know the refresh token itself is dead.
-                    let _ = clear_tidal_session(state).await;
+                    // Still expired after a successful refresh: TIDAL revoked the
+                    // account. Latch needs-reconnect so nothing keeps refreshing.
+                    session.mark_needs_reconnect("playback stream still rejected after refresh");
                     tracing::error!(
                         target: "noor.playback.tidal",
                         event = "playback_stream_retry_session_expired",
                         track_id = track.id,
                         error = %retry_err,
-                        "TIDAL stream still rejected the refreshed session; session cleared"
+                        "TIDAL stream still rejected the refreshed session; reconnect needed"
                     );
                     Err(TidalPlaybackError::SessionRefreshFailed(
                         retry_err.to_string(),
@@ -8851,7 +8853,9 @@ async fn tidal_video_playback(
     {
         Ok(info) => info,
         Err(e) if e.is_session_expired() => {
-            let refreshed = recover_tidal_session(&state, &http_client, &tokens)
+            let session = state.read().await.tidal.clone();
+            let refreshed = session
+                .refresh_stale(&tokens.access_token)
                 .await
                 .map_err(|re| {
                     (
@@ -9249,15 +9253,6 @@ async fn tidal_artist_core(
     let payload =
         catalog_routes::build_tidal_artist_core_payload(&state, &client, tidal_artist_id).await;
     Ok(Json(payload))
-}
-
-pub(crate) async fn recover_tidal_session(
-    state: &SharedState,
-    _http: &reqwest::Client,
-    tokens: &tidal_auth::TidalTokens,
-) -> anyhow::Result<tidal_auth::TidalTokens> {
-    let session = state.read().await.tidal.clone();
-    session.refresh_stale(&tokens.access_token).await
 }
 
 async fn current_playback_runtime(
