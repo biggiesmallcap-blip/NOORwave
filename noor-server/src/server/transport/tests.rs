@@ -909,11 +909,17 @@ async fn superseded_output_notifications_cannot_change_current_status_or_retry()
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn exclusive_release_database_wait_does_not_block_output_retirement() {
+    for retire_runtime in [false, true] {
+        assert_exclusive_release_database_wait(retire_runtime).await;
+    }
+}
+
+async fn assert_exclusive_release_database_wait(retire_runtime: bool) {
     let (state, _, _, _) = cpal_fault_fixture().await;
     let (command_tx, command_rx) = std::sync::mpsc::channel();
-    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx.clone());
     let (db, mut events) = {
         let mut guard = state.write().await;
         guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
@@ -950,11 +956,15 @@ async fn exclusive_release_database_wait_does_not_block_output_retirement() {
     ));
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let database_held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let holder_flag = Arc::clone(&database_held);
     let holder = std::thread::spawn(move || {
         db.with_conn(|_| {
+            holder_flag.store(true, std::sync::atomic::Ordering::Release);
             held_tx.send(()).unwrap();
             // A failing assertion must not leave the listener blocked at teardown.
-            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            holder_flag.store(false, std::sync::atomic::Ordering::Release);
             Ok(())
         })
         .unwrap()
@@ -966,19 +976,26 @@ async fn exclusive_release_database_wait_does_not_block_output_retirement() {
             device_name: "retiring output".into(),
         }
     ));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while state.try_read().is_ok() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    // The listener now holds AppState and waits for the database. Publication
-    // must remain possible before that wait finishes.
+    tokio::task::yield_now().await;
+    let mut state_probe = tokio::time::timeout(Duration::from_secs(2), state.write())
+        .await
+        .unwrap();
+    assert!(
+        database_held.load(std::sync::atomic::Ordering::Acquire),
+        "database wait blocked the async executor until holder timeout"
+    );
+    // On this single-thread async executor, the database wait must yield and
+    // leave AppState available. Retirement must work before SQL is released.
     let (published_tx, published_rx) = std::sync::mpsc::channel();
     let publisher_handle = handle.clone();
+    if retire_runtime {
+        state_probe.playback_runtime.as_mut().unwrap().handle =
+            playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    }
     let publisher = std::thread::spawn(move || {
-        publisher_handle.test_replace_exclusive_event_identity();
+        if !retire_runtime {
+            publisher_handle.test_replace_exclusive_event_identity();
+        }
         published_tx.send(()).unwrap();
     });
     let published_while_database_held = published_rx.recv_timeout(Duration::from_secs(2)).is_ok();
@@ -989,6 +1006,34 @@ async fn exclusive_release_database_wait_does_not_block_output_retirement() {
         published_while_database_held,
         "database wait blocked output retirement"
     );
+    drop(state_probe);
+    if retire_runtime {
+        assert!(
+            handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited {
+                message: None
+            })
+        );
+        tokio::time::timeout(Duration::from_secs(2), listener)
+            .await
+            .unwrap()
+            .unwrap();
+        let guard = state.read().await;
+        let info = guard.playback_runtime_info.as_ref().unwrap();
+        assert!(info.exclusive_engaged);
+        assert_eq!(
+            info.exclusive_transport_format.as_deref(),
+            Some("current format")
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "retired runtime release reached the UI"
+        );
+        assert!(
+            command_rx.try_recv().is_err(),
+            "retired runtime queued recovery"
+        );
+        return;
+    }
     assert!(
         handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Paused {
             track_id: Some(1)

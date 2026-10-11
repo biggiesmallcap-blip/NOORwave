@@ -5445,6 +5445,67 @@ fn missing_output_device_swap_pauses_actual_decks_and_reports_error() {
         other => panic!("expected output error, got {other:?}"),
     }
     let current_release = state.exclusive_sink.retire_stream();
+    let paused_env = LoopEnv {
+        config: &mut config,
+        command_tx: &command_tx,
+        event_tx: &event_tx,
+        device: &mut device,
+        output_config: &mut output_config,
+        output_sample_format: &mut sample_format,
+        volume_ctl: &volume,
+        position_samples: &position,
+        position_source: &source,
+        buffered_source: &source,
+        offset_source: &source,
+    };
+    let _ = handle_device_swap(
+        paused_env,
+        &mut state,
+        OutputDeviceSelection::Named("noor-regression-missing-endpoint".into()),
+        true,
+        false,
+        None,
+        1,
+        ExclusiveLatencyMode::Stable,
+        Some(Arc::clone(&current_release)),
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "automatic recovery after pause reached device validation"
+    );
+    assert!(state.user_paused);
+    let user_env = LoopEnv {
+        config: &mut config,
+        command_tx: &command_tx,
+        event_tx: &event_tx,
+        device: &mut device,
+        output_config: &mut output_config,
+        output_sample_format: &mut sample_format,
+        volume_ctl: &volume,
+        position_samples: &position,
+        position_source: &source,
+        buffered_source: &source,
+        offset_source: &source,
+    };
+    let _ = handle_device_swap(
+        user_env,
+        &mut state,
+        OutputDeviceSelection::Named("noor-regression-missing-endpoint".into()),
+        true,
+        false,
+        None,
+        1,
+        ExclusiveLatencyMode::Stable,
+        None,
+    );
+    assert!(
+        matches!(
+            event_rx.try_recv().unwrap(),
+            PlaybackRuntimeEvent::CommandError { .. }
+        ),
+        "explicit user swap must still validate its endpoint while paused"
+    );
+    state.user_paused = false;
     let current_env = LoopEnv {
         config: &mut config,
         command_tx: &command_tx,

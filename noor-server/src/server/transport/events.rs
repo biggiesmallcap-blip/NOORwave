@@ -486,7 +486,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     output_identity,
                     device_name,
                 }) => {
-                    let mut state_guard = state.write().await;
+                    let state_guard = state.read().await;
                     if !state_guard
                         .playback_runtime
                         .as_ref()
@@ -504,9 +504,12 @@ pub(crate) fn spawn_playback_runtime_listener(
                     if !is_current_output {
                         continue;
                     }
-                    let retry = state_guard
-                        .db
-                        .with_conn(|conn| {
+                    let db = state_guard.db.clone();
+                    drop(state_guard);
+                    // SQLite may wait for another connection user. Keep that
+                    // wait off the async executor and outside AppState.
+                    let retry = match tokio::task::spawn_blocking(move || {
+                        db.with_conn(|conn| {
                             let settings = crate::db::audio_settings::load(conn)?;
                             let is_playing = player::load_state(conn)?.is_playing;
                             Ok(
@@ -516,8 +519,23 @@ pub(crate) fn spawn_playback_runtime_listener(
                                     }),
                             )
                         })
-                        .ok()
-                        .flatten();
+                    })
+                    .await
+                    {
+                        Ok(result) => result.ok().flatten(),
+                        Err(error) => {
+                            warn!("Exclusive recovery settings task failed: {error}");
+                            None
+                        }
+                    };
+                    let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     // Publication may have superseded this release during the
                     // database wait. Validate again before any visible change.
                     let identity_guard = handle.lock_exclusive_event_identity();
@@ -533,8 +551,8 @@ pub(crate) fn spawn_playback_runtime_listener(
                     });
                     // Sending is synchronous. Keep the validated runtime
                     // current until its recovery command has been queued.
-                    if let Some(output) = retry
-                        && let Err(error) = handle.recover_released_exclusive_output(
+                    let recovery_result = retry.map(|output| {
+                        handle.recover_released_exclusive_output(
                             Arc::clone(&output_identity),
                             output.device,
                             output.exclusive_mode,
@@ -543,7 +561,10 @@ pub(crate) fn spawn_playback_runtime_listener(
                             output.exclusive_release_grace_secs,
                             output.exclusive_latency_mode,
                         )
-                    {
+                    });
+                    drop(identity_guard);
+                    drop(state_guard);
+                    if let Some(Err(error)) = recovery_result {
                         warn!("Failed to recover released WASAPI exclusive stream: {error}");
                     }
                 }
