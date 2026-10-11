@@ -65,6 +65,22 @@ pub(crate) async fn start_track(
     state: &SharedState,
     request: StartRequest<'_>,
 ) -> Result<Started, StartError> {
+    start_track_inner(state, request, None).await
+}
+
+pub(crate) async fn start_track_for_runtime(
+    state: &SharedState,
+    request: StartRequest<'_>,
+    expected_runtime: &crate::playback::runtime::PlaybackRuntimeHandle,
+) -> Result<Started, StartError> {
+    start_track_inner(state, request, Some(expected_runtime)).await
+}
+
+async fn start_track_inner(
+    state: &SharedState,
+    request: StartRequest<'_>,
+    expected_runtime: Option<&crate::playback::runtime::PlaybackRuntimeHandle>,
+) -> Result<Started, StartError> {
     let StartRequest {
         track,
         generation: start_generation,
@@ -76,9 +92,19 @@ pub(crate) async fn start_track(
     else {
         return Err(StartError::LocalUnsupported);
     };
-    let stream_info = resolve_tidal_playback_stream(state, track, &stream_request)
-        .await
-        .map_err(StartError::Stream)?;
+    let resolved = resolve_tidal_playback_stream(state, track, &stream_request).await;
+    if let Some(expected) = expected_runtime {
+        let guard = state.read().await;
+        if !guard
+            .playback_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.handle.is_same_runtime(expected))
+        {
+            // A failed lookup is stale too: it must not pause the replacement.
+            return Err(StartError::Superseded);
+        }
+    }
+    let stream_info = resolved.map_err(StartError::Stream)?;
     let start_generation = match start_generation {
         Generation::Claimed(claimed) => {
             if !generation::is_current(state, claimed).await {
@@ -90,27 +116,61 @@ pub(crate) async fn start_track(
             .await
             .ok_or(StartError::Superseded)?,
     };
-    let handle = ensure_for_track(state).await.map_err(StartError::Runtime)?;
+    let handle = match expected_runtime {
+        Some(expected) => expected.clone(),
+        None => ensure_for_track(state).await.map_err(StartError::Runtime)?,
+    };
     // Transport intent is re-read at dispatch: a pause that landed during the
     // stream resolve wins, so the engine comes up silent instead of playing
     // under a paused UI (last user action wins).
+    let mut state_guard = state.write().await;
+    if generation::current(&state_guard) != start_generation
+        || !state_guard
+            .playback_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+    {
+        return Err(StartError::Superseded);
+    }
+    let is_playing = state_guard
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT is_playing FROM playback_state WHERE id=1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .map(|value| value != 0)
+        .unwrap_or(true);
     let job =
         player::build_playback_preparation(track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(start_generation)
-            .with_start_paused(!super::settings::transport_intent_is_playing(state).await);
+            .with_start_paused(!is_playing);
     let sent = match dispatch {
         Dispatch::Play => handle.play(job),
         Dispatch::Switch => handle.switch_to(job),
     };
     sent.map_err(|error| StartError::Dispatch { dispatch, error })?;
-    {
-        let mut state_guard = state.write().await;
-        state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
-            audio_quality: stream_info.audio_quality.clone(),
-            sample_rate: stream_info.sample_rate,
-            bit_depth: stream_info.bit_depth,
-        });
-        state_guard.pending_stream_display = None;
+    state_guard.current_stream_display = Some(crate::StreamDisplayInfo {
+        audio_quality: stream_info.audio_quality.clone(),
+        sample_rate: stream_info.sample_rate,
+        bit_depth: stream_info.bit_depth,
+    });
+    state_guard.pending_stream_display = None;
+    if expected_runtime.is_some() {
+        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+            info.active_track_id = Some(track.id);
+            info.last_error = None;
+        }
+        let _ = state_guard
+            .event_tx
+            .send(crate::AppEvent::TrackChanged { track_id: track.id });
+        let _ = state_guard
+            .event_tx
+            .send(crate::AppEvent::PlaybackStateChanged);
+        let _ = state_guard.event_tx.send(crate::AppEvent::QueueUpdated);
     }
     Ok(Started { stream_info })
 }
@@ -273,6 +333,37 @@ mod tests {
             other => panic!("expected Stream, got {other:?}"),
         }
         assert!(fx.commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn newer_generation_while_acquiring_runtime_prevents_dispatch_and_display() {
+        let fx = fixture(
+            Some(99101),
+            ScriptedStreamSource::new(vec![Ok(test_stream_info(99101))]),
+        )
+        .await;
+        let claimed = generation::bump(&fx.state).await;
+        let guard = fx.state.read().await;
+        let state = fx.state.clone();
+        let track = fx.track.clone();
+        let pending = tokio::spawn(async move {
+            start_track(&state, request(&track, claimed, Dispatch::Play)).await
+        });
+        // Reads and resolution can finish; runtime acquisition needs the write
+        // guard that this reader deliberately keeps unavailable.
+        tokio::task::yield_now().await;
+        assert_eq!(fx.stream.call_count(), 1);
+        guard
+            .playback_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        drop(guard);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(StartError::Superseded)));
+        assert!(fx.commands.try_recv().is_err());
+        assert!(fx.state.read().await.current_stream_display.is_none());
     }
 
     #[tokio::test]

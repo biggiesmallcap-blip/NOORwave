@@ -26,7 +26,7 @@ use crate::server::transport::generation::{
     current as current_playback_generation, is_current as playback_generation_is_current,
 };
 use crate::server::transport::start::{
-    Dispatch, Generation, StartError, StartRequest, start_track,
+    Dispatch, Generation, StartError, StartRequest, start_track, start_track_for_runtime,
 };
 use crate::server::transport::stream::{TidalPlaybackError, resolve_tidal_playback_stream};
 use crate::services::tidal::stream as tidal_stream;
@@ -1706,10 +1706,38 @@ pub(crate) async fn handle_runtime_track_error(
     if retryable && !retry_already_attempted {
         let snapshot = {
             let state_guard = state.read().await;
+            if current_playback_generation(&state_guard) != generation
+                || !state_guard
+                    .playback_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.handle.is_same_runtime(expected_runtime))
+            {
+                return Ok(());
+            }
             state_guard.db.with_conn(player::load_snapshot)?
         };
-        match switch_runtime_to_snapshot_current(&state, &snapshot, generation).await {
-            Ok(()) => {
+        let Some(track) = snapshot
+            .state
+            .current_track
+            .as_ref()
+            .filter(|track| track.id == failed_track_id)
+        else {
+            return Ok(());
+        };
+        let crossfade_ms = effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await;
+        match start_track_for_runtime(
+            &state,
+            StartRequest {
+                track,
+                generation: Generation::Claimed(generation),
+                dispatch: Dispatch::Switch,
+                crossfade_ms,
+            },
+            expected_runtime,
+        )
+        .await
+        {
+            Ok(_) => {
                 tracing::warn!(
                     target: "noor.playback.recovery",
                     event = "runtime_track_retry_dispatched",
@@ -1720,6 +1748,7 @@ pub(crate) async fn handle_runtime_track_error(
                 );
                 return Ok(());
             }
+            Err(StartError::Superseded) => return Ok(()),
             Err(error) => {
                 tracing::warn!(
                     target: "noor.playback.recovery",
@@ -1727,7 +1756,7 @@ pub(crate) async fn handle_runtime_track_error(
                     failed_track_id,
                     generation,
                     original_error = %message,
-                    retry_error = %error,
+                    retry_error = ?error,
                     "current-row playback recovery failed; pausing without advancing"
                 );
             }
@@ -1735,19 +1764,40 @@ pub(crate) async fn handle_runtime_track_error(
     }
 
     if retryable {
-        let paused_snapshot = {
-            let state_guard = state.read().await;
-            state_guard.db.with_conn(player::pause)?
-        };
-        sync_session_after_snapshot(
-            &state,
-            &paused_snapshot,
-            Some(player::ListenSessionEndReason::Stopped),
-        )
-        .await;
-        {
-            let state_guard = state.read().await;
+        let completed = {
+            let mut state_guard = state.write().await;
+            if current_playback_generation(&state_guard) != generation
+                || !state_guard
+                    .playback_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.handle.is_same_runtime(expected_runtime))
+            {
+                return Ok(());
+            }
+            state_guard.db.with_conn(player::pause)?;
+            let outcome = flush_active_listen_session_locked(
+                &mut state_guard,
+                chrono::Utc::now(),
+                player::ListenSessionEndReason::Stopped,
+            )
+            .map_err(|error| warn!("Failed to flush exhausted-retry listen session: {error}"))
+            .ok();
+            if let Some(track_id) = outcome
+                .as_ref()
+                .and_then(|outcome| outcome.flushed_track_id)
+            {
+                let _ = state_guard
+                    .event_tx
+                    .send(AppEvent::ListenHistoryUpdated { track_id });
+            }
+            let _ = state_guard.event_tx.send(AppEvent::PlaybackFailed {
+                message: message.to_string(),
+            });
             let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+            outcome.and_then(|outcome| outcome.scrobble_completed)
+        };
+        if let Some(payload) = completed {
+            crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
         }
         tracing::warn!(
             target: "noor.playback.recovery",
@@ -1757,7 +1807,6 @@ pub(crate) async fn handle_runtime_track_error(
             error = %message,
             "transient playback recovery was exhausted; paused without advancing the queue"
         );
-        report_playback_failure(&state, message);
         return Ok(());
     }
 

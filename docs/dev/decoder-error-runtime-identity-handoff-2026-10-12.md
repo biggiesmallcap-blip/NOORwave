@@ -26,6 +26,6 @@ Adversarial review checked that validation happens after the contested lock, not
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
 - `cargo test -p noor-server --locked`: 2,163 passed, 11 ignored, zero failures, 366.44 seconds.
 
-This completes the stale-event entry guard, not the broader recovery ownership audit. A current error can pass this guard and then await stream resolution; protecting every later mutation and dispatch against replacement remains current audit work. Same-runtime replacement of a decoder also needs source identity review. These are not moved to FOLLOWUPS.md.
+This completes the stale-event entry guard, not the broader recovery ownership audit. Transient retry ownership across stream resolution is subsequently covered by [the runtime-bound retry handoff](runtime-bound-retry-handoff-2026-10-12.md). Nonretryable queue advancement and same-runtime replacement of a decoder still need ownership review. These are not moved to FOLLOWUPS.md.
 
 Audible desktop recovery, device switching, hotplug, non-Windows compilation, and release-mode performance remain unverified. DJ work is deferred at the user's request. The installed application and user database were not changed. Version remains 1.0.5. Follow-ups added: none.

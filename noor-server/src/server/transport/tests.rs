@@ -2930,6 +2930,291 @@ struct NearEndRuntimeProbe {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+struct RetryStreamGate(Arc<NearEndStreamGate>);
+
+#[async_trait::async_trait]
+impl super::stream::StreamSource for RetryStreamGate {
+    async fn resolve(
+        &self,
+        token: &str,
+        request: &crate::services::tidal::stream::StreamRequest,
+    ) -> Result<
+        crate::services::tidal::stream::StreamInfo,
+        crate::services::tidal::stream::StreamResolveError,
+    > {
+        super::stream::StreamSource::resolve(self.0.as_ref(), token, request)
+            .await
+            .map_err(
+                |_| crate::services::tidal::stream::StreamResolveError::RequestFailed {
+                    message: "test retry lookup failed".into(),
+                },
+            )
+    }
+}
+
+async fn retry_resolution_fixture(
+    reject: bool,
+) -> (
+    crate::SharedState,
+    NearEndRuntimeProbe,
+    Arc<NearEndStreamGate>,
+) {
+    static NEXT_TIDAL_ID: std::sync::atomic::AtomicI64 =
+        std::sync::atomic::AtomicI64::new(9_500_001);
+    let (state, probe, gate) = near_end_fixture(reject).await;
+    let mut guard = state.write().await;
+    guard
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE tracks SET tidal_id=?1, source='tidal' WHERE id=1",
+                [NEXT_TIDAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    guard.stream_source = Arc::new(RetryStreamGate(gate.clone()));
+    drop(guard);
+    (state, probe, gate)
+}
+
+#[tokio::test]
+async fn transient_retry_resolution_cannot_dispatch_or_pause_replacement_runtime() {
+    for reject in [false, true] {
+        let (state, old, gate) = retry_resolution_fixture(reject).await;
+        let task_state = state.clone();
+        let handle = old.handle.clone();
+        let pending = tokio::spawn(async move {
+            handle_runtime_track_error(task_state, &handle, 1, 0, "DASH stream prebuffer failed")
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        let replacement = NearEndRuntimeProbe::new();
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = replacement.handle.clone();
+        let info = guard.playback_runtime_info.as_mut().unwrap();
+        info.active_track_id = Some(1);
+        info.last_error = Some("replacement status".into());
+        guard
+            .audio_active
+            .store(true, std::sync::atomic::Ordering::Release);
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "replacement quality".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        let before = guard.db.with_conn(player::load_snapshot).unwrap();
+        let mut events = guard.event_tx.subscribe();
+        drop(guard);
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // A following command forms a FIFO barrier with the fake actor thread.
+        replacement.handle.pause().unwrap();
+        assert!(matches!(
+            replacement
+                .commands
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            playback_runtime::PlaybackRuntimeCommand::Pause
+        ));
+        let guard = state.read().await;
+        assert!(
+            guard
+                .audio_active
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert_eq!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .unwrap()
+                .last_error
+                .as_deref(),
+            Some("replacement status")
+        );
+        assert_eq!(
+            guard.current_stream_display.as_ref().unwrap().audio_quality,
+            "replacement quality"
+        );
+        let after = guard.db.with_conn(player::load_snapshot).unwrap();
+        assert_eq!(after.state.is_playing, before.state.is_playing);
+        assert_eq!(
+            after.state.current_queue_item_id,
+            before.state.current_queue_item_id
+        );
+        assert_eq!(after.queue.len(), before.queue.len());
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn transient_retry_resolution_preserves_current_row_and_latest_pause_intent() {
+    for (reject, paused, catalog_rejection) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, false, true),
+    ] {
+        let (state, runtime, gate) = retry_resolution_fixture(reject).await;
+        if catalog_rejection {
+            state.write().await.stream_source = gate.clone();
+        }
+        let task_state = state.clone();
+        let handle = runtime.handle.clone();
+        let pending = tokio::spawn(async move {
+            handle_runtime_track_error(task_state, &handle, 1, 0, "DASH stream prebuffer failed")
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        let guard = state.write().await;
+        if paused {
+            guard.db.with_conn(player::pause).unwrap();
+        }
+        let mut events = guard.event_tx.subscribe();
+        drop(guard);
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        runtime.handle.pause().unwrap();
+        let command = runtime
+            .commands
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        if reject {
+            assert!(matches!(
+                command,
+                playback_runtime::PlaybackRuntimeCommand::Pause
+            ));
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AppEvent::PlaybackFailed { .. }
+            ));
+        } else {
+            match command {
+                playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                    assert_eq!(job.track.id, 1);
+                    assert_eq!(job.generation, 0);
+                    assert_eq!(job.start_paused, paused);
+                    assert!(job.resolved_stream.is_some());
+                }
+                other => panic!("expected current-row retry, got {other:?}"),
+            }
+            assert!(matches!(
+                runtime
+                    .commands
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap(),
+                playback_runtime::PlaybackRuntimeCommand::Pause
+            ));
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AppEvent::TrackChanged { track_id: 1 }
+            ));
+        }
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            AppEvent::PlaybackStateChanged
+        ));
+        let guard = state.read().await;
+        let snapshot = guard.db.with_conn(player::load_snapshot).unwrap();
+        assert_eq!(snapshot.state.current_track.as_ref().unwrap().id, 1);
+        assert_eq!(snapshot.queue.len(), 2);
+        assert_eq!(snapshot.state.is_playing, !reject && !paused);
+        if !reject {
+            assert_eq!(
+                guard
+                    .playback_runtime_info
+                    .as_ref()
+                    .unwrap()
+                    .active_track_id,
+                Some(1)
+            );
+            assert!(
+                guard
+                    .playback_runtime_info
+                    .as_ref()
+                    .unwrap()
+                    .last_error
+                    .is_none()
+            );
+            assert_eq!(
+                guard.current_stream_display.as_ref().unwrap().audio_quality,
+                "LOSSLESS"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn transient_retry_resolution_cannot_overwrite_new_generation() {
+    for reject in [false, true] {
+        let (state, runtime, gate) = retry_resolution_fixture(reject).await;
+        let task_state = state.clone();
+        let handle = runtime.handle.clone();
+        let pending = tokio::spawn(async move {
+            handle_runtime_track_error(task_state, &handle, 1, 0, "DASH stream prebuffer failed")
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        super::generation::bump(&state).await;
+        let mut guard = state.write().await;
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "new generation".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        let mut events = guard.event_tx.subscribe();
+        drop(guard);
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        runtime.handle.pause().unwrap();
+        assert!(matches!(
+            runtime
+                .commands
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            playback_runtime::PlaybackRuntimeCommand::Pause
+        ));
+        let guard = state.read().await;
+        assert!(
+            guard
+                .db
+                .with_conn(player::load_snapshot)
+                .unwrap()
+                .state
+                .is_playing
+        );
+        assert_eq!(
+            guard.current_stream_display.as_ref().unwrap().audio_quality,
+            "new generation"
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+}
+
 impl NearEndRuntimeProbe {
     fn new() -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
