@@ -18,7 +18,7 @@ describe('library home hero contract', () => {
 	test('top_artist_hero_uses_a_full_top_20_mural', () => {
 		// Ranked server-side by plays summed per artist (see
 		// get_library_top_artists), not from the shared tracks store.
-		expect(libraryPage).toContain('cachedApi.getLibraryTopArtists(20)');
+		expect(libraryPage).toContain('cachedApi.libraryTopArtistsQuery(20)');
 		expect(libraryPage).toContain('return topArtists.map((artist) => ({');
 		expect(libraryHero).toContain('YOUR TOP 20 ARTISTS');
 		expect(libraryHero).toContain('hero-bg-mural');

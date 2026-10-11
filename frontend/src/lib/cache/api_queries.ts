@@ -122,6 +122,21 @@ function homeMuralStaleMs(fullMs: number): (data: unknown) => number {
 		return (payload.tracks?.length ?? 0) + (payload.albums?.length ?? 0) > 0 ? fullMs : 15 * SECOND;
 	};
 }
+// The Library hero's ranking moves slowly (play totals), so the last copy is
+// always worth painting while the refresh runs. Small payload (20 artists).
+const libraryTopArtistsOptions: QueryOptions = { ...longOptions, staleMs: 5 * MINUTE, returnStale: true };
+// Library murals persist a capped copy so a reload paints the last picks (and
+// their HTTP-cached covers) at once. The cap keeps each entry to a few dozen
+// Track rows; uncapped suggestion payloads were the localStorage quota risk.
+const HOME_MURAL_PERSIST_TRACKS = 30;
+const HOME_MURAL_PERSIST_ALBUMS = 16;
+function capMuralPayload<T extends { tracks?: unknown[] | null; albums?: unknown[] | null }>(payload: T): T {
+	return {
+		...payload,
+		tracks: (payload.tracks ?? []).slice(0, HOME_MURAL_PERSIST_TRACKS),
+		albums: (payload.albums ?? []).slice(0, HOME_MURAL_PERSIST_ALBUMS),
+	};
+}
 const chartOptions: QueryOptions = {
 	staleMs: 15 * MINUTE,
 	staleMsForData: chartStaleMs,
@@ -264,6 +279,17 @@ export const cachedApi = {
 			cacheKeys.tracks(sortBy, sortDir, limit, offset, favoriteOnly, likedOnly),
 			() => api.getTracks(sortBy, sortDir, limit, offset, favoriteOnly, likedOnly),
 			options,
+		);
+	},
+	// The Library landing's "Recently Added" source: newest library tracks,
+	// independent of the shared tracks store (which holds whatever sort, scope
+	// or search the Songs tab last loaded). Same key as the Songs tab's default
+	// first page, so both share one persisted entry.
+	recentlyAddedTracksQuery(limit = 100) {
+		return query<{ tracks: Track[]; total: number }>(
+			cacheKeys.tracks('date_added', 'desc', limit, 0, true, false),
+			() => api.getTracks('date_added', 'desc', limit, 0, true, false),
+			mediumOptions,
 		);
 	},
 	getHistory(limit = 50, offset = 0) {
@@ -513,14 +539,14 @@ export const cachedApi = {
 	// old one-shot fetchQuery(returnStale) handed back the stale payload and
 	// dropped the fresh one, leaving a boot-time empty sample on screen until a
 	// hard reload. Empty payloads go stale fast for the same reason.
-	// In-memory only (no persist): suggestion payloads carry full Track rows, so
-	// persisting every rotation would bloat the localStorage query cache (the
+	// Persisted, but capped (capMuralPayload): full suggestion payloads carry
+	// up to 60 Track rows, which would bloat the localStorage query cache (the
 	// boot-crash quota risk).
 	homeSuggestionsQuery(limit?: number) {
 		return query<HomeSuggestionsResponse>(
 			cacheKeys.homeSuggestions(''),
-			() => api.getHomeSuggestions([], limit),
-			{ staleMs: 30 * MINUTE, staleMsForData: homeMuralStaleMs(30 * MINUTE) },
+			() => api.getHomeSuggestions([], limit).then(capMuralPayload),
+			{ staleMs: 30 * MINUTE, staleMsForData: homeMuralStaleMs(30 * MINUTE), persist: scopedPersist(DAY) },
 		);
 	},
 	// The server holds each sample for five minutes, so refetching inside that
@@ -528,15 +554,24 @@ export const cachedApi = {
 	homeShufflePicksQuery(limit = 12) {
 		return query<HomeShufflePicksResponse>(
 			cacheKeys.homeShufflePicks(limit),
-			() => api.getHomeShufflePicks(limit),
-			{ staleMs: 5 * MINUTE, staleMsForData: homeMuralStaleMs(5 * MINUTE) },
+			() => api.getHomeShufflePicks(limit).then(capMuralPayload),
+			{ staleMs: 5 * MINUTE, staleMsForData: homeMuralStaleMs(5 * MINUTE), persist: scopedPersist(DAY) },
 		);
 	},
 	getLibraryTopArtists(limit = 20) {
 		return fetchCached<{ artists: LibraryTopArtist[] }>(
 			cacheKeys.libraryTopArtists(limit),
 			() => api.getLibraryTopArtists(limit),
-			mediumOptions,
+			libraryTopArtistsOptions,
+		);
+	},
+	// Reactive variant for the Library hero: hydrates the persisted ranking so a
+	// reload paints the hero at once, then revalidates behind it.
+	libraryTopArtistsQuery(limit = 20) {
+		return query<{ artists: LibraryTopArtist[] }>(
+			cacheKeys.libraryTopArtists(limit),
+			() => api.getLibraryTopArtists(limit),
+			libraryTopArtistsOptions,
 		);
 	},
 	getTidalMixes() {

@@ -3,6 +3,7 @@
 	import { api, type HomeShufflePicksResponse, type HomeSuggestionsResponse, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import { firstArtworkRequestUrl, preloadImages } from '$lib/utils/artwork';
 	import { lazyTidalArt, composeTidalArtQuery, peekTidalArt } from '$lib/actions/lazy-tidal-art';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTrackMenu } from '$lib/player/track_menu';
@@ -73,27 +74,64 @@
 
 	let panels = $derived(buildMuralPanels({ suggestionTracks, suggestionAlbums, randomTracks, randomAlbums }));
 
+	// A fresh payload swaps in only once its covers are in the HTTP cache (or
+	// after PRELOAD_CAP_MS), so a refresh never turns the murals into a grid of
+	// blank tiles that fill in one by one. Each side tracks the payload it last
+	// applied (cache emissions repeat the same object on loading flips) and a
+	// token so a slower, superseded preload can't overwrite a newer one.
+	const TILE_ART_SIZE = 320; // keep in sync with the tile ArtworkImage size below
+	const PRELOAD_CAP_MS = 2500;
+	let appliedShuffle: HomeShufflePicksResponse | undefined = shuffleQuery.getSnapshot().data;
+	let appliedSuggestions: HomeSuggestionsResponse | undefined = suggestionsQuery.getSnapshot().data;
+	let shuffleToken = 0;
+	let suggestionsToken = 0;
+
+	function panelCoverUrls(sources: Parameters<typeof buildMuralPanels>[0]): string[] {
+		return buildMuralPanels(sources)
+			.flatMap((panel) => panel.items)
+			.map((item) => firstArtworkRequestUrl(tileArtwork(item), TILE_ART_SIZE))
+			.filter((url): url is string => url !== null);
+	}
+
+	function applyShuffle(data: HomeShufflePicksResponse) {
+		if (data === appliedShuffle) return;
+		appliedShuffle = data;
+		const token = ++shuffleToken;
+		const next = shuffleSources(data);
+		const urls = panelCoverUrls({ suggestionTracks: [], suggestionAlbums: [], randomTracks: next.tracks, randomAlbums: next.albums });
+		void preloadImages(urls, PRELOAD_CAP_MS).then(() => {
+			if (token !== shuffleToken) return;
+			randomTracks = next.tracks;
+			randomAlbums = next.albums;
+		});
+	}
+
+	function applySuggestions(data: HomeSuggestionsResponse) {
+		if (data === appliedSuggestions) return;
+		appliedSuggestions = data;
+		const token = ++suggestionsToken;
+		const next = suggestionSources(data);
+		const urls = panelCoverUrls({ suggestionTracks: next.tracks, suggestionAlbums: next.albums, randomTracks: [], randomAlbums: [] });
+		void preloadImages(urls, PRELOAD_CAP_MS).then(() => {
+			if (token !== suggestionsToken) return;
+			suggestionTracks = next.tracks;
+			suggestionAlbums = next.albums;
+		});
+	}
+
 	// Empty or failed samples keep refreshing on a bounded backoff while the page
 	// stays open; the last-good payload stays on screen meanwhile.
 	$effect(() => {
 		const stops = [
 			watchMuralQuery(shuffleQuery, {
 				isEmpty: (data) => (data.tracks?.length ?? 0) + (data.albums?.length ?? 0) === 0,
-				onData: (data) => {
-					const next = shuffleSources(data);
-					randomTracks = next.tracks;
-					randomAlbums = next.albums;
-				},
+				onData: applyShuffle,
 				onError: (error) => console.error('Failed to load library shuffle picks:', error),
 				delaysMs: MURAL_REFRESH_DELAYS_MS,
 			}),
 			watchMuralQuery(suggestionsQuery, {
 				isEmpty: (data) => (data.tracks?.length ?? 0) + (data.albums?.length ?? 0) === 0,
-				onData: (data) => {
-					const next = suggestionSources(data);
-					suggestionTracks = next.tracks;
-					suggestionAlbums = next.albums;
-				},
+				onData: applySuggestions,
 				onError: (error) => console.error('Failed to load home suggestions:', error),
 				delaysMs: MURAL_REFRESH_DELAYS_MS,
 			}),

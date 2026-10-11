@@ -186,3 +186,35 @@ function isRenderableTidalArtworkUrl(url: string): boolean {
 		return false;
 	}
 }
+
+/** The URL ArtworkImage requests first for `source` at `size`, for preloading. */
+export function firstArtworkRequestUrl(source: string | null | undefined, size: TidalArtworkSize): string | null {
+	if (!source || source.trim().length === 0) return null;
+	const url = upscaleTidalArtwork(tidalImageIdToUrl(source), size);
+	return cachedTidalArtwork(url) ?? url;
+}
+
+/**
+ * Download `urls` into the HTTP cache, resolving once all have settled or
+ * `capMs` has passed, whichever is first. Lets a surface swap in new artwork
+ * only when it can paint at once instead of as a grid of blank tiles.
+ */
+export function preloadImages(urls: string[], capMs: number): Promise<void> {
+	if (typeof Image === 'undefined' || urls.length === 0) return Promise.resolve();
+	return new Promise((resolve) => {
+		let pending = urls.length;
+		const timer = setTimeout(resolve, capMs);
+		const settle = () => {
+			pending -= 1;
+			if (pending > 0) return;
+			clearTimeout(timer);
+			resolve();
+		};
+		for (const url of urls) {
+			const img = new Image();
+			img.onload = settle;
+			img.onerror = settle;
+			img.src = url;
+		}
+	});
+}

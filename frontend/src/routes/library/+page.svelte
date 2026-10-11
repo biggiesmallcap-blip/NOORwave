@@ -1,12 +1,12 @@
 <script lang="ts" module>
-	import type { LibraryTopArtist, Track as CachedTrack } from '$lib/api/client';
+	import type { Track as CachedTrack } from '$lib/api/client';
 
-	// Recent tracks and top artists, kept across visits so the landing paints at
-	// once and refreshes quietly. The suggestion murals read their own cache
-	// queries in LibraryMurals.svelte.
+	// Recent tracks, kept across visits so the landing paints at once and
+	// refreshes quietly. Top artists and the suggestion murals read persisted
+	// cache queries instead (here and in LibraryMurals.svelte), so they also
+	// survive a reload.
 	const homePanelCandidateCache = {
 		recentTracks: [] as CachedTrack[],
-		topArtists: [] as LibraryTopArtist[],
 	};
 </script>
 
@@ -34,7 +34,7 @@
 	import Dropdown from '$lib/components/ui/Dropdown.svelte';
 	import FilterChip from '$lib/components/ui/FilterChip.svelte';
 	import { formatTrackDuration, formatDateShort, savedDateMillis, getQualityClass } from '$lib/utils/format';
-	import { api, type Album, type Artist, type Genre, type Playlist, type Track } from '$lib/api/client';
+	import { api, type Album, type Artist, type Genre, type LibraryTopArtist, type Playlist, type Track } from '$lib/api/client';
 	import { createLibrarySearch } from '$lib/stores/library_search';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
@@ -246,8 +246,17 @@
 	// The hero's own ranking, independent of the shared `tracks` store (which
 	// holds whatever the Songs tab last loaded). The server sums plays per artist
 	// across the whole library before taking the top 20.
-	let topArtists = $state<LibraryTopArtist[]>(homePanelCandidateCache.topArtists);
-	let topArtistsLoading = $state(homePanelCandidateCache.topArtists.length === 0);
+	// The query hydrates the last persisted ranking synchronously, so a reload
+	// paints the hero at once and the background refresh replaces it.
+	const topArtistsQuery = cachedApi.libraryTopArtistsQuery(20);
+	const initialTopArtists = topArtistsQuery.getSnapshot().data;
+	let topArtists = $state<LibraryTopArtist[]>(initialTopArtists?.artists ?? []);
+	let topArtistsLoading = $state(initialTopArtists === undefined);
+	// "Recently Added" reads its own persisted query rather than the shared
+	// tracks store, which holds whatever sort/scope/search the Songs tab last
+	// loaded (and is empty until that load lands).
+	const recentlyAddedQuery = cachedApi.recentlyAddedTracksQuery(100);
+	let recentlyAddedTracks = $state<Track[]>(recentlyAddedQuery.getSnapshot().data?.tracks ?? []);
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -397,6 +406,14 @@
 		void loadCatalogueStatus();
 		void loadBatchMeta();
 		void loadRecentTracks();
+		const unsubscribeTopArtists = topArtistsQuery.subscribe((state) => {
+			if (state.data === undefined) return;
+			topArtists = state.data.artists ?? [];
+			topArtistsLoading = false;
+		});
+		const unsubscribeRecentlyAdded = recentlyAddedQuery.subscribe((state) => {
+			if (state.data !== undefined) recentlyAddedTracks = state.data.tracks;
+		});
 		void loadTopArtists();
 		void loadDecadeChips();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
@@ -405,6 +422,7 @@
 			if (latest.type === 'library_synced') {
 				void loadCatalogueStatus();
 				void loadTopArtists();
+				void recentlyAddedQuery.refresh().catch(() => undefined);
 			}
 			if (latest.type === 'listen_history_updated') {
 				void loadRecentTracks();
@@ -412,6 +430,8 @@
 		});
 		return () => {
 			unsubscribeWs();
+			unsubscribeTopArtists();
+			unsubscribeRecentlyAdded();
 			// Leaving the route invalidates its search and track-list work.
 			librarySearch.dispose();
 			cancelTrackListRequests();
@@ -424,12 +444,11 @@
 	// than leaving the hero blank until a hard reload.
 	const TOP_ARTISTS_RETRY_DELAYS_MS = [2000, 5000, 15000];
 
+	// Results land through the topArtistsQuery subscription; this only drives
+	// the refresh and its retries.
 	async function loadTopArtists(attempt = 0) {
 		try {
-			const data = await cachedApi.getLibraryTopArtists(20);
-			topArtists = data.artists ?? [];
-			homePanelCandidateCache.topArtists = topArtists;
-			topArtistsLoading = false;
+			await topArtistsQuery.refresh();
 		} catch (error) {
 			console.error('Failed to load top artists:', error);
 			const delay = TOP_ARTISTS_RETRY_DELAYS_MS[attempt];
@@ -1331,7 +1350,7 @@
 	let recentAlbums = $derived.by<HomeAlbumCard[]>(() => {
 		const albumDateMap = new Map<number, { card: HomeAlbumCard; date: string }>();
 
-		for (const track of $tracks) {
+		for (const track of recentlyAddedTracks) {
 			if (!track.album_id || !track.date_added) continue;
 			const existing = albumDateMap.get(track.album_id);
 			if (!existing || (savedDateMillis(track.date_added) ?? -Infinity) > (savedDateMillis(existing.date) ?? -Infinity)) {
