@@ -40,9 +40,27 @@ pub struct PlaybackRuntimeHandle {
     /// Same unwrap-audit reasoning as `position_source` / `buffered_source`.
     pub(super) offset_source: Arc<Mutex<Arc<AtomicU64>>>,
     pub(super) handoff_elapsed_source: Arc<Mutex<Arc<AtomicU64>>>,
+    pub(super) exclusive_event_identity: Arc<Mutex<Arc<()>>>,
 }
 
 impl PlaybackRuntimeHandle {
+    /// Keep publication serialized with listener validation and state changes.
+    /// This control-side mutex is never used by an audio callback.
+    pub(crate) fn lock_exclusive_event_identity(&self) -> std::sync::MutexGuard<'_, Arc<()>> {
+        self.exclusive_event_identity
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_exclusive_event_identity(&self) -> Arc<()> {
+        Arc::clone(&self.lock_exclusive_event_identity())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_replace_exclusive_event_identity(&self) {
+        *self.lock_exclusive_event_identity() = Arc::new(());
+    }
     #[cfg(test)]
     pub(crate) fn playback_source_identity(&self) -> Arc<AtomicU64> {
         // This reader moves with every active decoder, including same-track
@@ -90,6 +108,7 @@ impl PlaybackRuntimeHandle {
             buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+            exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
         }
     }
 
@@ -141,6 +160,28 @@ impl PlaybackRuntimeHandle {
         exclusive_latency_mode: ExclusiveLatencyMode,
     ) -> Result<()> {
         self.send(PlaybackRuntimeCommand::DeviceSwap {
+            released_output_identity: None,
+            device,
+            exclusive,
+            sample_rate_follow,
+            desired_sample_rate,
+            exclusive_release_grace_secs,
+            exclusive_latency_mode,
+        })
+    }
+
+    pub(crate) fn recover_released_exclusive_output(
+        &self,
+        output_identity: Arc<()>,
+        device: OutputDeviceSelection,
+        exclusive: bool,
+        sample_rate_follow: bool,
+        desired_sample_rate: Option<u32>,
+        exclusive_release_grace_secs: u32,
+        exclusive_latency_mode: ExclusiveLatencyMode,
+    ) -> Result<()> {
+        self.send(PlaybackRuntimeCommand::DeviceSwap {
+            released_output_identity: Some(output_identity),
             device,
             exclusive,
             sample_rate_follow,

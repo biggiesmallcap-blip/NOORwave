@@ -203,6 +203,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     let offset_source: Arc<Mutex<Arc<AtomicU64>>> =
         Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     let handoff_elapsed_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX))));
+    let exclusive_event_identity = Arc::new(Mutex::new(Arc::new(())));
 
     let worker_volume_ctl = Arc::clone(&volume_ctl);
     let worker_initial_position = Arc::clone(&initial_position);
@@ -210,6 +211,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     let worker_buffered_source = Arc::clone(&buffered_source);
     let worker_offset_source = Arc::clone(&offset_source);
     let worker_handoff_elapsed_source = Arc::clone(&handoff_elapsed_source);
+    let worker_exclusive_event_identity = Arc::clone(&exclusive_event_identity);
 
     thread::Builder::new()
         .name("noor-playback-runtime".into())
@@ -225,6 +227,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
                 worker_buffered_source,
                 worker_offset_source,
                 worker_handoff_elapsed_source,
+                worker_exclusive_event_identity,
             ) {
                 let _ = worker_event_tx.send(PlaybackRuntimeEvent::Error {
                     message: err.to_string(),
@@ -250,6 +253,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
         buffered_source,
         offset_source,
         handoff_elapsed_source,
+        exclusive_event_identity,
     })
 }
 
@@ -365,6 +369,7 @@ fn run_runtime_loop(
     buffered_source: Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: Arc<Mutex<Arc<AtomicU64>>>,
     handoff_elapsed_source: Arc<Mutex<Arc<AtomicU64>>>,
+    _exclusive_event_identity: Arc<Mutex<Arc<()>>>,
 ) -> Result<()> {
     let host = cpal::default_host();
     let mut device = host
@@ -384,7 +389,7 @@ fn run_runtime_loop(
         device_sample_rate: output_config.sample_rate,
         device_channels: output_config.channels,
         #[cfg(target_os = "windows")]
-        exclusive_sink: ExclusiveRuntimeSink::new(),
+        exclusive_sink: ExclusiveRuntimeSink::new(_exclusive_event_identity),
         engine: None,
         next_engine: None,
         drop_preview_engine: None,
@@ -830,6 +835,7 @@ fn run_runtime_loop(
                     let _ = respond_to.send(status);
                 }
                 PlaybackRuntimeCommand::DeviceSwap {
+                    released_output_identity,
                     device: selection,
                     exclusive,
                     sample_rate_follow,
@@ -846,6 +852,7 @@ fn run_runtime_loop(
                         desired_sample_rate,
                         exclusive_release_grace_secs,
                         exclusive_latency_mode,
+                        released_output_identity,
                     );
                 }
                 PlaybackRuntimeCommand::Shutdown => {

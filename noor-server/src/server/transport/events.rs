@@ -31,6 +31,7 @@ use crate::server::transport::start::{
 use crate::server::transport::stream::{TidalPlaybackError, resolve_tidal_playback_stream};
 use crate::services::tidal::stream as tidal_stream;
 use crate::{AppEvent, PlaybackRuntimeInfo, SharedState};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
@@ -430,6 +431,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                    output_identity,
                     device_name,
                     transport_format,
                 }) => {
@@ -439,6 +441,10 @@ pub(crate) fn spawn_playback_runtime_listener(
                         .as_ref()
                         .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
                     {
+                        continue;
+                    }
+                    let identity_guard = handle.lock_exclusive_event_identity();
+                    if !Arc::ptr_eq(&identity_guard, &output_identity) {
                         continue;
                     }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -451,6 +457,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
+                    output_identity,
                     reason,
                     device_name,
                 }) => {
@@ -460,6 +467,10 @@ pub(crate) fn spawn_playback_runtime_listener(
                         .as_ref()
                         .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
                     {
+                        continue;
+                    }
+                    let identity_guard = handle.lock_exclusive_event_identity();
+                    if !Arc::ptr_eq(&identity_guard, &output_identity) {
                         continue;
                     }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -472,6 +483,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                    output_identity,
                     device_name,
                 }) => {
                     let mut state_guard = state.write().await;
@@ -480,6 +492,10 @@ pub(crate) fn spawn_playback_runtime_listener(
                         .as_ref()
                         .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
                     {
+                        continue;
+                    }
+                    let identity_guard = handle.lock_exclusive_event_identity();
+                    if !Arc::ptr_eq(&identity_guard, &output_identity) {
                         continue;
                     }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -520,7 +536,8 @@ pub(crate) fn spawn_playback_runtime_listener(
                     // Sending is synchronous. Keep the validated runtime
                     // current until its recovery command has been queued.
                     if let Some((runtime, output)) = retry
-                        && let Err(error) = runtime.device_swap(
+                        && let Err(error) = runtime.recover_released_exclusive_output(
+                            Arc::clone(&output_identity),
                             output.device,
                             output.exclusive_mode,
                             output.sample_rate_follow,

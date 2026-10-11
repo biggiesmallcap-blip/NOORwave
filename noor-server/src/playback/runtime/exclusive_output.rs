@@ -99,7 +99,7 @@ pub(super) fn install_shared_fallback(
     command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<()> {
-    state.exclusive_sink.clear();
+    state.exclusive_sink.clear_after_failed_start();
     // The preference remains in settings and an explicit retry requests it
     // again. Newly prepared decks must use the backend actually rendering.
     state.current_exclusive = false;
@@ -282,7 +282,7 @@ pub(super) fn ensure_exclusive_sink_started(
     {
         return Ok(stream.effective_sample_rate);
     }
-    state.exclusive_sink.stream = None;
+    let output_identity = state.exclusive_sink.retire_stream();
     retarget_exclusive_engines(
         live_engines_mut(state),
         exclusive_plan.stream_config.sample_rate,
@@ -314,6 +314,7 @@ pub(super) fn ensure_exclusive_sink_started(
         Arc::clone(&state.exclusive_sink.source_bank),
         command_tx,
         event_tx.clone(),
+        Arc::clone(&output_identity),
     ) {
         Ok(stream) => {
             let actual_rate = stream.effective_sample_rate;
@@ -322,6 +323,7 @@ pub(super) fn ensure_exclusive_sink_started(
             retarget_exclusive_engines(live_engines_mut(state), actual_rate)?;
             drop(pause_guards);
             let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                output_identity,
                 device_name: device_label,
                 transport_format,
             });
@@ -331,6 +333,7 @@ pub(super) fn ensure_exclusive_sink_started(
             let reason = failure.user_message();
             warn!("WASAPI exclusive grab failed; falling back to cpal shared: {reason}");
             let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeFailed {
+                output_identity,
                 reason: reason.clone(),
                 device_name: device_label,
             });

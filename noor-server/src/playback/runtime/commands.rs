@@ -114,6 +114,8 @@ pub enum PlaybackRuntimeCommand {
     /// (5 + 6) and ignored here. Optional `desired_sample_rate` allows the route
     /// layer to specify an exact target rate (e.g. per-track transitions).
     DeviceSwap {
+        /// Only automatic release recovery is conditional on an output attempt.
+        released_output_identity: Option<Arc<()>>,
         device: OutputDeviceSelection,
         exclusive: bool,
         sample_rate_follow: bool,
@@ -278,18 +280,21 @@ pub enum PlaybackRuntimeEvent {
     /// WASAPI exclusive grab succeeded. Frontend clears any stale "failure"
     /// banner and shows engaged state.
     ExclusiveModeEngaged {
+        output_identity: Arc<()>,
         device_name: String,
         transport_format: String,
     },
     /// WASAPI exclusive grab failed; runtime fell back to cpal shared so the
     /// user still hears audio. `reason` is a human-readable explanation.
     ExclusiveModeFailed {
+        output_identity: Arc<()>,
         reason: String,
         device_name: String,
     },
     /// WASAPI exclusive render thread released the device after grace timeout.
     /// Frontend clears engaged state. Runtime will re-grab on next Resume/Play.
     ExclusiveModeReleased {
+        output_identity: Arc<()>,
         device_name: String,
     },
 }

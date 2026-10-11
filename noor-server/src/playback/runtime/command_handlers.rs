@@ -1249,7 +1249,22 @@ pub(super) fn handle_device_swap(
     desired_sample_rate: Option<u32>,
     exclusive_release_grace_secs: u32,
     exclusive_latency_mode: ExclusiveLatencyMode,
+    _released_output_identity: Option<Arc<()>>,
 ) -> ControlFlow<()> {
+    // A user swap ahead of this recovery command can already have replaced
+    // its output. Only this actor publishes identities, so a match remains
+    // valid until this handler starts its own replacement.
+    #[cfg(target_os = "windows")]
+    if _released_output_identity
+        .as_ref()
+        .is_some_and(|identity| !state.exclusive_sink.is_current_event_identity(identity))
+    {
+        return ControlFlow::Continue(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    if _released_output_identity.is_some() {
+        return ControlFlow::Continue(());
+    }
     let LoopEnv {
         command_tx,
         event_tx,
@@ -1367,7 +1382,7 @@ pub(super) fn handle_device_swap(
         #[cfg(target_os = "windows")]
         {
             refresh_exclusive_sources(state);
-            state.exclusive_sink.stream = None;
+            state.exclusive_sink.retire_stream();
             match ensure_exclusive_sink_started(
                 state,
                 &new_device,

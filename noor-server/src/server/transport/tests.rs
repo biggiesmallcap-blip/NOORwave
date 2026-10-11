@@ -670,14 +670,17 @@ async fn retired_runtime_exclusive_notifications_cannot_change_replacement_or_re
         let mut guard = state.write().await;
         let event = match kind {
             "engaged" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                output_identity: old.test_exclusive_event_identity(),
                 device_name: "retired output".into(),
                 transport_format: "old format".into(),
             },
             "failed" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
+                output_identity: old.test_exclusive_event_identity(),
                 device_name: "retired output".into(),
                 reason: "old failure".into(),
             },
             _ => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                output_identity: old.test_exclusive_event_identity(),
                 device_name: "retired output".into(),
             },
         };
@@ -755,14 +758,17 @@ async fn current_runtime_exclusive_notifications_update_status_and_gate_release_
         for kind in ["engaged", "failed", "released"] {
             let event = match kind {
                 "engaged" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                    output_identity: handle.test_exclusive_event_identity(),
                     device_name: "current output".into(),
                     transport_format: "24-bit PCM".into(),
                 },
                 "failed" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
+                    output_identity: handle.test_exclusive_event_identity(),
                     device_name: "current output".into(),
                     reason: "format rejected".into(),
                 },
                 _ => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                    output_identity: handle.test_exclusive_event_identity(),
                     device_name: "current output".into(),
                 },
             };
@@ -803,13 +809,101 @@ async fn current_runtime_exclusive_notifications_update_status_and_gate_release_
                     command_rx.try_recv().unwrap(),
                     playback_runtime::PlaybackRuntimeCommand::DeviceSwap {
                         exclusive: true,
+                        released_output_identity: Some(identity),
                         ..
-                    }
+                    } if Arc::ptr_eq(&identity, &handle.test_exclusive_event_identity())
                 ));
             } else {
                 assert!(command_rx.try_recv().is_err());
             }
         }
+        listener.abort();
+        assert!(listener.await.unwrap_err().is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn superseded_output_notifications_cannot_change_current_status_or_retry() {
+    for kind in ["engaged", "failed", "released"] {
+        let (state, _, _, _) = cpal_fault_fixture().await;
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+        {
+            let mut guard = state.write().await;
+            guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+            guard
+                .db
+                .with_conn(|conn| {
+                    crate::db::audio_settings::save(
+                        conn,
+                        &crate::db::audio_settings::AudioSettings {
+                            exclusive_mode: true,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(anyhow::Error::from)
+                })
+                .unwrap();
+        }
+        let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            playback_runtime::PlaybackRuntimeCommand::RequestReady
+        ));
+        let old_identity = handle.test_exclusive_event_identity();
+        let mut guard = state.write().await;
+        let event = match kind {
+            "engaged" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                output_identity: old_identity,
+                device_name: "old output".into(),
+                transport_format: "old format".into(),
+            },
+            "failed" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
+                output_identity: old_identity,
+                device_name: "old output".into(),
+                reason: "old failure".into(),
+            },
+            _ => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                output_identity: old_identity,
+                device_name: "old output".into(),
+            },
+        };
+        assert!(handle.test_publish_event(event));
+        tokio::task::yield_now().await;
+        handle.test_replace_exclusive_event_identity();
+        let expected_engaged = kind != "engaged";
+        let info = guard.playback_runtime_info.as_mut().unwrap();
+        info.exclusive_engaged = expected_engaged;
+        info.exclusive_transport_format = expected_engaged.then(|| "current format".into());
+        let mut events = guard.event_tx.subscribe();
+        // A subsequent real transport acknowledgment is the processing barrier.
+        assert!(
+            handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Paused {
+                track_id: Some(1)
+            })
+        );
+        drop(guard);
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, AppEvent::PlaybackStateChanged),
+            "superseded {kind} reached the UI: {event:?}"
+        );
+        let guard = state.read().await;
+        let info = guard.playback_runtime_info.as_ref().unwrap();
+        assert_eq!(info.exclusive_engaged, expected_engaged);
+        assert_eq!(
+            info.exclusive_transport_format.as_deref(),
+            expected_engaged.then_some("current format")
+        );
+        assert!(events.try_recv().is_err());
+        assert!(
+            command_rx.try_recv().is_err(),
+            "superseded release queued a retry"
+        );
+        drop(guard);
         listener.abort();
         assert!(listener.await.unwrap_err().is_cancelled());
     }
