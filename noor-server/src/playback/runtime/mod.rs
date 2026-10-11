@@ -308,6 +308,36 @@ struct PlaybackRuntimeLoopState {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn receive_runtime_command(
+    state: &PlaybackRuntimeLoopState,
+    command_rx: &mpsc::Receiver<PlaybackRuntimeCommand>,
+    _command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    wait: Duration,
+) -> std::result::Result<PlaybackRuntimeCommand, mpsc::RecvTimeoutError> {
+    // A queued seek must retire its old callback mailbox before those values
+    // become actor commands. Once dispatched, subsequent controls retain FIFO.
+    match command_rx.try_recv() {
+        Ok(command) => return Ok(command),
+        Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvTimeoutError::Disconnected),
+        Err(mpsc::TryRecvError::Empty) => {}
+    }
+    for engine in [
+        state.engine.as_ref(),
+        state.next_engine.as_ref(),
+        state.fading_out_engine.as_ref(),
+        state.drop_preview_engine.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(command) = engine.shared.take_rt_command(event_tx) {
+            return Ok(command);
+        }
+    }
+    command_rx.recv_timeout(wait)
+}
+
 fn run_runtime_loop(
     mut config: PlaybackRuntimeConfig,
     command_rx: mpsc::Receiver<PlaybackRuntimeCommand>,
@@ -366,7 +396,30 @@ fn run_runtime_loop(
 
     let mut stall_tracker = StallTracker::new();
     let mut last_dj_readiness_check = Instant::now();
+    let mut last_watchdog_tick = Instant::now();
     loop {
+        #[cfg(target_os = "windows")]
+        poll_exclusive_output_fault(&mut state, &event_tx);
+        let mut output_running = false;
+        for engine in [
+            state.engine.as_ref(),
+            state.next_engine.as_ref(),
+            state.fading_out_engine.as_ref(),
+            state.drop_preview_engine.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let shared = &engine.shared;
+            if !shared.paused.load(Ordering::SeqCst) && !shared.stopped.load(Ordering::SeqCst) {
+                output_running = true;
+            }
+        }
+        let command_wait = if output_running {
+            Duration::from_millis(5)
+        } else {
+            STALL_WATCHDOG_TICK
+        };
         // Check between commands as well as on idle ticks: a busy cockpit
         // must not starve preparation or a decode-delayed handoff. Dispatch
         // directly, retaining this loop's generation checks and panic guard.
@@ -376,12 +429,15 @@ fn run_runtime_loop(
         } else {
             None
         };
-        let command = match readiness_wakeup
-            .map(Ok)
-            .unwrap_or_else(|| command_rx.recv_timeout(STALL_WATCHDOG_TICK))
-        {
+        let command = match readiness_wakeup.map(Ok).unwrap_or_else(|| {
+            receive_runtime_command(&state, &command_rx, &command_tx, &event_tx, command_wait)
+        }) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                if last_watchdog_tick.elapsed() < STALL_WATCHDOG_TICK {
+                    continue;
+                }
+                last_watchdog_tick = Instant::now();
                 // Emit any warns the audio callback latched (underrun,
                 // rejected in-callback seek) - the callback itself must not
                 // touch tracing.
@@ -407,7 +463,9 @@ fn run_runtime_loop(
                 if let Some(track_id) = stall.just_recovered {
                     let _ = event_tx.send(PlaybackRuntimeEvent::StallRecovered { track_id });
                 }
-                if let Some((track_id, generation)) = stall.force_advance {
+                if let Some((track_id, generation)) = stall.force_advance
+                    && let Some(active_engine) = state.engine.as_ref()
+                {
                     match stall.kind {
                         Some(StallKind::LostTerminal) => warn!(
                             target: "noor.playback.advance",
@@ -433,6 +491,7 @@ fn run_runtime_loop(
                     let _ = command_tx.send(PlaybackRuntimeCommand::TrackTerminal {
                         track_id,
                         generation,
+                        decoder_stop: active_engine.shared.stop_flag(),
                         outcome: PlaybackTerminalReason::Finished,
                     });
                 }
@@ -476,6 +535,7 @@ fn run_runtime_loop(
                         #[cfg(target_os = "windows")]
                         state.exclusive_sink.clear();
                         report_runtime_command_error(&event_tx, "Play", error);
+                        let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
                     }
                 }
                 PlaybackRuntimeCommand::Switch(job) => {
@@ -499,6 +559,7 @@ fn run_runtime_loop(
                         #[cfg(target_os = "windows")]
                         state.exclusive_sink.clear();
                         report_runtime_command_error(&event_tx, "Switch", error);
+                        let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
                     }
                 }
                 PlaybackRuntimeCommand::RequestReady => {
@@ -678,26 +739,7 @@ fn run_runtime_loop(
                     }
                 }
                 PlaybackRuntimeCommand::ReleaseExclusiveNow => {
-                    // Yield the exclusive endpoint now so the WebView can play a
-                    // video in shared mode. Pause first (idempotent if already
-                    // paused) so the render thread isn't mid-fill when it drops
-                    // the device, then ask it to release ahead of the idle grace.
-                    if state.current_exclusive {
-                        if let Some(engine) = state.engine.as_mut() {
-                            let _ = engine.pause();
-                        }
-                        if let Some(engine) = state.fading_out_engine.as_mut() {
-                            let _ = engine.pause();
-                        }
-                        #[cfg(target_os = "windows")]
-                        {
-                            info!(
-                                "ReleaseExclusiveNow: dropping exclusive device on {} for shared-mode video playback",
-                                state.device_name
-                            );
-                            state.exclusive_sink.request_release();
-                        }
-                    }
+                    handle_release_exclusive_now(&mut state, &event_tx);
                 }
                 PlaybackRuntimeCommand::Resume => {
                     return handle_resume(env, &mut state);
@@ -714,9 +756,37 @@ fn run_runtime_loop(
                 PlaybackRuntimeCommand::TrackTerminal {
                     track_id,
                     generation,
+                    decoder_stop,
                     outcome,
                 } => {
-                    return handle_track_terminal(env, &mut state, track_id, generation, outcome);
+                    return handle_track_terminal(
+                        &mut state,
+                        env.event_tx,
+                        env.position_source,
+                        env.buffered_source,
+                        env.offset_source,
+                        track_id,
+                        generation,
+                        decoder_stop,
+                        outcome,
+                    );
+                }
+                PlaybackRuntimeCommand::CpalOutputError {
+                    track_id,
+                    generation,
+                    decoder_stop,
+                    output_live,
+                    message,
+                } => {
+                    handle_cpal_output_error(
+                        &mut state,
+                        &event_tx,
+                        track_id,
+                        generation,
+                        decoder_stop,
+                        output_live,
+                        message,
+                    );
                 }
                 PlaybackRuntimeCommand::TrackStatus {
                     track_id,

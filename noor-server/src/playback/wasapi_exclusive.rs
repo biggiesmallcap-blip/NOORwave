@@ -19,9 +19,9 @@
 //! continuous paused state. The runtime detects the release via
 //! [`ExclusiveStream::is_released`] and re-grabs on the next Resume / Play.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -45,9 +45,80 @@ use crate::db::audio_settings::ExclusiveLatencyMode;
 const AUDCLNT_E_UNSUPPORTED_FORMAT: i32 = 0x8889_0008u32 as i32;
 const AUDCLNT_E_DEVICE_IN_USE: i32 = 0x8889_000Au32 as i32;
 const AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED: i32 = 0x8889_000Eu32 as i32;
+const AUDCLNT_E_ENDPOINT_CREATE_FAILED: i32 = 0x8889_000Fu32 as i32;
 const AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED: i32 = 0x8889_0019u32 as i32;
+#[cfg(test)]
 const AUDCLNT_E_INVALID_DEVICE_PERIOD: i32 = 0x8889_0020u32 as i32;
 const DEVICE_IN_USE_BACKOFF_MS: &[u64] = &[50, 150, 350, 750];
+const DEVICE_EVENT_TIMEOUT: Duration = Duration::from_secs(2);
+const DEVICE_EVENT_CANCEL_POLL_MS: u32 = 10;
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeviceEventWait {
+    Ready,
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum ExclusiveRenderFault {
+    EventTimeout = 1,
+    EventWaitFailed = 2,
+    DeviceWriteFailed = 3,
+}
+
+impl ExclusiveRenderFault {
+    pub(crate) fn user_message(self) -> &'static str {
+        match self {
+            Self::EventTimeout => {
+                "WASAPI output stopped signaling audio events. Reconnect the device and resume playback."
+            }
+            Self::EventWaitFailed => {
+                "WASAPI could not wait for the audio device. Reconnect the device and resume playback."
+            }
+            Self::DeviceWriteFailed => {
+                "WASAPI could not write audio to the device. Reconnect the device and resume playback."
+            }
+        }
+    }
+}
+
+fn wait_for_device_event(
+    shutdown: &AtomicBool,
+    force_release: &AtomicBool,
+    timeout: Duration,
+    mut wait: impl FnMut(u32) -> Result<(), WasapiError>,
+) -> DeviceEventWait {
+    let started = Instant::now();
+    loop {
+        if shutdown.load(Ordering::SeqCst) || force_release.load(Ordering::Acquire) {
+            return DeviceEventWait::Cancelled;
+        }
+        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+            return DeviceEventWait::TimedOut;
+        };
+        if remaining.is_zero() {
+            return DeviceEventWait::TimedOut;
+        }
+        let wait_ms = remaining
+            .as_millis()
+            .clamp(1, u128::from(DEVICE_EVENT_CANCEL_POLL_MS)) as u32;
+        let result = wait(wait_ms);
+        if shutdown.load(Ordering::SeqCst) || force_release.load(Ordering::Acquire) {
+            return DeviceEventWait::Cancelled;
+        }
+        match result {
+            Ok(()) => return DeviceEventWait::Ready,
+            // wasapi 0.25 maps every non-signaled Win32 result, including
+            // WAIT_FAILED, to EventTimeout. Preserve the total device-loss
+            // deadline instead of treating one cancellation slice as failure.
+            Err(WasapiError::EventTimeout) => {}
+            Err(_) => return DeviceEventWait::Failed,
+        }
+    }
+}
 
 struct DeviceInUseRetryBudget {
     index: usize,
@@ -67,6 +138,33 @@ impl DeviceInUseRetryBudget {
     }
 }
 
+struct ComApartmentGuard(bool);
+
+impl ComApartmentGuard {
+    fn initialize() -> std::result::Result<Self, ExclusiveInitFailure> {
+        let hr = initialize_mta();
+        if hr.is_ok() {
+            Ok(Self(true))
+        } else if hr.0 as u32 == 0x80010106 {
+            // An existing apartment owns COM; this call must not uninitialize it.
+            Ok(Self(false))
+        } else {
+            Err(ExclusiveInitFailure::Other(format!(
+                "MTA init failed (HRESULT 0x{:08x})",
+                hr.0 as u32
+            )))
+        }
+    }
+}
+
+impl Drop for ComApartmentGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            wasapi::deinitialize();
+        }
+    }
+}
+
 /// Reason the exclusive-mode WASAPI grab failed. Plumbed up to the route
 /// layer so the UI can render a specific, actionable error rather than a
 /// generic "audio failed" message.
@@ -78,6 +176,10 @@ pub enum ExclusiveInitFailure {
     /// Device's "Allow applications to take exclusive control" checkbox is off
     /// in Sound Control Panel. Retry/format won't help.
     ExclusiveDisabled,
+    /// The driver could not create an endpoint, even with a valid PCM format.
+    EndpointCreationFailed,
+    /// A candidate PCM representation was rejected; later formats may work.
+    FormatRejected(String),
     /// Tried every candidate format and the device rejected all of them in
     /// exclusive mode.
     NoFormatAccepted,
@@ -98,10 +200,16 @@ impl ExclusiveInitFailure {
                     .to_string()
             }
             Self::NoFormatAccepted => {
-                "This device rejected every exclusive-mode format we tried (32-bit, packed \
-                 24-bit, 24-in-32, 16-bit, f32). Pick a different output device."
+                "This device rejected every exclusive-mode format at the requested sample \
+                 rate and channel count. Try shared output or a supported source rate."
                     .to_string()
             }
+            Self::EndpointCreationFailed => {
+                "Windows could not open this audio endpoint at the requested format \
+                 (HRESULT 0x8889000f). Try shared output, or reconnect the device and retry."
+                    .to_string()
+            }
+            Self::FormatRejected(s) => format!("Exclusive mode failed: {s}"),
             Self::Other(s) => format!("Exclusive mode failed: {s}"),
         }
     }
@@ -122,6 +230,10 @@ pub struct ExclusiveStream {
     released: Arc<AtomicBool>,
     force_release: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    // Keep the final source ownership on the control thread through join.
+    source_bank: Arc<ExclusiveRenderSourceBank>,
+    fault: Arc<AtomicU8>,
+    output_live: Arc<AtomicBool>,
     #[allow(dead_code)]
     pub effective_sample_rate: u32,
     #[allow(dead_code)]
@@ -139,7 +251,7 @@ pub(crate) enum ExclusiveRenderRole {
 
 #[derive(Clone)]
 pub(crate) struct ExclusiveRenderSource {
-    // Only inspected by the render-snapshot tests; kept so they can assert
+    // Only inspected by the source publication tests; kept so they can assert
     // which slot is active vs prepared.
     #[cfg_attr(not(test), allow(dead_code))]
     pub role: ExclusiveRenderRole,
@@ -149,6 +261,8 @@ pub(crate) struct ExclusiveRenderSource {
 #[derive(Default)]
 pub(crate) struct ExclusiveRenderSourceBank {
     sources: RwLock<Vec<ExclusiveRenderSource>>,
+    contended_periods: AtomicU64,
+    poisoned_periods: AtomicU64,
 }
 
 impl ExclusiveRenderSourceBank {
@@ -157,24 +271,79 @@ impl ExclusiveRenderSourceBank {
     }
 
     pub fn set_sources(&self, sources: Vec<ExclusiveRenderSource>) {
-        if let Ok(mut guard) = self.sources.write() {
-            *guard = sources;
-        }
+        let mut guard = match self.sources.write() {
+            Ok(guard) => guard,
+            Err(error) => {
+                warn!(target: "playback", "WASAPI source publication recovered a poisoned bank");
+                self.sources.clear_poison();
+                error.into_inner()
+            }
+        };
+        // The writer replaces and reclaims the old vector; readers never own
+        // a source snapshot that could become its last owner during render.
+        let retired = std::mem::replace(&mut *guard, sources);
+        drop(guard);
+        drop(retired);
     }
 
     pub fn clear(&self) {
         self.set_sources(Vec::new());
     }
 
-    pub fn snapshot(&self) -> Vec<ExclusiveRenderSource> {
-        self.sources
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
+    fn try_borrow(&self) -> Option<RwLockReadGuard<'_, Vec<ExclusiveRenderSource>>> {
+        match self.sources.try_read() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::WouldBlock) => {
+                self.contended_periods.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                self.poisoned_periods.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
     }
 }
 
 impl ExclusiveStream {
+    #[cfg(test)]
+    pub(crate) fn test_live_at_rate(rate: u32) -> Self {
+        let mut stream = Self::test_released_with_fault(ExclusiveRenderFault::EventTimeout);
+        stream.released.store(false, Ordering::Relaxed);
+        stream.fault.store(0, Ordering::Relaxed);
+        stream.effective_sample_rate = rate;
+        stream
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_released_with_fault(fault: ExclusiveRenderFault) -> Self {
+        Self {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            released: Arc::new(AtomicBool::new(true)),
+            force_release: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            source_bank: Arc::new(ExclusiveRenderSourceBank::new()),
+            fault: Arc::new(AtomicU8::new(fault as u8)),
+            output_live: Arc::new(AtomicBool::new(true)),
+            effective_sample_rate: 48_000,
+            effective_channels: 2,
+            transport_format: "test".into(),
+        }
+    }
+
+    pub(crate) fn take_fault(&self) -> Option<ExclusiveRenderFault> {
+        match self.fault.swap(0, Ordering::AcqRel) {
+            1 => Some(ExclusiveRenderFault::EventTimeout),
+            2 => Some(ExclusiveRenderFault::EventWaitFailed),
+            3 => Some(ExclusiveRenderFault::DeviceWriteFailed),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn output_live(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.output_live)
+    }
+
     /// `true` once the render thread has self-shut due to idle (paused for
     /// longer than `grace_secs`) or because the device went away. The runtime
     /// uses this to know it must rebuild the stream before resuming.
@@ -194,9 +363,16 @@ impl ExclusiveStream {
 
 impl Drop for ExclusiveStream {
     fn drop(&mut self) {
+        self.output_live.store(false, Ordering::Release);
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+        let contended_periods = self.source_bank.contended_periods.load(Ordering::Relaxed);
+        let poisoned_periods = self.source_bank.poisoned_periods.load(Ordering::Relaxed);
+        if contended_periods != 0 || poisoned_periods != 0 {
+            warn!(target: "playback", contended_periods, poisoned_periods,
+                "WASAPI source bank rendered silence while unavailable");
         }
     }
 }
@@ -295,6 +471,7 @@ fn enter_mmcss() -> Option<MmcssGuard> {
 
 /// Build and start an exclusive-mode output stream targeting `device_pref`
 /// (None = system default) at `desired_sample_rate` Hz, `channels`-channel.
+/// An explicit preference is a Windows endpoint ID, not a display name.
 ///
 /// `grace_secs` is the idle-release window: the render thread releases the
 /// device after this many seconds of continuous paused state.
@@ -323,6 +500,10 @@ pub fn build_exclusive_stream(
     let force_release = Arc::new(AtomicBool::new(false));
     let force_release_clone = Arc::clone(&force_release);
     let device_pref_owned = device_pref.map(|s| s.to_string());
+    let render_source_bank = Arc::clone(&source_bank);
+    let fault = Arc::new(AtomicU8::new(0));
+    let render_fault = Arc::clone(&fault);
+    let output_live = Arc::new(AtomicBool::new(true));
 
     let (init_tx, init_rx) =
         mpsc::sync_channel::<std::result::Result<(u32, u16, String), ExclusiveInitFailure>>(1);
@@ -337,20 +518,30 @@ pub fn build_exclusive_stream(
                 channels,
                 grace_secs,
                 latency_mode,
-                source_bank,
+                render_source_bank,
                 command_tx,
                 event_tx,
                 shutdown_clone,
                 released_clone,
                 force_release_clone,
+                render_fault,
                 init_tx,
             );
         })
         .map_err(|e| ExclusiveInitFailure::Other(format!("spawn render thread: {e}")))?;
 
-    let outcome = init_rx.recv().map_err(|_| {
-        ExclusiveInitFailure::Other("WASAPI render thread died before reporting init result".into())
-    })?;
+    let outcome = match init_rx.recv() {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            // Keep control-side source ownership until a failed initializer
+            // has unwound, just as a live stream does during Drop.
+            shutdown.store(true, Ordering::SeqCst);
+            let _ = thread.join();
+            return Err(ExclusiveInitFailure::Other(
+                "WASAPI render thread died before reporting init result".into(),
+            ));
+        }
+    };
 
     match outcome {
         Ok((effective_rate, effective_channels, transport_format)) => Ok(ExclusiveStream {
@@ -358,6 +549,9 @@ pub fn build_exclusive_stream(
             released,
             force_release,
             thread: Some(thread),
+            source_bank,
+            fault,
+            output_live,
             effective_sample_rate: effective_rate,
             effective_channels,
             transport_format,
@@ -383,8 +577,17 @@ fn run_render_thread(
     shutdown: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
     force_release: Arc<AtomicBool>,
+    fault: Arc<AtomicU8>,
     init_tx: mpsc::SyncSender<std::result::Result<(u32, u16, String), ExclusiveInitFailure>>,
 ) {
+    let _com = match ComApartmentGuard::initialize() {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = init_tx.send(Err(error));
+            released.store(true, Ordering::Release);
+            return;
+        }
+    };
     let _mmcss = enter_mmcss();
     let init_result = init_audio_client(
         device_pref.as_deref(),
@@ -401,9 +604,22 @@ fn run_render_thread(
         }
     };
 
-    let mut f32_scratch: Vec<f32> = Vec::new();
-    let mut mix_scratch: Vec<f32> = Vec::new();
-    let mut byte_buf: Vec<u8> = Vec::new();
+    let buffer_frames = match audio_client.get_buffer_size() {
+        Ok(frames) => frames as usize,
+        Err(e) => {
+            let _ = init_tx.send(Err(ExclusiveInitFailure::Other(format!(
+                "get WASAPI render buffer size: {e}"
+            ))));
+            drop(render_client);
+            drop(audio_client);
+            drop(event_handle);
+            released.store(true, Ordering::Release);
+            return;
+        }
+    };
+    let mut f32_scratch = vec![0.0; buffer_frames * channels as usize];
+    let mut mix_scratch = vec![0.0; buffer_frames * channels as usize];
+    let mut byte_buf = vec![0; buffer_frames * blockalign];
     match write_available_wasapi_frames(
         &audio_client,
         &render_client,
@@ -432,38 +648,44 @@ fn run_render_thread(
             let _ = init_tx.send(Err(ExclusiveInitFailure::Other(format!(
                 "prime initial WASAPI buffer: {e}"
             ))));
+            drop(render_client);
+            drop(audio_client);
+            drop(event_handle);
             released.store(true, Ordering::Release);
             return;
         }
     }
 
+    let grace = Duration::from_secs(grace_secs.max(1) as u64);
+    let init_report = Ok((
+        desired_sample_rate,
+        channels,
+        fmt_tag_label(fmt_tag).to_string(),
+    ));
+    info!(
+        target: "playback",
+        device = %device_label,
+        grace_secs = grace.as_secs(),
+        "WASAPI exclusive render prepared; idle-release grace active"
+    );
     if let Err(e) = audio_client.start_stream() {
         warn!("WASAPI start_stream failed: {e}");
         let _ = init_tx.send(Err(ExclusiveInitFailure::Other(format!(
             "start WASAPI stream: {e}"
         ))));
+        drop(render_client);
+        drop(audio_client);
+        drop(event_handle);
         released.store(true, Ordering::Release);
-        let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeReleased {
-            device_name: device_label.clone(),
-        });
         return;
     }
-    let _ = init_tx.send(Ok((
-        desired_sample_rate,
-        channels,
-        fmt_tag_label(fmt_tag).to_string(),
-    )));
-
-    let grace = Duration::from_secs(grace_secs.max(1) as u64);
-    info!(
-        target: "playback",
-        device = %device_label,
-        grace_secs = grace.as_secs(),
-        "WASAPI exclusive render thread started; idle-release grace active"
-    );
+    let _ = init_tx.send(init_report);
     let mut paused_since: Option<Instant> = None;
-    let mut logged_post_start_fill = false;
-    let mut logged_first_nonzero_fill = false;
+    let mut first_fill_frames = None;
+    let mut first_nonzero_frames = None;
+    let mut failure = None;
+    let mut write_failure = None;
+    let mut release_reason = "shutdown";
 
     while !shutdown.load(Ordering::SeqCst) {
         // Forced release: a caller (e.g. video playback needing the endpoint in
@@ -471,54 +693,30 @@ fn run_render_thread(
         // teardown as idle release: break, drop the IAudioClient, flip
         // `is_released()`, re-grab on the next Resume/Play.
         if force_release.load(Ordering::Acquire) {
-            info!(
-                target: "playback",
-                release_reason = "external_request",
-                "WASAPI exclusive stream releasing device on external request"
-            );
+            release_reason = "external_request";
             break;
         }
 
-        // Idle-release: when paused for >= grace_secs, exit the loop and let
-        // Drop chains release the IAudioClient so other apps can use the
-        // device. The runtime detects the release via `is_released()` and
-        // rebuilds the stream on the next Resume/Play.
-        if source_bank_all_paused(&source_bank) {
-            let now = Instant::now();
-            match paused_since {
-                None => {
-                    paused_since = Some(now);
-                    tracing::debug!(
-                        target: "playback",
-                        grace_secs = grace.as_secs(),
-                        "WASAPI exclusive sources all paused; idle-release grace timer started"
-                    );
+        match wait_for_device_event(&shutdown, &force_release, DEVICE_EVENT_TIMEOUT, |ms| {
+            event_handle.wait_for_event(ms)
+        }) {
+            DeviceEventWait::Ready => {}
+            DeviceEventWait::Cancelled => {
+                if force_release.load(Ordering::Acquire) {
+                    release_reason = "external_request";
                 }
-                Some(start) if now.duration_since(start) >= grace => {
-                    info!(
-                        target: "playback",
-                        release_reason = "idle_grace",
-                        idle_ms = now.duration_since(start).as_millis() as u64,
-                        "WASAPI exclusive stream releasing device after {} s of idle",
-                        grace.as_secs()
-                    );
-                    break;
-                }
-                _ => {}
-            }
-        } else {
-            paused_since = None;
-        }
-
-        if event_handle.wait_for_event(2000).is_err() {
-            if shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            // No event within 2 s while not shutting down: device probably
-            // disappeared (USB DAC unplug etc.). Bail and let the next
-            // DeviceSwap rebuild on whatever's there now.
-            warn!("WASAPI render thread: event wait timed out, exiting render loop");
-            break;
+            DeviceEventWait::TimedOut => {
+                failure = Some(ExclusiveRenderFault::EventTimeout);
+                release_reason = "device_fault";
+                break;
+            }
+            DeviceEventWait::Failed => {
+                failure = Some(ExclusiveRenderFault::EventWaitFailed);
+                release_reason = "device_fault";
+                break;
+            }
         }
 
         match write_available_wasapi_frames(
@@ -535,41 +733,51 @@ fn run_render_thread(
             &mut byte_buf,
         ) {
             Ok(Some(report)) => {
-                if !logged_post_start_fill {
-                    info!(
-                        target: "playback",
-                        "WASAPI exclusive post-start fill: {} frames, nonzero_audio={}",
-                        report.frames,
-                        report.nonzero_audio
-                    );
-                    logged_post_start_fill = true;
+                if idle_release_due(
+                    &mut paused_since,
+                    report.sources_paused,
+                    Instant::now(),
+                    grace,
+                ) {
+                    release_reason = "idle_grace";
+                    break;
                 }
-                if report.nonzero_audio && !logged_first_nonzero_fill {
-                    info!(
-                        target: "playback",
-                        "WASAPI exclusive first nonzero audio fill: {} frames",
-                        report.frames
-                    );
-                    logged_first_nonzero_fill = true;
+                first_fill_frames.get_or_insert(report.frames);
+                if report.nonzero_audio {
+                    first_nonzero_frames.get_or_insert(report.frames);
                 }
             }
             Ok(None) => {}
             Err(e) => {
-                warn!("WASAPI write_to_device failed: {e}");
+                failure = Some(ExclusiveRenderFault::DeviceWriteFailed);
+                write_failure = Some(e);
+                release_reason = "device_fault";
                 break;
             }
         }
     }
 
     let _ = audio_client.stop_stream();
+    drop(render_client);
+    drop(audio_client);
+    drop(event_handle);
+    if let Some(failure) = failure {
+        fault.store(failure as u8, Ordering::Release);
+    }
     released.store(true, Ordering::Release);
-
+    if let Some(error) = write_failure {
+        warn!(target: "playback", "WASAPI render failure: {error}");
+    }
+    info!(target: "playback", release_reason, ?first_fill_frames, ?first_nonzero_frames,
+        "WASAPI render stream stopped");
     // Tell the world we let go of the device. The runtime listens to this
     // (via the route layer's WS bridge) so the UI can clear "engaged" state
     // and the runtime can re-grab on the next Resume/Play. Skipped on a
     // user-initiated shutdown — the engine swap that's about to happen will
     // emit its own event.
-    if !shutdown.load(Ordering::SeqCst) {
+    // The ordinary release listener can reacquire a playing endpoint. A
+    // fault must instead pass through the identity-checked hard-pause path.
+    if !shutdown.load(Ordering::SeqCst) && failure.is_none() {
         let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeReleased {
             device_name: device_label.clone(),
         });
@@ -579,6 +787,23 @@ fn run_render_thread(
 struct RenderWriteReport {
     frames: usize,
     nonzero_audio: bool,
+    sources_paused: Option<bool>,
+}
+
+enum RenderWriteFailure {
+    AvailableSpace(WasapiError),
+    Capacity,
+    DeviceWrite(WasapiError),
+}
+
+impl std::fmt::Display for RenderWriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AvailableSpace(error) => write!(f, "get_available_space: {error}"),
+            Self::Capacity => f.write_str("WASAPI render buffer exceeds its initialized capacity"),
+            Self::DeviceWrite(error) => write!(f, "write_to_device: {error}"),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -588,51 +813,88 @@ fn write_available_wasapi_frames(
     channels: u16,
     blockalign: usize,
     fmt_tag: Format,
-    source_bank: &Arc<ExclusiveRenderSourceBank>,
+    source_bank: &ExclusiveRenderSourceBank,
     command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
-    f32_scratch: &mut Vec<f32>,
-    mix_scratch: &mut Vec<f32>,
-    byte_buf: &mut Vec<u8>,
-) -> std::result::Result<Option<RenderWriteReport>, String> {
+    f32_scratch: &mut [f32],
+    mix_scratch: &mut [f32],
+    byte_buf: &mut [u8],
+) -> std::result::Result<Option<RenderWriteReport>, RenderWriteFailure> {
     let frames = audio_client
         .get_available_space_in_frames()
-        .map_err(|e| format!("get_available_space: {e}"))? as usize;
+        .map_err(RenderWriteFailure::AvailableSpace)? as usize;
 
     if frames == 0 {
         return Ok(None);
     }
 
     let interleaved = frames * channels as usize;
-    f32_scratch.resize(interleaved, 0.0);
-    f32_scratch.fill(0.0);
-
-    mix_scratch.resize(interleaved, 0.0);
-    for source in source_bank.snapshot() {
-        mix_scratch.fill(0.0);
-        fill_f32_from_shared(mix_scratch, &source.shared, command_tx, event_tx);
-        mix_f32_into(f32_scratch, mix_scratch);
+    let bytes_needed = frames * blockalign;
+    if interleaved > f32_scratch.len()
+        || interleaved > mix_scratch.len()
+        || bytes_needed > byte_buf.len()
+    {
+        return Err(RenderWriteFailure::Capacity);
     }
+    let f32_scratch = &mut f32_scratch[..interleaved];
+    let mix_scratch = &mut mix_scratch[..interleaved];
+    let byte_buf = &mut byte_buf[..bytes_needed];
+    let sources_paused =
+        mix_published_sources(source_bank, f32_scratch, mix_scratch, command_tx, event_tx);
     let nonzero_audio = f32_scratch.iter().any(|sample| sample.abs() > f32::EPSILON);
 
-    let bytes_needed = frames * blockalign;
-    byte_buf.resize(bytes_needed, 0);
     convert_f32_to_bytes(
-        f32_scratch.as_slice(),
-        byte_buf.as_mut_slice(),
+        f32_scratch,
+        byte_buf,
         fmt_tag,
         blockalign,
         channels as usize,
     );
 
     render_client
-        .write_to_device(frames, byte_buf.as_slice(), None)
-        .map_err(|e| format!("write_to_device: {e}"))?;
+        .write_to_device(frames, byte_buf, None)
+        .map_err(RenderWriteFailure::DeviceWrite)?;
 
     Ok(Some(RenderWriteReport {
         frames,
         nonzero_audio,
+        sources_paused,
     }))
+}
+
+fn mix_published_sources(
+    source_bank: &ExclusiveRenderSourceBank,
+    out: &mut [f32],
+    mix_scratch: &mut [f32],
+    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) -> Option<bool> {
+    out.fill(0.0);
+    let sources = source_bank.try_borrow()?;
+    let paused = source_bank_all_paused(&sources);
+    for source in sources.iter() {
+        mix_scratch.fill(0.0);
+        fill_f32_from_shared(mix_scratch, &source.shared, command_tx, event_tx);
+        mix_f32_into(out, mix_scratch);
+    }
+    // The read guard drops here, before conversion and device transfer. Source
+    // replacement can wait only for bounded, nonblocking PCM mixing.
+    Some(paused)
+}
+
+fn idle_release_due(
+    paused_since: &mut Option<Instant>,
+    sources_paused: Option<bool>,
+    now: Instant,
+    grace: Duration,
+) -> bool {
+    if sources_paused != Some(true) {
+        // Unavailable sources cannot establish a continuously paused interval.
+        *paused_since = None;
+        return false;
+    }
+    let start = paused_since.get_or_insert(now);
+    now.duration_since(*start) >= grace
 }
 
 fn mix_f32_into(dst: &mut [f32], src: &[f32]) {
@@ -641,8 +903,7 @@ fn mix_f32_into(dst: &mut [f32], src: &[f32]) {
     }
 }
 
-fn source_bank_all_paused(source_bank: &ExclusiveRenderSourceBank) -> bool {
-    let sources = source_bank.snapshot();
+fn source_bank_all_paused(sources: &[ExclusiveRenderSource]) -> bool {
     sources
         .iter()
         .all(|source| source.shared.paused.load(Ordering::Relaxed))
@@ -666,19 +927,27 @@ fn init_audio_client(
     ),
     ExclusiveInitFailure,
 > {
-    // COM init for the render thread. Returns RPC_E_CHANGED_MODE / S_FALSE
-    // if already initialized; we only fail on hard errors.
-    let hr = initialize_mta();
-    if hr.is_err() {
-        let code = hr.0;
-        // S_FALSE (1) and RPC_E_CHANGED_MODE (0x80010106) are benign.
-        if code != 1 && code as u32 != 0x80010106 {
-            return Err(ExclusiveInitFailure::Other(format!(
-                "MTA init failed (HRESULT 0x{code:08x})"
-            )));
-        }
-    }
+    initialize_candidates(
+        |candidate| {
+            try_initialize_one(
+                device_pref,
+                candidate.storebits,
+                candidate.validbits,
+                &candidate.sample_type,
+                desired_sample_rate,
+                channels,
+                candidate.format,
+                latency_mode,
+            )
+        },
+        |delay_ms| thread::sleep(Duration::from_millis(delay_ms)),
+    )
+}
 
+fn initialize_candidates<T>(
+    mut initialize: impl FnMut(&CandidateFormat) -> std::result::Result<T, ExclusiveInitFailure>,
+    mut wait: impl FnMut(u64),
+) -> std::result::Result<T, ExclusiveInitFailure> {
     let mut last_failure: Option<ExclusiveInitFailure> = None;
 
     // Some drivers / Windows audio engine versions don't release the shared
@@ -689,16 +958,7 @@ fn init_audio_client(
     'candidate: for candidate in exclusive_candidate_formats() {
         let mut attempt: usize = 0;
         loop {
-            match try_initialize_one(
-                device_pref,
-                candidate.storebits,
-                candidate.validbits,
-                &candidate.sample_type,
-                desired_sample_rate,
-                channels,
-                candidate.format,
-                latency_mode,
-            ) {
+            match initialize(candidate) {
                 Ok(v) => {
                     if attempt > 0 {
                         info!(
@@ -720,25 +980,30 @@ fn init_audio_client(
                         );
                         return Err(failure);
                     }
-                    ExclusiveInitFailure::DeviceInUse => {
+                    ExclusiveInitFailure::DeviceInUse
+                    | ExclusiveInitFailure::EndpointCreationFailed => {
                         if let Some(sleep_ms) = device_in_use_budget.next_delay_ms() {
                             info!(
                                 target: "playback",
-                                "WASAPI exclusive grab attempt {} hit DEVICE_IN_USE ({:?}); \
+                                "WASAPI exclusive grab attempt {} hit {} ({:?}); \
                                  retrying after {} ms",
                                 attempt + 1,
+                                failure,
                                 fmt_tag_label(candidate.format),
                                 sleep_ms
                             );
-                            std::thread::sleep(Duration::from_millis(sleep_ms));
+                            wait(sleep_ms);
                             attempt += 1;
                             continue;
                         }
-                        warn!(
-                            target: "playback",
-                            "WASAPI exclusive grab: DEVICE_IN_USE persisted after global retry budget"
-                        );
-                        return Err(ExclusiveInitFailure::DeviceInUse);
+                        if matches!(failure, ExclusiveInitFailure::DeviceInUse) {
+                            return Err(failure);
+                        }
+                        // Some drivers use endpoint-creation errors for a
+                        // particular format. Still try the other representations,
+                        // but never hide this error behind a later float rejection.
+                        last_failure = Some(failure);
+                        continue 'candidate;
                     }
                     other => {
                         info!(
@@ -748,7 +1013,9 @@ fn init_audio_client(
                             fmt_tag_label(candidate.format),
                             other
                         );
-                        last_failure = Some(other);
+                        if !matches!(other, ExclusiveInitFailure::FormatRejected(_)) {
+                            last_failure.get_or_insert(other);
+                        }
                         continue 'candidate;
                     }
                 },
@@ -763,6 +1030,30 @@ fn init_audio_client(
         final_failure
     );
     Err(final_failure)
+}
+
+fn select_probed_exclusive_format(
+    requested: WaveFormat,
+    probed: std::result::Result<WaveFormat, WasapiError>,
+) -> WaveFormat {
+    if let Ok(supported) = probed {
+        let same_sample_type = matches!(
+            (requested.get_subformat(), supported.get_subformat()),
+            (Ok(requested_type), Ok(supported_type)) if requested_type == supported_type
+        );
+        if supported.get_samplespersec() == requested.get_samplespersec()
+            && supported.get_nchannels() == requested.get_nchannels()
+            && supported.get_bitspersample() == requested.get_bitspersample()
+            && supported.get_validbitspersample() == requested.get_validbitspersample()
+            && supported.get_blockalign() == requested.get_blockalign()
+            && same_sample_type
+        {
+            return supported;
+        }
+    }
+    // Initialize remains authoritative when a driver's support query rejects
+    // the format; a probe must never alter source rate or PCM interpretation.
+    requested
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -789,15 +1080,9 @@ fn try_initialize_one(
         .map_err(|e| ExclusiveInitFailure::Other(format!("device enumerator: {e}")))?;
 
     let device = match device_pref {
-        Some(name) => {
-            let collection = enumerator
-                .get_device_collection(&Direction::Render)
-                .map_err(|e| ExclusiveInitFailure::Other(format!("device collection: {e}")))?;
-            collection
-                .get_device_with_name(name)
-                .or_else(|_| enumerator.get_default_device(&Direction::Render))
-                .map_err(|e| ExclusiveInitFailure::Other(format!("device lookup: {e}")))?
-        }
+        Some(id) => enumerator.get_device(id).map_err(|e| {
+            ExclusiveInitFailure::Other(format!("selected output device lookup: {e}"))
+        })?,
         None => enumerator
             .get_default_device(&Direction::Render)
             .map_err(|e| ExclusiveInitFailure::Other(format!("default render device: {e}")))?,
@@ -815,6 +1100,8 @@ fn try_initialize_one(
         channels as usize,
         None,
     );
+    let probed = audio_client.is_supported_exclusive_with_quirks(&format);
+    let format = select_probed_exclusive_format(format, probed);
 
     let blockalign = format.get_blockalign() as usize;
 
@@ -852,6 +1139,9 @@ fn try_initialize_one(
             })?;
             let aligned_period =
                 wasapi::calculate_period_100ns(aligned_frames as i64, desired_sample_rate as i64);
+            // Windows requires releasing the failed client before activating
+            // its replacement, even when Initialize only allocated a buffer.
+            drop(audio_client);
             info!(
                 target: "playback",
                 "WASAPI exclusive retrying aligned buffer: {} frames, period {} hns",
@@ -876,7 +1166,9 @@ fn try_initialize_one(
         }
     }
 
-    let buffer_frames = audio_client.get_buffer_size().unwrap_or(0);
+    let buffer_frames = audio_client
+        .get_buffer_size()
+        .map_err(|e| ExclusiveInitFailure::Other(format!("get_buffer_size: {e}")))?;
     let event_handle = audio_client
         .set_get_eventhandle()
         .map_err(|e| ExclusiveInitFailure::Other(format!("set_get_eventhandle: {e}")))?;
@@ -936,6 +1228,7 @@ fn fmt_tag_label(fmt: Format) -> &'static str {
 enum InitErrorClassification {
     DeviceInUse,
     ExclusiveDisabled,
+    EndpointCreationFailed,
     RepairAlignedPeriod,
     FormatRejected,
     Other,
@@ -946,9 +1239,11 @@ fn classify_init_hresult(code: i32) -> InitErrorClassification {
         InitErrorClassification::DeviceInUse
     } else if code == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED {
         InitErrorClassification::ExclusiveDisabled
+    } else if code == AUDCLNT_E_ENDPOINT_CREATE_FAILED {
+        InitErrorClassification::EndpointCreationFailed
     } else if code == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED {
         InitErrorClassification::RepairAlignedPeriod
-    } else if code == AUDCLNT_E_UNSUPPORTED_FORMAT || code == AUDCLNT_E_INVALID_DEVICE_PERIOD {
+    } else if code == AUDCLNT_E_UNSUPPORTED_FORMAT {
         InitErrorClassification::FormatRejected
     } else {
         InitErrorClassification::Other
@@ -972,18 +1267,22 @@ fn classify_init_error(err: &WasapiError) -> ExclusiveInitFailure {
                 InitErrorClassification::ExclusiveDisabled => {
                     ExclusiveInitFailure::ExclusiveDisabled
                 }
-                InitErrorClassification::FormatRejected
-                | InitErrorClassification::RepairAlignedPeriod => ExclusiveInitFailure::Other(
+                InitErrorClassification::EndpointCreationFailed => {
+                    ExclusiveInitFailure::EndpointCreationFailed
+                }
+                InitErrorClassification::FormatRejected => ExclusiveInitFailure::FormatRejected(
                     format!("format rejected (HRESULT 0x{:08x})", code as u32),
                 ),
-                InitErrorClassification::Other => ExclusiveInitFailure::Other(format!(
-                    "initialize_client failed: HRESULT 0x{:08x}: {win_err}",
-                    code as u32
-                )),
+                InitErrorClassification::RepairAlignedPeriod | InitErrorClassification::Other => {
+                    ExclusiveInitFailure::Other(format!(
+                        "initialize_client failed: HRESULT 0x{:08x}: {win_err}",
+                        code as u32
+                    ))
+                }
             }
         }
         WasapiError::UnsupportedFormat => {
-            ExclusiveInitFailure::Other("UnsupportedFormat (rejected by wasapi-rs)".into())
+            ExclusiveInitFailure::FormatRejected("UnsupportedFormat (rejected by wasapi-rs)".into())
         }
         other => ExclusiveInitFailure::Other(other.to_string()),
     }
@@ -1044,7 +1343,7 @@ fn f32_to_i16_pcm(sample: f32) -> i16 {
     } else if sample >= 1.0 {
         i16::MAX
     } else {
-        (sample * i16::MAX as f32) as i16
+        (sample * 32_768.0).round() as i16
     }
 }
 
@@ -1054,7 +1353,9 @@ fn f32_to_i24_pcm(sample: f32) -> i32 {
     } else if sample >= 1.0 {
         8_388_607
     } else {
-        (sample * 8_388_607.0) as i32
+        (sample * 8_388_608.0)
+            .round()
+            .clamp(-8_388_608.0, 8_388_607.0) as i32
     }
 }
 
@@ -1064,13 +1365,262 @@ fn f32_to_i32_pcm(sample: f32) -> i32 {
     } else if sample >= 1.0 {
         i32::MAX
     } else {
-        (sample * i32::MAX as f32) as i32
+        (sample * 2_147_483_648.0).round() as i32
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "briefly opens silent hardware output; set NOOR_AUDIO_SMOKE_DEVICE explicitly"]
+    fn exclusive_output_silent_hardware_smoke() {
+        use cpal::traits::{DeviceTrait, HostTrait};
+
+        let selected_name = std::env::var("NOOR_AUDIO_SMOKE_DEVICE")
+            .expect("set NOOR_AUDIO_SMOKE_DEVICE to the selected output name or endpoint ID");
+        let host = cpal::default_host();
+        let mut selected_devices = host
+            .output_devices()
+            .expect("enumerate output devices")
+            .filter(|device| {
+                device
+                    .description()
+                    .is_ok_and(|info| info.name() == selected_name)
+                    || device
+                        .id()
+                        .is_ok_and(|id| id.to_string() == selected_name || id.id() == selected_name)
+            });
+        let device = selected_devices
+            .next()
+            .expect("selected test output must exist");
+        assert!(
+            selected_devices.next().is_none(),
+            "test selection is ambiguous; use the exact endpoint ID"
+        );
+        let device_id = device.id().expect("selected endpoint ID").id().to_owned();
+        let channels = device
+            .default_output_config()
+            .expect("shared config")
+            .channels();
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(32);
+
+        for (rate, idle_release) in [
+            (44_100, false),
+            (96_000, false),
+            (44_100, true),
+            (96_000, false),
+        ] {
+            let stream = build_exclusive_stream(
+                Some(&device_id),
+                selected_name.clone(),
+                rate,
+                channels,
+                1,
+                ExclusiveLatencyMode::Stable,
+                Arc::new(ExclusiveRenderSourceBank::new()),
+                command_tx.clone(),
+                event_tx.clone(),
+            )
+            .unwrap_or_else(|error| panic!("silent exclusive open at {rate} Hz failed: {error}"));
+            assert_eq!(stream.effective_sample_rate, rate);
+            assert_eq!(stream.effective_channels, channels);
+            assert!(!stream.is_released());
+            if !idle_release {
+                stream.request_release();
+            }
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while !stream.is_released() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                stream.is_released(),
+                "silent output did not release at {rate} Hz"
+            );
+            assert!(
+                stream.take_fault().is_none(),
+                "normal release at {rate} Hz reported a device fault"
+            );
+            drop(stream);
+            eprintln!(
+                "silent exclusive {rate} Hz open/release passed; idle_release={idle_release}"
+            );
+        }
+
+        let fallback_config = device
+            .default_output_config()
+            .expect("shared fallback config");
+        let mut requested = fallback_config.config();
+        requested.sample_rate = 88_200;
+        let shared = test_shared_state(1, 1);
+        shared.paused.store(true, Ordering::SeqCst);
+        let (stream, actual_rate) =
+            crate::playback::output::cpal_shared::build_started_output_stream_with_rate_fallback(
+                &device,
+                &requested,
+                &fallback_config.config(),
+                fallback_config.sample_format(),
+                shared,
+                command_tx,
+                event_tx,
+            )
+            .expect("88.2 kHz request must have a playable shared fallback");
+        eprintln!("silent shared 88200 Hz request opened at {actual_rate} Hz");
+        drop(stream);
+    }
+
+    #[test]
+    fn exclusive_stream_missing_selected_endpoint_does_not_open_default_output() {
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let result = build_exclusive_stream(
+            Some("noor-regression-missing-endpoint"),
+            "Missing selected output".into(),
+            44_100,
+            2,
+            1,
+            ExclusiveLatencyMode::Stable,
+            Arc::new(ExclusiveRenderSourceBank::new()),
+            command_tx,
+            event_tx,
+        );
+        match result {
+            Err(ExclusiveInitFailure::Other(reason)) => {
+                assert!(reason.contains("selected output device lookup"), "{reason}");
+            }
+            Err(other) => panic!("wrong missing-endpoint failure: {other}"),
+            Ok(_) => panic!("missing selected endpoint must never fall back to default output"),
+        }
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn exclusive_candidate_loop_retries_endpoint_creation_without_masking_it() {
+        let mut attempted = Vec::new();
+        let mut waited = Vec::new();
+        let result = initialize_candidates::<()>(
+            |candidate| {
+                let label = fmt_tag_label(candidate.format);
+                attempted.push(label);
+                if label == "f32" {
+                    Err(ExclusiveInitFailure::FormatRejected(
+                        "HRESULT 0x88890008".into(),
+                    ))
+                } else {
+                    Err(ExclusiveInitFailure::EndpointCreationFailed)
+                }
+            },
+            |delay| waited.push(delay),
+        );
+        assert_eq!(waited, DEVICE_IN_USE_BACKOFF_MS);
+        assert_eq!(
+            attempted.len(),
+            exclusive_candidate_formats().len() + waited.len()
+        );
+        assert!(matches!(
+            result,
+            Err(ExclusiveInitFailure::EndpointCreationFailed)
+        ));
+    }
+
+    #[test]
+    fn exclusive_candidate_loop_recovers_transient_endpoint_creation() {
+        let mut attempts = 0;
+        let result = initialize_candidates(
+            |_| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(ExclusiveInitFailure::EndpointCreationFailed)
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {},
+        );
+        assert!(result.is_ok());
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn exclusive_candidate_loop_reports_all_format_rejections() {
+        let mut attempts = 0;
+        let result = initialize_candidates::<()>(
+            |_| {
+                attempts += 1;
+                Err(ExclusiveInitFailure::FormatRejected(
+                    "unsupported format".into(),
+                ))
+            },
+            |_| panic!("unsupported formats should not consume ownership retry budget"),
+        );
+        assert!(matches!(
+            result,
+            Err(ExclusiveInitFailure::NoFormatAccepted)
+        ));
+        assert_eq!(attempts, exclusive_candidate_formats().len());
+    }
+
+    #[test]
+    fn exclusive_candidate_loop_stops_when_control_is_disabled_or_device_busy() {
+        let mut attempts = 0;
+        let result = initialize_candidates::<()>(
+            |_| {
+                attempts += 1;
+                Err(ExclusiveInitFailure::ExclusiveDisabled)
+            },
+            |_| panic!("disabled exclusive control cannot be retried"),
+        );
+        assert!(matches!(
+            result,
+            Err(ExclusiveInitFailure::ExclusiveDisabled)
+        ));
+        assert_eq!(attempts, 1);
+
+        let mut waited = Vec::new();
+        let result = initialize_candidates::<()>(
+            |_| Err(ExclusiveInitFailure::DeviceInUse),
+            |delay| waited.push(delay),
+        );
+        assert!(matches!(result, Err(ExclusiveInitFailure::DeviceInUse)));
+        assert_eq!(waited, DEVICE_IN_USE_BACKOFF_MS);
+    }
+
+    #[test]
+    fn classify_init_hresult_distinguishes_endpoint_creation_and_unsupported_format() {
+        assert_eq!(
+            classify_init_hresult(AUDCLNT_E_ENDPOINT_CREATE_FAILED),
+            InitErrorClassification::EndpointCreationFailed
+        );
+        assert_eq!(
+            classify_init_hresult(AUDCLNT_E_UNSUPPORTED_FORMAT),
+            InitErrorClassification::FormatRejected
+        );
+    }
+
+    #[test]
+    fn integer_transport_preserves_every_decoded_i16_sample() {
+        for pcm in i16::MIN..=i16::MAX {
+            let decoded = f32::from(pcm) / 32_768.0;
+            let mut bytes = [0; 2];
+            convert_f32_to_bytes(&[decoded], &mut bytes, Format::I16, 2, 1);
+            assert_eq!(i16::from_le_bytes(bytes), pcm, "PCM sample {pcm}");
+        }
+    }
+
+    #[test]
+    fn integer_transport_preserves_decoded_i24_samples() {
+        for pcm in [-8_388_608_i32, -4_194_304, -1, 0, 1, 4_194_304, 8_388_607] {
+            let decoded = pcm as f32 / 8_388_608.0;
+            let mut packed = [0; 3];
+            let mut padded = [0; 4];
+            convert_f32_to_bytes(&[decoded], &mut packed, Format::I24Packed, 3, 1);
+            convert_f32_to_bytes(&[decoded], &mut padded, Format::I24In32, 4, 1);
+            assert_eq!(packed, pcm.to_le_bytes()[..3]);
+            assert_eq!(i32::from_le_bytes(padded), pcm << 8);
+        }
+    }
 
     #[test]
     fn classify_init_hresult_maps_device_in_use() {
@@ -1095,7 +1645,7 @@ mod tests {
     #[test]
     fn exclusive_source_bank_replaces_sources_atomically() {
         let bank = ExclusiveRenderSourceBank::new();
-        assert!(bank.snapshot().is_empty());
+        assert!(bank.try_borrow().expect("empty source bank").is_empty());
 
         bank.set_sources(vec![
             ExclusiveRenderSource {
@@ -1108,13 +1658,14 @@ mod tests {
             },
         ]);
 
-        let snapshot = bank.snapshot();
+        let snapshot = bank.try_borrow().expect("published sources");
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot[0].role, ExclusiveRenderRole::Active);
         assert_eq!(snapshot[1].role, ExclusiveRenderRole::Prepared);
 
+        drop(snapshot);
         bank.clear();
-        assert!(bank.snapshot().is_empty());
+        assert!(bank.try_borrow().expect("cleared source bank").is_empty());
     }
 
     #[test]
@@ -1163,10 +1714,10 @@ mod tests {
     }
 
     #[test]
-    fn classify_init_hresult_marks_invalid_period_as_format_rejection() {
+    fn classify_init_hresult_preserves_invalid_period_as_initialization_error() {
         assert_eq!(
             classify_init_hresult(AUDCLNT_E_INVALID_DEVICE_PERIOD),
-            InitErrorClassification::FormatRejected
+            InitErrorClassification::Other
         );
     }
 
@@ -1216,7 +1767,7 @@ mod tests {
         assert_eq!(
             dst,
             vec![
-                0x00, 0xff, 0xff, 0x7f, 0x00, 0x00, 0x00, 0x80, 0x00, 0xff, 0xff, 0x3f
+                0x00, 0xff, 0xff, 0x7f, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x40
             ]
         );
     }
@@ -1267,5 +1818,383 @@ mod tests {
         assert_eq!(fmt_tag_label(Format::I24In32), "i24-in-32");
         assert_eq!(fmt_tag_label(Format::I24Packed), "i24-packed");
         assert_eq!(fmt_tag_label(Format::I16), "i16");
+    }
+
+    #[test]
+    fn exclusive_source_borrows_reuse_published_storage_without_owning_sources() {
+        let bank = ExclusiveRenderSourceBank::new();
+        let shared = test_shared_state(1, 1);
+        let weak = Arc::downgrade(&shared);
+        bank.set_sources(vec![ExclusiveRenderSource {
+            role: ExclusiveRenderRole::Active,
+            shared,
+        }]);
+
+        let first = bank.try_borrow().expect("first borrow");
+        let second = bank.try_borrow().expect("second borrow");
+        assert_eq!(first.as_ptr(), second.as_ptr());
+        assert_eq!(
+            weak.strong_count(),
+            1,
+            "the bank must own the sole source reference"
+        );
+
+        drop(first);
+        drop(second);
+        bank.clear();
+        assert!(
+            weak.upgrade().is_none(),
+            "the publisher reclaimed retired PCM state"
+        );
+        assert!(bank.try_borrow().expect("cleared bank").is_empty());
+    }
+
+    #[test]
+    fn exclusive_source_contention_renders_silence_without_advancing_pcm_or_idle_timer() {
+        let bank = ExclusiveRenderSourceBank::new();
+        let shared = test_shared_state(1, 1);
+        shared.paused.store(false, Ordering::Relaxed);
+        shared.buffer.lock().expect("buffer").samples = vec![0.5; 8];
+        bank.set_sources(vec![ExclusiveRenderSource {
+            role: ExclusiveRenderRole::Active,
+            shared: Arc::clone(&shared),
+        }]);
+        let writer = bank.sources.write().expect("source bank writer");
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut out = [1.0; 8];
+        let mut scratch = [1.0; 8];
+        let paused = mix_published_sources(&bank, &mut out, &mut scratch, &command_tx, &event_tx);
+        assert_eq!(paused, None);
+        assert_eq!(out, [0.0; 8]);
+        assert_eq!(shared.source_position_samples.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.buffer.lock().expect("buffer").read_pos, 0);
+        assert_eq!(bank.contended_periods.load(Ordering::Relaxed), 1);
+        let now = Instant::now();
+        let mut paused_since = Some(now - Duration::from_secs(10));
+        assert!(!idle_release_due(
+            &mut paused_since,
+            paused,
+            now,
+            Duration::from_secs(1)
+        ));
+        assert!(paused_since.is_none());
+
+        drop(writer);
+        bank.clear();
+        assert_eq!(
+            mix_published_sources(&bank, &mut out, &mut scratch, &command_tx, &event_tx),
+            Some(true)
+        );
+        assert_eq!(bank.contended_periods.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn exclusive_source_replacement_waits_for_borrow_then_publisher_reclaims_state() {
+        let bank = Arc::new(ExclusiveRenderSourceBank::new());
+        let shared = test_shared_state(1, 1);
+        let weak = Arc::downgrade(&shared);
+        bank.set_sources(vec![ExclusiveRenderSource {
+            role: ExclusiveRenderRole::Active,
+            shared,
+        }]);
+        let borrowed = bank.try_borrow().expect("render borrow");
+        let publisher_bank = Arc::clone(&bank);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let publisher = thread::spawn(move || {
+            started_tx.send(()).expect("publish start");
+            publisher_bank.clear();
+            done_tx
+                .send(weak.upgrade().is_none())
+                .expect("reclamation result");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("publisher started");
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(borrowed.len(), 1);
+        drop(borrowed);
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("publisher reclaimed the last source")
+        );
+        publisher.join().expect("publisher exited");
+    }
+
+    #[test]
+    fn exclusive_stream_keeps_final_bank_ownership_until_after_render_join() {
+        let bank = Arc::new(ExclusiveRenderSourceBank::new());
+        let weak = Arc::downgrade(&bank);
+        let render_bank = Arc::clone(&bank);
+        let thread = thread::spawn(move || drop(render_bank));
+        let mut stream = ExclusiveStream {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            released: Arc::new(AtomicBool::new(false)),
+            force_release: Arc::new(AtomicBool::new(false)),
+            thread: Some(thread),
+            source_bank: bank,
+            fault: Arc::new(AtomicU8::new(0)),
+            output_live: Arc::new(AtomicBool::new(true)),
+            effective_sample_rate: 48_000,
+            effective_channels: 2,
+            transport_format: "test".into(),
+        };
+        stream
+            .thread
+            .take()
+            .expect("render thread")
+            .join()
+            .expect("render exit");
+        assert!(
+            weak.upgrade().is_some(),
+            "render exit must not reclaim the bank"
+        );
+        drop(stream);
+        assert!(
+            weak.upgrade().is_none(),
+            "control-thread stream drop reclaims the bank"
+        );
+    }
+
+    #[test]
+    fn exclusive_fault_marker_is_consumed_once_and_release_does_not_retire_identity() {
+        let stream = ExclusiveStream {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            released: Arc::new(AtomicBool::new(false)),
+            force_release: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            source_bank: Arc::new(ExclusiveRenderSourceBank::new()),
+            fault: Arc::new(AtomicU8::new(0)),
+            output_live: Arc::new(AtomicBool::new(true)),
+            effective_sample_rate: 48_000,
+            effective_channels: 2,
+            transport_format: "test".into(),
+        };
+        let identity = stream.output_live();
+        assert!(stream.take_fault().is_none());
+        stream.released.store(true, Ordering::Release);
+        assert!(
+            identity.load(Ordering::Acquire),
+            "natural release must preserve fault event identity"
+        );
+        assert!(
+            stream.take_fault().is_none(),
+            "normal release must not produce a fault"
+        );
+        for failure in [
+            ExclusiveRenderFault::EventTimeout,
+            ExclusiveRenderFault::EventWaitFailed,
+            ExclusiveRenderFault::DeviceWriteFailed,
+        ] {
+            stream.fault.store(failure as u8, Ordering::Release);
+            assert_eq!(stream.take_fault(), Some(failure));
+            assert_eq!(stream.take_fault(), None);
+        }
+        drop(stream);
+        assert!(
+            !identity.load(Ordering::Acquire),
+            "replaced outputs must retire queued fault events"
+        );
+    }
+
+    #[test]
+    fn exclusive_source_publication_recovers_poison_and_reports_silent_periods() {
+        let bank = Arc::new(ExclusiveRenderSourceBank::new());
+        let poisoned_bank = Arc::clone(&bank);
+        assert!(
+            thread::spawn(move || {
+                let _writer = poisoned_bank.sources.write().expect("writer");
+                panic!("source publisher fault");
+            })
+            .join()
+            .is_err()
+        );
+        assert!(bank.try_borrow().is_none());
+        assert_eq!(bank.poisoned_periods.load(Ordering::Relaxed), 1);
+        bank.clear();
+        assert!(bank.try_borrow().expect("recovered publication").is_empty());
+    }
+
+    #[test]
+    fn exclusive_idle_grace_requires_continuously_confirmed_paused_sources() {
+        let now = Instant::now();
+        let grace = Duration::from_secs(1);
+        let mut paused_since = None;
+        assert!(!idle_release_due(&mut paused_since, Some(true), now, grace));
+        assert!(!idle_release_due(
+            &mut paused_since,
+            None,
+            now + grace,
+            grace
+        ));
+        assert!(!idle_release_due(
+            &mut paused_since,
+            Some(true),
+            now + grace,
+            grace
+        ));
+        assert!(idle_release_due(
+            &mut paused_since,
+            Some(true),
+            now + grace * 2,
+            grace
+        ));
+        assert!(!idle_release_due(
+            &mut paused_since,
+            Some(false),
+            now + grace * 2,
+            grace
+        ));
+        assert!(paused_since.is_none());
+    }
+
+    #[test]
+    fn exclusive_device_wait_does_not_enter_wait_after_cancellation() {
+        for force in [false, true] {
+            let shutdown = AtomicBool::new(!force);
+            let force_release = AtomicBool::new(force);
+            assert_eq!(
+                wait_for_device_event(&shutdown, &force_release, DEVICE_EVENT_TIMEOUT, |_| {
+                    panic!("a cancelled transport must not wait for a device event")
+                }),
+                DeviceEventWait::Cancelled,
+            );
+        }
+    }
+
+    #[test]
+    fn exclusive_device_wait_observes_cancellation_when_device_never_signals() {
+        for force in [false, true] {
+            let shutdown = AtomicBool::new(false);
+            let force_release = AtomicBool::new(false);
+            let mut calls = 0;
+            let result =
+                wait_for_device_event(&shutdown, &force_release, DEVICE_EVENT_TIMEOUT, |ms| {
+                    assert!(
+                        ms <= DEVICE_EVENT_CANCEL_POLL_MS,
+                        "cancellation polling requested {ms} ms"
+                    );
+                    calls += 1;
+                    if force {
+                        force_release.store(true, Ordering::Release);
+                    } else {
+                        shutdown.store(true, Ordering::SeqCst);
+                    }
+                    Err(WasapiError::EventTimeout)
+                });
+            assert_eq!(result, DeviceEventWait::Cancelled);
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn exclusive_device_wait_preserves_total_timeout_for_non_signaling_device() {
+        assert_eq!(DEVICE_EVENT_TIMEOUT, Duration::from_secs(2));
+        let shutdown = AtomicBool::new(false);
+        let force_release = AtomicBool::new(false);
+        let timeout = Duration::from_millis(35);
+        let started = Instant::now();
+        let mut calls = 0;
+        let result = wait_for_device_event(&shutdown, &force_release, timeout, |ms| {
+            assert!(ms <= DEVICE_EVENT_CANCEL_POLL_MS);
+            calls += 1;
+            thread::sleep(Duration::from_millis(u64::from(ms)));
+            Err(WasapiError::EventTimeout)
+        });
+        assert_eq!(result, DeviceEventWait::TimedOut);
+        assert!(started.elapsed() >= timeout);
+        assert!(
+            calls >= 2,
+            "one short timeout must not invalidate the endpoint"
+        );
+    }
+
+    #[test]
+    fn exclusive_device_wait_returns_events_and_non_timeout_errors_immediately() {
+        let shutdown = AtomicBool::new(false);
+        let force_release = AtomicBool::new(false);
+        assert_eq!(
+            wait_for_device_event(&shutdown, &force_release, DEVICE_EVENT_TIMEOUT, |_| Ok(())),
+            DeviceEventWait::Ready,
+        );
+        let mut calls = 0;
+        assert_eq!(
+            wait_for_device_event(&shutdown, &force_release, DEVICE_EVENT_TIMEOUT, |_| {
+                calls += 1;
+                Err(WasapiError::ClientNotInit)
+            }),
+            DeviceEventWait::Failed,
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn exclusive_device_wait_prioritizes_release_over_simultaneous_device_signal() {
+        let shutdown = AtomicBool::new(false);
+        let force_release = AtomicBool::new(false);
+        assert_eq!(
+            wait_for_device_event(&shutdown, &force_release, DEVICE_EVENT_TIMEOUT, |_| {
+                force_release.store(true, Ordering::Release);
+                Ok(())
+            }),
+            DeviceEventWait::Cancelled,
+        );
+    }
+
+    #[test]
+    fn exclusive_format_probe_uses_supported_channel_mask_without_changing_pcm_layout() {
+        let requested = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(3));
+        let supported = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(0));
+        let selected = select_probed_exclusive_format(requested, Ok(supported));
+        assert_eq!(selected.get_dwchannelmask(), 0);
+        assert_eq!(selected.get_samplespersec(), 48_000);
+        assert_eq!(selected.get_blockalign(), 8);
+        assert_eq!(selected.get_validbitspersample(), 24);
+    }
+
+    #[test]
+    fn exclusive_format_probe_cannot_change_source_rate_channels_or_representation() {
+        for supported in [
+            WaveFormat::new(32, 24, &SampleType::Int, 96_000, 2, Some(3)),
+            WaveFormat::new(32, 24, &SampleType::Int, 48_000, 1, Some(1)),
+            WaveFormat::new(16, 16, &SampleType::Int, 48_000, 2, Some(3)),
+            WaveFormat::new(32, 32, &SampleType::Float, 48_000, 2, Some(3)),
+        ] {
+            let requested = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(3));
+            let selected = select_probed_exclusive_format(requested, Ok(supported));
+            assert_eq!(selected.get_samplespersec(), 48_000);
+            assert_eq!(selected.get_nchannels(), 2);
+            assert_eq!(selected.get_bitspersample(), 32);
+            assert_eq!(selected.get_validbitspersample(), 24);
+            assert_eq!(selected.get_dwchannelmask(), 3);
+        }
+    }
+
+    #[test]
+    fn exclusive_format_probe_failure_preserves_initialize_as_authoritative_attempt() {
+        let requested = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(3));
+        let selected =
+            select_probed_exclusive_format(requested, Err(WasapiError::UnsupportedFormat));
+        assert_eq!(selected.get_samplespersec(), 48_000);
+        assert_eq!(selected.get_bitspersample(), 32);
+        assert_eq!(selected.get_validbitspersample(), 24);
+        assert_eq!(selected.get_dwchannelmask(), 3);
+    }
+
+    #[test]
+    fn exclusive_format_probe_accepts_unambiguous_waveformatex_representation() {
+        let requested = WaveFormat::new(16, 16, &SampleType::Int, 44_100, 2, Some(3));
+        let supported = requested.to_waveformatex().expect("unambiguous16-bit PCM");
+        let selected = select_probed_exclusive_format(requested, Ok(supported));
+        let cb_size = selected.as_waveformatex_ref().cbSize;
+        assert_eq!(cb_size, 0);
+        assert_eq!(selected.get_samplespersec(), 44_100);
+        assert_eq!(selected.get_blockalign(), 4);
+        assert_eq!(selected.get_validbitspersample(), 16);
     }
 }

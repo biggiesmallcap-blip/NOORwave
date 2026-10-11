@@ -18,6 +18,296 @@ use std::time::{Duration, Instant};
 use crate::PlaybackRuntimeState;
 use crate::db::{Database, schema};
 
+async fn cpal_fault_fixture() -> (
+    crate::SharedState,
+    playback_runtime::PlaybackRuntimeHandle,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    db.with_conn(|conn| {
+        let queue = player::enqueue_track(conn, 1, "test")?;
+        conn.execute("UPDATE playback_state SET current_track_id=1, current_queue_item_id=?1, is_playing=1 WHERE id=1",
+            rusqlite::params![queue[0].id])?;
+        Ok(())
+    }).unwrap();
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let (command_tx, _) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    {
+        let mut guard = state.write().await;
+        guard
+            .playback_generation
+            .store(0, std::sync::atomic::Ordering::Release);
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test".into(),
+            handle: handle.clone(),
+        });
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
+            device_name: "DAC".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+        guard
+            .audio_active
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    (
+        state,
+        handle,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    )
+}
+
+fn cpal_fault_event(
+    stop: &Arc<std::sync::atomic::AtomicBool>,
+    live: &Arc<std::sync::atomic::AtomicBool>,
+) -> playback_runtime::PlaybackRuntimeEvent {
+    playback_runtime::PlaybackRuntimeEvent::OutputFault {
+        active_track_id: Some(1),
+        generation: 0,
+        active_decoder_stop: Some(Arc::clone(stop)),
+        decoder_stop: Arc::clone(stop),
+        output_live: Arc::clone(live),
+        message: "device removed".into(),
+    }
+}
+
+#[tokio::test]
+async fn cpal_fault_consumer_pauses_db_and_audibility_preserving_queue() {
+    let (state, handle, stop, live) = cpal_fault_fixture().await;
+    let before = state
+        .read()
+        .await
+        .db
+        .with_conn(player::load_snapshot)
+        .unwrap();
+    assert!(handle_output_fault(&state, &handle, cpal_fault_event(&stop, &live)).await);
+    let guard = state.read().await;
+    let after = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert!(!after.state.is_playing);
+    assert_eq!(
+        after.state.current_queue_item_id,
+        before.state.current_queue_item_id
+    );
+    assert_eq!(after.queue.len(), before.queue.len());
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    let info = guard.playback_runtime_info.as_ref().unwrap();
+    assert_eq!(info.active_track_id, None);
+    assert_eq!(info.last_error.as_deref(), Some("device removed"));
+}
+
+#[tokio::test]
+async fn cpal_fault_consumer_drops_retired_output_and_same_job_decoder() {
+    for retire_decoder in [false, true] {
+        let (state, handle, stop, live) = cpal_fault_fixture().await;
+        if retire_decoder {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+        } else {
+            live.store(false, std::sync::atomic::Ordering::Release);
+        }
+        assert!(!handle_output_fault(&state, &handle, cpal_fault_event(&stop, &live)).await);
+        let guard = state.read().await;
+        assert!(
+            guard
+                .db
+                .with_conn(player::load_snapshot)
+                .unwrap()
+                .state
+                .is_playing
+        );
+        assert!(
+            guard
+                .audio_active
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .unwrap()
+                .last_error
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn cpal_fault_waiting_for_state_lock_does_not_pause_replacement_queue_row() {
+    let (state, handle, stop, live) = cpal_fault_fixture().await;
+    let mut guard = state.write().await;
+    let task_state = state.clone();
+    let task_handle = handle.clone();
+    let event = cpal_fault_event(&stop, &live);
+    let consumer =
+        tokio::spawn(async move { handle_output_fault(&task_state, &task_handle, event).await });
+    tokio::task::yield_now().await;
+    // Replace with another queue occurrence of the same track and generation.
+    // Track IDs alone cannot tell this newer decoder from the faulting one.
+    let replacement_row = guard
+        .db
+        .with_conn(|conn| {
+            let queue = player::enqueue_track(conn, 1, "replacement")?;
+            let replacement = queue.last().unwrap().id;
+            conn.execute(
+                "UPDATE playback_state SET current_queue_item_id=?1, is_playing=1 WHERE id=1",
+                rusqlite::params![replacement],
+            )?;
+            Ok(replacement)
+        })
+        .unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    guard.playback_runtime_info.as_mut().unwrap().last_error = None;
+    drop(guard);
+    assert!(!consumer.await.unwrap());
+    let guard = state.read().await;
+    let snapshot = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert!(snapshot.state.is_playing);
+    assert_eq!(snapshot.state.current_queue_item_id, Some(replacement_row));
+    assert!(
+        guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn output_fault_consumer_rejects_old_runtime_generation_and_active_deck() {
+    for stale_kind in ["runtime", "generation", "active_decoder"] {
+        let (state, handle, stop, live) = cpal_fault_fixture().await;
+        let mut fault = cpal_fault_event(&stop, &live);
+        let expected_handle = if stale_kind == "runtime" {
+            let (tx, _) = std::sync::mpsc::channel();
+            playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(tx)
+        } else {
+            handle
+        };
+        if stale_kind == "generation" {
+            state
+                .write()
+                .await
+                .playback_generation
+                .store(1, std::sync::atomic::Ordering::Release);
+        } else if stale_kind == "active_decoder" {
+            if let playback_runtime::PlaybackRuntimeEvent::OutputFault {
+                active_decoder_stop,
+                ..
+            } = &mut fault
+            {
+                *active_decoder_stop = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+            }
+        }
+        assert!(!handle_output_fault(&state, &expected_handle, fault).await);
+        let guard = state.read().await;
+        assert!(
+            guard
+                .db
+                .with_conn(player::load_snapshot)
+                .unwrap()
+                .state
+                .is_playing
+        );
+        assert!(
+            guard
+                .audio_active
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_output_fault_listener_updates_public_state_without_exclusive_auto_retry() {
+    let (state, _, stop, live) = cpal_fault_fixture().await;
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut public_events = {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+        let info = guard.playback_runtime_info.as_mut().unwrap();
+        info.exclusive_engaged = true;
+        info.exclusive_transport_format = Some("24-bit".into());
+        guard.event_tx.subscribe()
+    };
+    spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::RequestReady
+    ));
+    assert!(handle.test_publish_event(cpal_fault_event(&stop, &live)));
+    let (failure, released) = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut failure = false;
+        let mut released = false;
+        loop {
+            match public_events.recv().await.unwrap() {
+                AppEvent::PlaybackFailed { message } => {
+                    assert_eq!(message, "device removed");
+                    failure = true;
+                }
+                AppEvent::AudioExclusiveReleased { device } => {
+                    assert_eq!(device, "DAC");
+                    released = true;
+                }
+                AppEvent::PlaybackStateChanged => break (failure, released),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(failure && released);
+    assert!(
+        command_rx.try_recv().is_err(),
+        "fault must wait for explicit Resume, not auto-retry"
+    );
+    let guard = state.read().await;
+    assert!(
+        !guard
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap()
+            .state
+            .is_playing
+    );
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        !guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .exclusive_engaged
+    );
+    assert!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .exclusive_transport_format
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn runtime_exit_discards_dead_handle_and_pauses_without_changing_queue() {
     let db = fresh_migrated_db();

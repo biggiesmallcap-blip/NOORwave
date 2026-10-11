@@ -173,6 +173,9 @@ pub(crate) fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::Error { message }) => {
                     handle_runtime_error(state.clone(), &message).await;
                 }
+                Ok(fault @ playback_runtime::PlaybackRuntimeEvent::OutputFault { .. }) => {
+                    handle_output_fault(&state, &handle, fault).await;
+                }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Exited { message }) => {
                     handle_runtime_exit(&state, &handle, message.as_deref()).await;
                     break;
@@ -1589,6 +1592,85 @@ pub(crate) async fn handle_prepared_runtime_track_error_for_runtime(
         refresh_dj_after_queue_change(state.clone(), "skip_unavailable_prepared_next").await;
     }
     report_playback_failure(state, message);
+}
+
+pub(crate) async fn handle_output_fault(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    event: playback_runtime::PlaybackRuntimeEvent,
+) -> bool {
+    let playback_runtime::PlaybackRuntimeEvent::OutputFault {
+        active_track_id,
+        generation,
+        active_decoder_stop,
+        decoder_stop,
+        output_live,
+        message,
+    } = event
+    else {
+        return false;
+    };
+    use std::sync::atomic::Ordering;
+    // Validate after acquiring the same lock that protects queue replacement.
+    // Checking before this await allows a delayed failure to pause a newer row.
+    let completed = {
+        let mut guard = state.write().await;
+        if !output_live.load(Ordering::Acquire)
+            || decoder_stop.load(Ordering::Acquire)
+            || active_decoder_stop
+                .as_ref()
+                .is_some_and(|stop| stop.load(Ordering::Acquire))
+            || current_playback_generation(&guard) != generation
+            || !guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+            || guard
+                .playback_runtime_info
+                .as_ref()
+                .and_then(|info| info.active_track_id)
+                != active_track_id
+        {
+            return false;
+        }
+        if let Err(error) = guard.db.with_conn(player::pause) {
+            warn!("Failed to persist output-fault pause: {error}");
+        }
+        guard.audio_active.store(false, Ordering::Release);
+        if let Some(info) = guard.playback_runtime_info.as_mut() {
+            info.last_error = Some(message.clone());
+            info.active_track_id = None;
+            if info.exclusive_engaged {
+                let device = info.device_name.clone();
+                info.exclusive_engaged = false;
+                info.exclusive_transport_format = None;
+                let _ = guard
+                    .event_tx
+                    .send(AppEvent::AudioExclusiveReleased { device });
+            }
+        }
+        let outcome = flush_active_listen_session_locked(
+            &mut guard,
+            chrono::Utc::now(),
+            player::ListenSessionEndReason::Stopped,
+        )
+        .ok();
+        if let Some(track_id) = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.flushed_track_id)
+        {
+            let _ = guard
+                .event_tx
+                .send(AppEvent::ListenHistoryUpdated { track_id });
+        }
+        let _ = guard.event_tx.send(AppEvent::PlaybackFailed { message });
+        let _ = guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        outcome.and_then(|outcome| outcome.scrobble_completed)
+    };
+    if let Some(payload) = completed {
+        crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
+    }
+    true
 }
 
 pub(crate) async fn handle_runtime_error(state: SharedState, message: &str) {

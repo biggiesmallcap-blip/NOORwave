@@ -1254,6 +1254,7 @@ pub(super) fn install_prepared_handoff_mixer_buffer_once(
     guard.samples = rendered;
     guard.read_pos = skip_samples.min(guard.samples.len());
     guard.started = false;
+    guard.clear_rt_notifications();
     guard.started_notified = false;
     guard.starved_notified = false;
     guard.finished_notified = false;
@@ -1386,6 +1387,7 @@ pub(super) fn install_prepared_overlay_mixer_buffer(
     guard.samples = rendered;
     guard.read_pos = 0;
     guard.started = false;
+    guard.clear_rt_notifications();
     guard.started_notified = false;
     guard.starved_notified = false;
     guard.finished_notified = false;
@@ -1488,6 +1490,7 @@ pub(super) fn install_prepared_drop_preview_mixer_buffer(
     guard.samples = rendered;
     guard.read_pos = skip_samples.min(guard.samples.len());
     guard.started = false;
+    guard.clear_rt_notifications();
     guard.started_notified = false;
     guard.starved_notified = false;
     guard.finished_notified = false;
