@@ -328,16 +328,33 @@ impl TokenRefresher for AuthEndpointRefresher {
         )
         .validate_session(&refreshed.user_id)
         .await;
-        match validation {
-            Ok(()) => Ok(refreshed),
-            Err(error) if crate::services::tidal::client::is_auth_failure(&error) => {
-                Err(crate::services::tidal::auth::RefreshRejected {
-                    status: "validation".to_string(),
-                    body: error.to_string(),
-                }
-                .into())
+        accept_refreshed(refreshed, validation)
+    }
+}
+
+/// What the validation call means for tokens the exchange already returned.
+/// The exchange may have rotated the old refresh token away, so the new pair
+/// must be kept unless TIDAL definitely refused it: a timeout, network error
+/// or 5xx says nothing about the token, and dropping it here would leave the
+/// session holding a revoked refresh token (next refresh: invalid_grant).
+fn accept_refreshed(refreshed: TidalTokens, validation: Result<()>) -> Result<TidalTokens> {
+    match validation {
+        Ok(()) => Ok(refreshed),
+        Err(error) if crate::services::tidal::client::is_auth_failure(&error) => {
+            Err(crate::services::tidal::auth::RefreshRejected {
+                status: "validation".to_string(),
+                body: error.to_string(),
             }
-            Err(error) => Err(error.context("Refreshed TIDAL session still failed validation")),
+            .into())
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "noor.sync.tidal",
+                event = "session_refresh_validation_inconclusive",
+                error = %error,
+                "Could not validate refreshed TIDAL tokens; keeping them"
+            );
+            Ok(refreshed)
         }
     }
 }
@@ -518,6 +535,50 @@ mod tests {
             },
             initial,
         )
+    }
+
+    #[test]
+    fn inconclusive_validation_keeps_the_rotated_tokens() {
+        let refreshed = TidalTokens {
+            refresh_token: "new-refresh".to_string(),
+            ..tokens("new-access")
+        };
+        let kept = accept_refreshed(refreshed, Err(anyhow::anyhow!("operation timed out")))
+            .expect("a timeout must not discard exchanged tokens");
+        assert_eq!(kept.refresh_token, "new-refresh");
+
+        let server_error = crate::services::tidal::client::TidalApiError {
+            status: 503,
+            sub_status: None,
+            body: "unavailable".to_string(),
+        };
+        let kept = accept_refreshed(
+            TidalTokens {
+                refresh_token: "new-refresh".to_string(),
+                ..tokens("new-access")
+            },
+            Err(server_error.into()),
+        )
+        .expect("a 5xx must not discard exchanged tokens");
+        assert_eq!(kept.access_token, "new-access");
+    }
+
+    #[test]
+    fn refused_validation_is_a_rejection() {
+        let refused = crate::services::tidal::client::TidalApiError {
+            status: 401,
+            sub_status: None,
+            body: "unauthorized".to_string(),
+        };
+        let err = accept_refreshed(
+            TidalTokens {
+                refresh_token: "new-refresh".to_string(),
+                ..tokens("new-access")
+            },
+            Err(refused.into()),
+        )
+        .expect_err("401 on the new token");
+        assert!(is_refresh_rejected(&err));
     }
 
     #[tokio::test]
