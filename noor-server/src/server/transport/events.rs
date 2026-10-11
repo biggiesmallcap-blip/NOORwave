@@ -2095,33 +2095,52 @@ pub(crate) async fn handle_runtime_exit(
     exited_handle: &playback_runtime::PlaybackRuntimeHandle,
     message: Option<&str>,
 ) {
-    let removed_current_runtime = {
+    let user_message = match message {
+        Some(detail) => format!("Playback runtime stopped and will restart on resume: {detail}"),
+        None => "Playback runtime stopped and will restart on resume.".to_string(),
+    };
+    let completed = {
         let mut state_guard = state.write().await;
         let is_current = state_guard
             .playback_runtime
             .as_ref()
             .is_some_and(|runtime| runtime.handle.is_same_runtime(exited_handle));
         if !is_current {
-            false
-        } else {
-            state_guard.playback_runtime = None;
-            state_guard.playback_runtime_info = None;
-            state_guard
-                .audio_active
-                .store(false, std::sync::atomic::Ordering::Release);
-            state_guard.current_stream_display = None;
-            state_guard.pending_stream_display = None;
-            state_guard.next_prebuffer_inflight = None;
-            true
+            return;
         }
-    };
-    if !removed_current_runtime {
-        return;
-    }
-
-    let user_message = match message {
-        Some(detail) => format!("Playback runtime stopped and will restart on resume: {detail}"),
-        None => "Playback runtime stopped and will restart on resume.".to_string(),
+        // Removal, persisted intent, history and UI effects belong to this
+        // runtime. A separate lock acquisition could target its replacement.
+        state_guard.playback_runtime = None;
+        state_guard.playback_runtime_info = None;
+        state_guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Release);
+        state_guard.current_stream_display = None;
+        state_guard.pending_stream_display = None;
+        state_guard.next_prebuffer_inflight = None;
+        if let Err(error) = state_guard.db.with_conn(player::pause) {
+            warn!("Failed to persist runtime-exit pause: {error}");
+        }
+        let outcome = flush_active_listen_session_locked(
+            &mut state_guard,
+            chrono::Utc::now(),
+            player::ListenSessionEndReason::Stopped,
+        )
+        .map_err(|error| warn!("Failed to flush runtime-exit listen session: {error}"))
+        .ok();
+        if let Some(track_id) = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.flushed_track_id)
+        {
+            let _ = state_guard
+                .event_tx
+                .send(AppEvent::ListenHistoryUpdated { track_id });
+        }
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackFailed {
+            message: user_message,
+        });
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        outcome.and_then(|outcome| outcome.scrobble_completed)
     };
     tracing::error!(
         target: "noor.playback.recovery",
@@ -2129,22 +2148,9 @@ pub(crate) async fn handle_runtime_exit(
         error = message.unwrap_or("runtime command loop closed"),
         "discarded dead playback runtime handle"
     );
-    report_playback_failure(state, &user_message);
-
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard.db.with_conn(player::pause).ok()
-    };
-    if let Some(snapshot) = snapshot {
-        sync_session_after_snapshot(
-            state,
-            &snapshot,
-            Some(player::ListenSessionEndReason::Stopped),
-        )
-        .await;
+    if let Some(payload) = completed {
+        crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
     }
-    let state_guard = state.read().await;
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
 }
 
 /// Broadcast a "we skipped this track" notice so the UI can toast which track

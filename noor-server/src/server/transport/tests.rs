@@ -1579,6 +1579,291 @@ async fn runtime_exit_discards_dead_handle_and_pauses_without_changing_queue() {
     assert_eq!(snapshot.queue.len(), 1);
 }
 
+#[tokio::test]
+async fn runtime_exit_cleanup_cannot_pause_replacement_waiting_for_state_lock() {
+    let (state, old, _, _) = cpal_fault_fixture().await;
+    let reader = state.read().await;
+    let listener = spawn_playback_runtime_listener(state.clone(), old.clone());
+    assert!(
+        old.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited {
+            message: Some("old renderer exited".into()),
+        })
+    );
+    tokio::task::yield_now().await;
+    let replacement_state = state.clone();
+    let (command_tx, _commands) = std::sync::mpsc::channel();
+    let replacement = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let expected = replacement.clone();
+    let install = tokio::spawn(async move {
+        let mut guard = replacement_state.write().await;
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test".into(),
+            handle: replacement,
+        });
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
+            device_name: "replacement DAC".into(),
+            sample_rate: 96_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: true,
+            exclusive_transport_format: None,
+        });
+        guard
+            .audio_active
+            .store(true, std::sync::atomic::Ordering::Release);
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "replacement quality".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        guard
+            .db
+            .with_conn(|conn| {
+                conn.execute("UPDATE playback_state SET is_playing=1 WHERE id=1", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let session = player::ActiveListenSession::start(
+            1,
+            chrono::Utc::now(),
+            crate::db::models::ListenSource::Manual,
+            None,
+        );
+        let session_id = session.session_id.clone();
+        guard.active_listen_session = Some(session);
+        (session_id, guard.event_tx.subscribe())
+    });
+    // Tokio's fair writer queue places replacement after the exiting runtime
+    // and before any separate cleanup lock acquisition by that exit handler.
+    tokio::task::yield_now().await;
+    drop(reader);
+    let (session_id, mut events) = tokio::time::timeout(Duration::from_secs(2), install)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), listener)
+        .await
+        .unwrap()
+        .unwrap();
+    let guard = state.read().await;
+    assert!(
+        guard
+            .playback_runtime
+            .as_ref()
+            .unwrap()
+            .handle
+            .is_same_runtime(&expected)
+    );
+    assert!(
+        guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    let snapshot = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert!(
+        snapshot.state.is_playing,
+        "old exit paused replacement playback"
+    );
+    assert_eq!(snapshot.state.current_track.as_ref().unwrap().id, 1);
+    assert_eq!(snapshot.queue.len(), 1);
+    assert_eq!(
+        guard.active_listen_session.as_ref().unwrap().session_id,
+        session_id
+    );
+    assert_eq!(
+        guard.current_stream_display.as_ref().unwrap().audio_quality,
+        "replacement quality"
+    );
+    assert_eq!(
+        guard.playback_runtime_info.as_ref().unwrap().device_name,
+        "replacement DAC"
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn current_runtime_exit_listener_flushes_history_and_clears_output_state() {
+    let (state, handle, _, _) = cpal_fault_fixture().await;
+    let mut guard = state.write().await;
+    guard.active_listen_session = Some(player::ActiveListenSession::start(
+        1,
+        chrono::Utc::now() - chrono::Duration::seconds(8),
+        crate::db::models::ListenSource::Manual,
+        None,
+    ));
+    let display = crate::StreamDisplayInfo {
+        audio_quality: "LOSSLESS".into(),
+        sample_rate: Some(48_000),
+        bit_depth: Some(16),
+    };
+    guard.current_stream_display = Some(display.clone());
+    guard.pending_stream_display = Some(display);
+    guard.next_prebuffer_inflight = Some(crate::NextPrebufferKey {
+        runtime_identity: handle.runtime_identity(),
+        current_track_id: 1,
+        next_track_id: 2,
+        generation: 0,
+    });
+    let mut events = guard.event_tx.subscribe();
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited {
+            message: Some("renderer disconnected".into()),
+        })
+    );
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(2), listener)
+        .await
+        .unwrap()
+        .unwrap();
+    let guard = state.read().await;
+    assert!(guard.playback_runtime.is_none());
+    assert!(guard.playback_runtime_info.is_none());
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(guard.current_stream_display.is_none());
+    assert!(guard.pending_stream_display.is_none());
+    assert!(guard.next_prebuffer_inflight.is_none());
+    assert!(guard.active_listen_session.is_none());
+    let snapshot = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert!(!snapshot.state.is_playing);
+    assert_eq!(snapshot.state.current_track.as_ref().unwrap().id, 1);
+    assert_eq!(snapshot.queue.len(), 1);
+    let listens: i64 = guard
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM listen_history WHERE track_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(listens, 1);
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        AppEvent::ListenHistoryUpdated { track_id: 1 }
+    ));
+    match events.try_recv().unwrap() {
+        AppEvent::PlaybackFailed { message } => assert!(message.contains("renderer disconnected")),
+        other => panic!("expected runtime failure, got {other:?}"),
+    }
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        AppEvent::PlaybackStateChanged
+    ));
+}
+
+#[tokio::test]
+async fn retired_runtime_exit_listener_leaves_current_playback_and_history_intact() {
+    let (state, old, _, _) = cpal_fault_fixture().await;
+    let (command_tx, _commands) = std::sync::mpsc::channel();
+    let replacement = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut guard = state.write().await;
+    guard.playback_runtime.as_mut().unwrap().handle = replacement.clone();
+    let session = player::ActiveListenSession::start(
+        1,
+        chrono::Utc::now(),
+        crate::db::models::ListenSource::Manual,
+        None,
+    );
+    let session_id = session.session_id.clone();
+    guard.active_listen_session = Some(session);
+    let mut events = guard.event_tx.subscribe();
+    let listener = spawn_playback_runtime_listener(state.clone(), old.clone());
+    assert!(
+        old.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited { message: None })
+    );
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(2), listener)
+        .await
+        .unwrap()
+        .unwrap();
+    let guard = state.read().await;
+    assert!(
+        guard
+            .playback_runtime
+            .as_ref()
+            .unwrap()
+            .handle
+            .is_same_runtime(&replacement)
+    );
+    assert!(
+        guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        guard
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap()
+            .state
+            .is_playing
+    );
+    assert_eq!(
+        guard.active_listen_session.as_ref().unwrap().session_id,
+        session_id
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn runtime_exit_listener_still_clears_dead_output_if_persisted_pause_fails() {
+    let (state, handle, _, _) = cpal_fault_fixture().await;
+    let guard = state.read().await;
+    guard.db.with_conn(|conn| {
+        conn.execute_batch("CREATE TEMP TRIGGER reject_exit_pause BEFORE UPDATE OF is_playing ON playback_state BEGIN SELECT RAISE(FAIL, 'test pause write denied'); END;")?;
+        Ok(())
+    }).unwrap();
+    let mut events = guard.event_tx.subscribe();
+    drop(guard);
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited { message: None })
+    );
+    tokio::time::timeout(Duration::from_secs(2), listener)
+        .await
+        .unwrap()
+        .unwrap();
+    let guard = state.read().await;
+    assert!(guard.playback_runtime.is_none());
+    assert!(guard.playback_runtime_info.is_none());
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert_eq!(
+        guard
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap()
+            .queue
+            .len(),
+        1
+    );
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        AppEvent::PlaybackFailed { .. }
+    ));
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        AppEvent::PlaybackStateChanged
+    ));
+}
+
 #[test]
 fn tidal_playlist_tracks_cache_returns_fresh_entries_and_expires_stale_entries() {
     let cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
