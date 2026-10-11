@@ -4,6 +4,7 @@
 -->
 <script lang="ts">
 	import type { DesktopUpdateInfo } from '$lib/desktop/update_state';
+	import { parseReleaseNotes } from '$lib/desktop/release_notes';
 
 	interface Props {
 		update: DesktopUpdateInfo;
@@ -15,6 +16,7 @@
 
 	let { update, busy, oninstall, onclose }: Props = $props();
 	let installButton = $state<HTMLButtonElement | null>(null);
+	const noteBlocks = $derived(update.notes ? parseReleaseNotes(update.notes) : []);
 
 	$effect(() => {
 		installButton?.focus();
@@ -72,8 +74,22 @@
 
 		<section class="patch-notes" aria-labelledby="patch-notes-title">
 			<h3 id="patch-notes-title">What changed</h3>
-			{#if update.notes}
-				<div class="patch-notes-copy">{update.notes}</div>
+			{#if noteBlocks.length}
+				<div class="patch-notes-copy">
+					{#each noteBlocks as block, i (i)}
+						{#if block.kind === 'heading'}
+							<h4>{block.text}</h4>
+						{:else if block.kind === 'list'}
+							<ul>
+								{#each block.items as item, j (j)}
+									<li>{item}</li>
+								{/each}
+							</ul>
+						{:else}
+							<p>{block.text}</p>
+						{/if}
+					{/each}
+				</div>
 			{:else}
 				<p class="patch-notes-empty">Release notes were not included with this patch.</p>
 			{/if}
@@ -229,8 +245,36 @@
 		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-normal);
-		white-space: pre-wrap;
 		overflow-wrap: anywhere;
+	}
+
+	.patch-notes-copy p,
+	.patch-notes-copy ul {
+		margin: 0 0 12px;
+	}
+
+	.patch-notes-copy ul {
+		padding-left: 18px;
+	}
+
+	.patch-notes-copy li + li {
+		margin-top: 4px;
+	}
+
+	.patch-notes-copy h4 {
+		margin: 16px 0 6px;
+		color: var(--text-primary);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0;
+	}
+
+	.patch-notes-copy > :first-child {
+		margin-top: 0;
+	}
+
+	.patch-notes-copy > :last-child {
+		margin-bottom: 0;
 	}
 
 	.patch-info-actions {

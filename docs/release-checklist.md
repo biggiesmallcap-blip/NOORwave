@@ -14,7 +14,7 @@ Never run bare `cargo update` or `cargo generate-lockfile` for a release: both r
 
 ## Verify and publish the draft
 
-CI builds every platform into a **draft** release whose body already leads with the notes. Before publishing:
+CI builds every platform into a **draft** release whose body already leads with the notes. Don't edit the body: the in-app patch dialog reads it from `## What's new in` up to `Desktop hi-fi player`, so a second copy or a reflowed body shows up there. Before publishing:
 
 1. Every platform job and `publish-checksums` succeeded.
 2. Assets present: setup exe, `.sig`, `latest.json`, portable zip, macOS/Linux archives, `sha256sums.txt`.
