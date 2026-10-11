@@ -252,6 +252,27 @@ fn write_output_buffer<T>(
         return;
     }
 
+    let recovery_target = shared.recovery_seek_samples.load(Ordering::Acquire);
+    if recovery_target != u64::MAX {
+        let offset = shared.position_offset_samples.load(Ordering::Relaxed);
+        let local = recovery_target.saturating_sub(offset);
+        if local > guard.samples.len() as u64 && !guard.finished {
+            data.fill_with(|| convert(0.0));
+            return;
+        }
+        // A short/changed source can finish before the saved position. Clamp
+        // to its real end so normal terminal handling remains reachable.
+        let local = local.min(guard.samples.len() as u64) as usize;
+        guard.seek_to(local);
+        shared
+            .position_samples
+            .store(offset + guard.read_pos as u64, Ordering::Relaxed);
+        shared.publish_source_position();
+        shared
+            .recovery_seek_samples
+            .store(u64::MAX, Ordering::Release);
+    }
+
     let seek_target = shared.seek_target_samples.load(Ordering::Relaxed);
     if seek_target != u64::MAX
         && shared
@@ -564,6 +585,7 @@ pub(crate) struct PlaybackSharedState {
     /// the runtime restores plain incoming audio instead of replaying deck A.
     pub(crate) handoff_source_prefix: Mutex<Option<Vec<f32>>>,
     pub(crate) seek_target_samples: AtomicU64,
+    recovery_seek_samples: AtomicU64,
     pub(crate) total_samples: AtomicU64,
     /// Mirror of `buffer.samples.len()` published from the audio callback so
     /// HTTP / route-side consumers can read "how much of this track is
@@ -751,6 +773,7 @@ impl PlaybackSharedState {
             handoff_timeline: AtomicHandoffTimeline::default(),
             handoff_source_prefix: Mutex::new(None),
             seek_target_samples: AtomicU64::new(u64::MAX),
+            recovery_seek_samples: AtomicU64::new(u64::MAX),
             total_samples: AtomicU64::new(estimated_total_samples.unwrap_or(0)),
             buffered_samples: Arc::new(AtomicU64::new(0)),
             position_offset_samples,
@@ -1071,10 +1094,48 @@ impl PlaybackSharedState {
                 .store(0.0f32.to_bits(), Ordering::Relaxed);
         }
         self.seek_target_samples.store(u64::MAX, Ordering::Relaxed);
+        self.recovery_seek_samples
+            .store(u64::MAX, Ordering::Release);
         self.position_samples
             .store(target_samples, Ordering::Relaxed);
         self.publish_source_position();
         self.publish_buffered_samples(guard.samples.len());
+        Ok(())
+    }
+
+    pub(crate) fn arm_recovery_seek_ms(&self, target_ms: u64) -> Result<()> {
+        let channels = u64::from(self.device_channels);
+        if channels == 0 || self.device_sample_rate == 0 {
+            return Err(anyhow!("Recovery requires a valid audio clock"));
+        }
+        let target = target_ms
+            .checked_mul(u64::from(self.device_sample_rate))
+            .map(|frames| frames / 1000)
+            .and_then(|frames| frames.checked_mul(channels))
+            .ok_or_else(|| anyhow!("Recovery position exceeds the audio clock"))?;
+        let mut guard = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        if !self.paused.load(Ordering::SeqCst) || guard.started {
+            return Err(anyhow!("Recovery must be armed before playback starts"));
+        }
+        let offset = self.position_offset_samples.load(Ordering::Relaxed) / channels * channels;
+        if target < offset {
+            return Err(anyhow!("Recovery position precedes the decoded segment"));
+        }
+        let skip = target
+            .saturating_sub(offset)
+            .min(guard.samples.len() as u64) as usize;
+        guard.samples.drain(..skip);
+        guard.read_pos = 0;
+        guard.clear_rt_notifications();
+        self.position_offset_samples
+            .store(offset + skip as u64, Ordering::Relaxed);
+        self.position_samples.store(target, Ordering::Relaxed);
+        self.publish_source_position();
+        self.publish_buffered_samples(guard.samples.len());
+        self.recovery_seek_samples.store(target, Ordering::Release);
         Ok(())
     }
 
@@ -1088,7 +1149,21 @@ impl PlaybackSharedState {
         if guard.sealed_for_render {
             return Ok(guard.samples.len());
         }
-        guard.samples.extend_from_slice(samples);
+        let target = self.recovery_seek_samples.load(Ordering::Acquire);
+        let offset = self.position_offset_samples.load(Ordering::Relaxed);
+        let skip = if target == u64::MAX {
+            0
+        } else {
+            target.saturating_sub(offset).min(samples.len() as u64) as usize
+        };
+        if skip != 0 {
+            // Discard preroll before allocation/backpressure. Otherwise a
+            // direct stream can fill its lookahead window before reaching
+            // the recovery position while the output waits in silence.
+            self.position_offset_samples
+                .store(offset + skip as u64, Ordering::Relaxed);
+        }
+        guard.samples.extend_from_slice(&samples[skip..]);
         self.publish_buffered_samples(guard.samples.len());
         Ok(guard.samples.len())
     }
@@ -1417,6 +1492,103 @@ mod tests {
             }
             other => panic!("expected retained diagnostic, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recovery_preroll_is_discarded_without_playback_or_backpressure_growth() {
+        let shared = test_shared_state();
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.append_decoded_samples(&[0.1; 48]).unwrap();
+        shared.arm_recovery_seek_ms(1).unwrap();
+        assert_eq!(shared.buffer.lock().unwrap().samples.len(), 0);
+        shared.paused.store(false, Ordering::SeqCst);
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [1.0; 8];
+        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output, [0.0; 8]);
+        assert_eq!(shared.position_samples.load(Ordering::Relaxed), 96);
+        shared.append_decoded_samples(&[0.2; 48]).unwrap();
+        assert_eq!(shared.unread_buffered_samples().unwrap(), 0);
+        shared.append_decoded_samples(&[0.75; 8]).unwrap();
+        shared.buffer.lock().unwrap().mark_finished();
+        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output, [0.75; 8], "recovery replayed preroll");
+        assert_eq!(shared.position_samples.load(Ordering::Relaxed), 104);
+        assert_eq!(shared.source_position_samples.load(Ordering::Relaxed), 104);
+    }
+
+    #[test]
+    fn recovery_at_44100_hz_preserves_interleaved_channel_alignment() {
+        let (command_tx, _) = mpsc::channel();
+        let shared = PlaybackSharedState::new(
+            1,
+            1,
+            PlaybackSourceKind::TidalStream,
+            GaplessPlan::disabled(),
+            44_100,
+            2,
+            None,
+            command_tx,
+            Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.arm_recovery_seek_ms(999).unwrap();
+        let target = shared.recovery_seek_samples.load(Ordering::Acquire);
+        assert_eq!(target, 88_110);
+        assert_eq!(target % 2, 0);
+    }
+
+    #[test]
+    fn recovery_callback_wait_and_start_do_not_allocate_or_free() {
+        let shared = test_shared_state();
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.arm_recovery_seek_ms(1).unwrap();
+        shared.paused.store(false, Ordering::SeqCst);
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [1.0; 8];
+        for ready in [false, true] {
+            if ready {
+                shared.append_decoded_samples(&[0.5; 104]).unwrap();
+                shared.buffer.lock().unwrap().mark_finished();
+            }
+            ALLOCATION_COUNTS.with(|counts| counts.set((true, 0, 0)));
+            write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+            let (_, allocations, frees) = ALLOCATION_COUNTS.with(|counts| {
+                let result = counts.get();
+                counts.set((false, 0, 0));
+                result
+            });
+            assert_eq!((allocations, frees), (0, 0));
+            assert_eq!(output, [if ready { 0.5 } else { 0.0 }; 8]);
+        }
+    }
+
+    #[test]
+    fn recovery_short_source_reaches_actual_end_instead_of_waiting_forever() {
+        let shared = test_shared_state();
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.arm_recovery_seek_ms(1000).unwrap();
+        shared.append_decoded_samples(&[0.5; 64]).unwrap();
+        shared.buffer.lock().unwrap().mark_finished();
+        shared.paused.store(false, Ordering::SeqCst);
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [1.0; 8];
+        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output, [0.0; 8]);
+        assert_eq!(
+            shared.recovery_seek_samples.load(Ordering::Acquire),
+            u64::MAX
+        );
+        assert_eq!(shared.source_position_samples.load(Ordering::Relaxed), 64);
+        assert!(matches!(
+            shared.take_rt_command(&event_tx),
+            Some(PlaybackRuntimeCommand::TrackTerminal { .. })
+        ));
     }
 
     fn test_shared_state() -> Arc<PlaybackSharedState> {

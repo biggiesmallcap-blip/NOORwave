@@ -728,18 +728,81 @@ pub(super) fn handle_release_exclusive_now(
 }
 
 /// Resume playback, re-acquiring an exclusive device if it was released.
+pub(super) fn recover_poisoned_pcm(
+    state: &mut PlaybackRuntimeLoopState,
+    restart: impl FnOnce(&mut PlaybackRuntimeLoopState, PreparedPlaybackJob) -> Result<()>,
+) -> Result<bool> {
+    let poisoned = [
+        &state.engine,
+        &state.next_engine,
+        &state.fading_out_engine,
+        &state.drop_preview_engine,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|engine| {
+        engine.shared.buffer.is_poisoned() || engine.shared.handoff_source_prefix.is_poisoned()
+    });
+    if !poisoned {
+        return Ok(false);
+    }
+    let (job, target_ms) = state
+        .engine
+        .as_ref()
+        .ok_or_else(|| anyhow!("Cannot recover damaged playback without an active track"))?
+        .recovery_restart_job()?;
+    restart(state, job)?;
+    state
+        .engine
+        .as_ref()
+        .ok_or_else(|| anyhow!("Recovery did not create an active decoder"))?
+        .shared
+        .arm_recovery_seek_ms(target_ms)?;
+    Ok(true)
+}
+
 pub(super) fn handle_resume(
     env: LoopEnv<'_>,
     state: &mut PlaybackRuntimeLoopState,
 ) -> ControlFlow<()> {
     let LoopEnv {
+        config,
         command_tx,
         event_tx,
         device,
         output_config,
         output_sample_format,
-        ..
+        volume_ctl,
+        position_samples,
+        position_source,
+        buffered_source,
+        offset_source,
     } = env;
+    // Poison indicates unwinding while PCM or a rendered prefix was borrowed.
+    // Opening a new endpoint cannot make that decoder state safe to reuse.
+    if let Err(error) = recover_poisoned_pcm(state, |state, job| {
+        #[cfg(target_os = "windows")]
+        state.exclusive_sink.clear();
+        transition_to_job(
+            config,
+            command_tx,
+            device,
+            output_config,
+            *output_sample_format,
+            event_tx,
+            state,
+            job,
+            volume_ctl,
+            position_samples,
+            position_source,
+            buffered_source,
+            offset_source,
+            true,
+        )
+    }) {
+        fail_runtime_command(state, event_tx, "Resume", error);
+        return ControlFlow::Continue(());
+    }
     // Clear the user-pause latch and give the advance-cascade
     // breaker a fresh start: an explicit resume is the user
     // asking to try audio again.

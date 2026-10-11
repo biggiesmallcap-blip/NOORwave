@@ -94,6 +94,32 @@ pub(super) fn require_decoded_output_rate(
 }
 
 impl PlaybackEngine {
+    pub(super) fn recovery_restart_job(&self) -> Result<(PreparedPlaybackJob, u64)> {
+        let rate = self.shared.target_sample_rate.load(Ordering::Relaxed);
+        let channels = u64::from(self.shared.device_channels);
+        if rate == 0 || channels == 0 {
+            return Err(anyhow!(
+                "Cannot recover playback without a valid audio clock"
+            ));
+        }
+        let position = self.shared.source_position_samples.load(Ordering::Acquire);
+        let target_ms =
+            u64::try_from(u128::from(position) * 1000 / (u128::from(rate) * u128::from(channels)))?;
+        let mut job = self.job.clone();
+        job.start_paused = true;
+        job.prepared_transition = None;
+        let segment = self.shared.segment_offsets_ms.get().and_then(|offsets| {
+            offsets
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, offset)| **offset <= target_ms)
+        });
+        let (index, offset) = segment.map_or((0, 0), |(index, offset)| (index, *offset));
+        job.start_from_segment_index = index;
+        job.start_from_offset_ms = offset;
+        Ok((job, target_ms))
+    }
     pub(super) fn take_output_error(&self) -> Option<PlaybackRuntimeCommand> {
         match self.stream.as_ref()? {
             OutputStream::Cpal { _stream } => _stream.take_error(&self.shared),

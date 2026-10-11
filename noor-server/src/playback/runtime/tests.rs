@@ -5592,6 +5592,263 @@ fn test_engine_with_shared(track_id: i64, generation: u64) -> PlaybackEngine {
 }
 
 #[test]
+fn poisoned_pcm_recovery_job_preserves_source_position_and_segment_identity() {
+    let engine = test_engine_with_shared(17, 9);
+    engine
+        .shared
+        .segment_offsets_ms
+        .set(vec![0, 1000, 2000, 3000])
+        .unwrap();
+    engine
+        .shared
+        .source_position_samples
+        .store(2500 * 48_000 * 2 / 1000, Ordering::Relaxed);
+    let shared = Arc::clone(&engine.shared);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = shared.buffer.lock().unwrap();
+            panic!("injected renderer panic while holding PCM");
+        })
+        .join()
+        .is_err()
+    );
+    assert!(engine.shared.buffer.is_poisoned());
+    let (job, target_ms) = engine.recovery_restart_job().unwrap();
+    assert_eq!(target_ms, 2500);
+    assert_eq!((job.track.id, job.generation), (17, 9));
+    assert_eq!(
+        (job.start_from_segment_index, job.start_from_offset_ms),
+        (2, 2000)
+    );
+    assert!(
+        job.start_paused,
+        "new decoder must stay silent until recovery is armed"
+    );
+}
+
+#[test]
+fn poisoned_pcm_recovery_replaces_decoder_before_resume_and_keeps_current_job() {
+    let mut state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(17, 9);
+    engine
+        .shared
+        .source_position_samples
+        .store(96, Ordering::Relaxed);
+    let old_shared = Arc::clone(&engine.shared);
+    let shared = Arc::clone(&old_shared);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = shared.buffer.lock().unwrap();
+            panic!("injected PCM poison");
+        })
+        .join()
+        .is_err()
+    );
+    state.engine = Some(engine);
+    state.next_engine = Some(test_engine_with_shared(18, 9));
+    assert!(
+        recover_poisoned_pcm(&mut state, |state, job| {
+            assert_eq!((job.track.id, job.generation), (17, 9));
+            stop_all_engines(state);
+            let mut replacement = test_engine_with_shared(job.track.id, job.generation);
+            replacement
+                .shared
+                .paused
+                .store(job.start_paused, Ordering::SeqCst);
+            replacement.job = job;
+            state.engine = Some(replacement);
+            Ok(())
+        })
+        .unwrap()
+    );
+    let replacement = state.engine.as_ref().unwrap();
+    assert!(!Arc::ptr_eq(&old_shared, &replacement.shared));
+    assert!(old_shared.stopped.load(Ordering::Acquire));
+    assert!(!replacement.shared.buffer.is_poisoned());
+    assert!(replacement.shared.paused.load(Ordering::SeqCst));
+    assert_eq!(
+        replacement
+            .shared
+            .source_position_samples
+            .load(Ordering::Relaxed),
+        96
+    );
+    assert!(state.next_engine.is_none());
+    assert!(
+        !recover_poisoned_pcm(&mut state, |_, _| panic!(
+            "healthy decoder should not restart"
+        ))
+        .unwrap()
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "opens silent output on NOOR_AUDIO_SMOKE_DEVICE; requires idle audio hardware"]
+fn poisoned_pcm_resume_silent_native_smoke() {
+    use cpal::traits::HostTrait;
+    use std::io::{Read, Write};
+    let selected = std::env::var("NOOR_AUDIO_SMOKE_DEVICE").expect("explicit silent-test endpoint");
+    let mut candidates = cpal::default_host()
+        .output_devices()
+        .unwrap()
+        .filter(|device| {
+            device
+                .id()
+                .is_ok_and(|id| id.id() == selected || id.to_string() == selected)
+        });
+    let mut device = candidates.next().expect("selected endpoint");
+    assert!(
+        candidates.next().is_none(),
+        "test endpoint must be unambiguous"
+    );
+    let selection = OutputDeviceSelection::Named(device.id().unwrap().to_string());
+    let supported = device.default_output_config().unwrap();
+    let mut output_config = supported.config();
+    let mut format = supported.sample_format();
+    let rate = output_config.sample_rate;
+    let channels = output_config.channels;
+    let bytes = rate * u32::from(channels) * 2;
+    let mut wav = Vec::with_capacity(44 + bytes as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + bytes).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&bytes.to_le_bytes());
+    wav.extend_from_slice(&(channels * 2).to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&bytes.to_le_bytes());
+    wav.resize(44 + bytes as usize, 0);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/silent.wav", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("silent fixture accept failed: {error}"),
+            }
+        };
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = [0; 4096];
+        socket.read(&mut request).unwrap();
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len()).unwrap();
+        socket.write_all(&wav).unwrap();
+    });
+    let mut state = test_runtime_loop_state();
+    state.device_sample_rate = rate;
+    state.device_channels = channels;
+    state.current_device_selection = selection;
+    state.current_exclusive = true;
+    state.user_paused = true;
+    let mut old = test_engine_with_shared(17, 9);
+    old.job.source = crate::playback::player::PlaybackSourceRequest::TidalStream(
+        StreamRequest::new(17, "LOSSLESS"),
+    );
+    old.job.track.duration_ms = Some(1000);
+    old.job.resolved_stream = Some(crate::playback::player::ResolvedStream {
+        info: StreamInfo {
+            url,
+            segment_urls: vec![],
+            segment_offsets_ms: vec![],
+            track_id: 17,
+            audio_quality: "LOSSLESS".into(),
+            codec: "wav".into(),
+            sample_rate: Some(i32::try_from(rate).unwrap()),
+            bit_depth: Some(16),
+        },
+        resolved_at: Instant::now(),
+    });
+    old.shared
+        .source_position_samples
+        .store(48_000, Ordering::Relaxed);
+    old.shared.paused.store(true, Ordering::SeqCst);
+    let old_shared = Arc::clone(&old.shared);
+    let poison = Arc::clone(&old_shared);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poison.buffer.lock().unwrap();
+            panic!("injected native recovery PCM poison");
+        })
+        .join()
+        .is_err()
+    );
+    state.engine = Some(old);
+    let (command_tx, _) = mpsc::channel();
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
+    let mut config = PlaybackRuntimeConfig::new(reqwest::Client::new(), "test", None);
+    let volume = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+    let position = Arc::new(AtomicU64::new(0));
+    let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let buffered = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let offset = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let _ = handle_resume(
+        LoopEnv {
+            config: &mut config,
+            command_tx: &command_tx,
+            event_tx: &event_tx,
+            device: &mut device,
+            output_config: &mut output_config,
+            output_sample_format: &mut format,
+            volume_ctl: &volume,
+            position_samples: &position,
+            position_source: &source,
+            buffered_source: &buffered,
+            offset_source: &offset,
+        },
+        &mut state,
+    );
+    let replacement = state.engine.as_ref().expect("recovered decoder");
+    assert!(!Arc::ptr_eq(&old_shared, &replacement.shared));
+    assert!(old_shared.stopped.load(Ordering::Acquire));
+    assert!(!replacement.shared.buffer.is_poisoned());
+    assert_eq!((replacement.track_id, replacement.generation), (17, 9));
+    assert!(!state.user_paused);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while replacement
+        .shared
+        .source_position_samples
+        .load(Ordering::Acquire)
+        <= u64::from(rate) * u64::from(channels) / 2
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        replacement
+            .shared
+            .source_position_samples
+            .load(Ordering::Acquire)
+            > u64::from(rate) * u64::from(channels) / 2,
+        "native output never consumed recovered PCM"
+    );
+    assert!(Arc::ptr_eq(
+        &source.lock().unwrap(),
+        &replacement.shared.source_position_samples
+    ));
+    assert!(
+        std::iter::from_fn(|| event_rx.try_recv().ok())
+            .any(|event| matches!(event, PlaybackRuntimeEvent::Resumed { track_id: Some(17) }))
+    );
+    stop_all_engines(&mut state);
+    state.exclusive_sink.clear();
+    server.join().unwrap();
+}
+
+#[test]
 fn live_exclusive_retry_preserves_cached_pcm_rate_until_next_track() {
     let mut state = test_runtime_loop_state();
     state.current_sample_rate_follow = true;
