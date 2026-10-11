@@ -1,7 +1,6 @@
 //! Decode resampling helpers.
 
 use anyhow::{Context, Result, anyhow};
-use tracing::warn;
 
 pub(crate) fn extend_mono_from_interleaved(
     out: &mut Vec<f32>,
@@ -107,9 +106,14 @@ impl StreamResampler {
         })
     }
 
-    pub(crate) fn process(&mut self, interleaved: &[f32]) -> Vec<f32> {
+    pub(crate) fn process(&mut self, interleaved: &[f32]) -> Result<Vec<f32>> {
+        if !interleaved.len().is_multiple_of(self.channels) {
+            return Err(anyhow!(
+                "resampler input has an incomplete interleaved frame"
+            ));
+        }
         if interleaved.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         self.input_frames = self
             .input_frames
@@ -137,18 +141,13 @@ impl StreamResampler {
             for channel in &mut self.residual {
                 channel.clear();
             }
-            match result {
-                Ok((_, frames)) => self.append_output(frames, usize::MAX, &mut out),
-                Err(e) => {
-                    warn!("rubato process error: {e}");
-                    return out;
-                }
-            }
+            let (_, frames) = result.context("rubato packet processing failed")?;
+            self.append_output(frames, usize::MAX, &mut out);
         }
-        out
+        Ok(out)
     }
 
-    pub(crate) fn flush(&mut self) -> Vec<f32> {
+    pub(crate) fn flush(&mut self) -> Result<Vec<f32>> {
         // Round the complete source duration once, rather than rounding each
         // packet. EOF must also drain filter history on exact chunk boundaries.
         let expected_frames = ((self.input_frames as u128 * self.out_rate as u128
@@ -170,24 +169,22 @@ impl StreamResampler {
             for channel in &mut self.residual {
                 channel.clear();
             }
-            match result {
-                Ok((_, frames)) if frames > 0 => {
-                    self.append_output(frames, expected_frames - self.output_frames, &mut out);
-                }
-                Ok(_) => {
-                    warn!("rubato flush made no progress");
-                    break;
-                }
-                Err(e) => {
-                    warn!("rubato flush error: {e}");
-                    break;
-                }
+            let (_, frames) = result.context("rubato EOF drain failed")?;
+            if frames == 0 {
+                return Err(anyhow!("rubato EOF drain made no progress"));
             }
+            self.append_output(frames, expected_frames - self.output_frames, &mut out);
         }
         for channel in &mut self.residual {
             channel.clear();
         }
-        out
+        Ok(out)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_truncate_output_buffer(&mut self) {
+        // Trigger rubato's real validation in the HTTP decoder test.
+        self.output_scratch[0].clear();
     }
 
     fn append_output(&mut self, frames: usize, limit: usize, out: &mut Vec<f32>) {
@@ -210,6 +207,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resampler_rejects_partial_interleaved_frames_without_mutating_stream() {
+        let mut r = StreamResampler::new(44_100, 48_000, 2).unwrap();
+        assert!(r.process(&[0.25, -0.25]).unwrap().is_empty());
+        let before = r.residual.clone();
+        let input_frames = r.input_frames;
+        let error = r.process(&[0.5, -0.5, 0.75]).unwrap_err();
+        assert!(error.to_string().contains("incomplete interleaved frame"));
+        assert_eq!(r.residual, before);
+        assert_eq!(r.input_frames, input_frames);
+    }
+
+    #[test]
+    fn resampler_returns_rubato_packet_and_eof_failures() {
+        for flush in [false, true] {
+            let mut r = StreamResampler::new(44_100, 48_000, 2).unwrap();
+            assert!(!r.process(&vec![0.1; 2048]).unwrap().is_empty());
+            let emitted_before_fault = r.output_frames;
+            // Exercise rubato's actual short-output-buffer validation rather
+            // than returning a mocked wrapper error.
+            r.output_scratch[0].clear();
+            let error = if flush {
+                assert!(r.process(&[0.25, -0.25]).unwrap().is_empty());
+                r.flush().unwrap_err()
+            } else {
+                r.process(&vec![0.25; 2048]).unwrap_err()
+            };
+            let chain = format!("{error:#}");
+            assert!(chain.contains("rubato"), "{chain}");
+            assert!(
+                matches!(
+                    error.downcast_ref::<rubato::ResampleError>(),
+                    Some(rubato::ResampleError::InsufficientOutputBufferSize {
+                        channel: 0,
+                        actual: 0,
+                        ..
+                    })
+                ),
+                "{chain}"
+            );
+            assert_eq!(r.output_frames, emitted_before_fault);
+        }
+    }
+
+    #[test]
     fn resampler_preserves_duration_and_tail_across_chunk_boundaries() {
         for (in_rate, out_rate) in [(44_100, 48_000), (96_000, 44_100), (44_100, 96_000)] {
             for frames in [1, 13, 1024, 1025, 4096, 4099] {
@@ -217,8 +258,8 @@ mod tests {
                 let mut input = vec![0.0; frames * 2];
                 input[(frames - 1) * 2] = 0.75;
                 input[(frames - 1) * 2 + 1] = -0.5;
-                let mut output = r.process(&input);
-                output.extend(r.flush());
+                let mut output = r.process(&input).unwrap();
+                output.extend(r.flush().unwrap());
                 let expected_frames =
                     ((frames as f64 * out_rate as f64 / in_rate as f64).round()) as usize;
                 assert_eq!(
@@ -232,7 +273,7 @@ mod tests {
                         "last impulse was lost: {in_rate}->{out_rate}, {frames} frames"
                     );
                 }
-                assert!(r.flush().is_empty());
+                assert!(r.flush().unwrap().is_empty());
             }
         }
     }
@@ -243,8 +284,8 @@ mod tests {
             let mut r = StreamResampler::new(in_rate, out_rate, 1).unwrap();
             let mut input = vec![0.0; 4096];
             input[256] = 0.75;
-            let mut output = r.process(&input);
-            output.extend(r.flush());
+            let mut output = r.process(&input).unwrap();
+            output.extend(r.flush().unwrap());
             let peak = output
                 .iter()
                 .enumerate()
@@ -326,7 +367,7 @@ mod tests {
                         })
                         .collect();
                     frame_offset += frames;
-                    all_output.extend(r.process(&input));
+                    all_output.extend(r.process(&input).unwrap());
                     all_input.extend(input);
                     assert!(
                         r.residual
@@ -339,14 +380,14 @@ mod tests {
                         "input scratch must stay bounded for large packets"
                     );
                 }
-                all_output.extend(r.flush());
+                all_output.extend(r.flush().unwrap());
                 assert_eq!(
                     all_output,
                     allocating_reference(&all_input, in_rate, out_rate, channels),
                     "{in_rate}->{out_rate}, {channels} ch"
                 );
-                assert!(r.flush().is_empty());
-                assert!(r.process(&[]).is_empty());
+                assert!(r.flush().unwrap().is_empty());
+                assert!(r.process(&[]).unwrap().is_empty());
             }
         }
     }
@@ -362,7 +403,7 @@ mod tests {
             let input = vec![0.25; (StreamResampler::CHUNK_SIZE_IN * 8 + 13) * channels];
             let (output, counts) =
                 crate::playback::runtime::shared::test_measure_allocations(|| {
-                    resampler.process(&input)
+                    resampler.process(&input).unwrap()
                 });
             assert!(!output.is_empty());
             assert_eq!(
@@ -370,15 +411,16 @@ mod tests {
                 (1, 0),
                 "packet scratch allocation for {in_rate}->{out_rate}, {channels} channels"
             );
-            let (tail, counts) =
-                crate::playback::runtime::shared::test_measure_allocations(|| resampler.flush());
+            let (tail, counts) = crate::playback::runtime::shared::test_measure_allocations(|| {
+                resampler.flush().unwrap()
+            });
             assert!(!tail.is_empty());
             assert_eq!(
                 counts,
                 (1, 0),
                 "flush scratch allocation for {in_rate}->{out_rate}, {channels} channels"
             );
-            assert!(resampler.flush().is_empty());
+            assert!(resampler.flush().unwrap().is_empty());
         }
     }
 
@@ -407,7 +449,7 @@ mod tests {
         let mut r = StreamResampler::new(96_000, 48_000, 2).expect("new");
         let frames = StreamResampler::CHUNK_SIZE_IN * 2;
         let input = vec![0.0_f32; frames * 2];
-        let out = r.process(&input);
+        let out = r.process(&input).unwrap();
         assert!(!out.is_empty(), "expected resampled output, got empty");
         let out_frames = out.len() / 2;
         assert!(
@@ -420,7 +462,7 @@ mod tests {
     fn stream_resampler_holds_residual_under_chunk_size() {
         let mut r = StreamResampler::new(44_100, 48_000, 2).expect("new");
         let input = vec![0.0_f32; 10 * 2];
-        let out = r.process(&input);
+        let out = r.process(&input).unwrap();
         assert!(
             out.is_empty(),
             "small input should buffer in residual, not produce output"
