@@ -259,6 +259,116 @@ async fn retired_runtime_started_cannot_activate_replacement_with_same_generatio
 }
 
 #[tokio::test]
+async fn retired_runtime_track_error_cannot_clear_replacement_or_advance_queue() {
+    for message in ["active decode failed", "DASH stream prebuffer failed"] {
+        let (state, handle, _, _) = cpal_fault_fixture().await;
+        let mut guard = state.write().await;
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "replacement quality".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        guard.playback_runtime_info.as_mut().unwrap().last_error =
+            Some("replacement status".into());
+        let before = guard.db.with_conn(player::load_snapshot).unwrap();
+        let mut events = guard.event_tx.subscribe();
+        let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+        assert!(
+            handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::TrackError {
+                track_id: 1,
+                generation: 0,
+                message: message.into(),
+            })
+        );
+        tokio::task::yield_now().await;
+        let (replacement_tx, replacement_rx) = std::sync::mpsc::channel();
+        guard.playback_runtime.as_mut().unwrap().handle =
+            playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(replacement_tx);
+        drop(guard);
+        assert!(
+            handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited {
+                message: None,
+            })
+        );
+        tokio::time::timeout(Duration::from_secs(2), listener)
+            .await
+            .unwrap()
+            .unwrap();
+        let guard = state.read().await;
+        assert!(
+            guard
+                .audio_active
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let info = guard.playback_runtime_info.as_ref().unwrap();
+        assert_eq!(info.active_track_id, Some(1));
+        assert_eq!(info.last_error.as_deref(), Some("replacement status"));
+        assert_eq!(
+            guard.current_stream_display.as_ref().unwrap().audio_quality,
+            "replacement quality"
+        );
+        let after = guard.db.with_conn(player::load_snapshot).unwrap();
+        assert_eq!(
+            after.state.current_queue_item_id,
+            before.state.current_queue_item_id
+        );
+        assert_eq!(after.state.is_playing, before.state.is_playing);
+        assert_eq!(after.queue.len(), before.queue.len());
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            replacement_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn current_runtime_track_error_listener_keeps_terminal_recovery_working() {
+    for retryable in [false, true] {
+        let (state, handle, _, _) = cpal_fault_fixture().await;
+        let mut guard = state.write().await;
+        if retryable {
+            guard.playback_runtime_info.as_mut().unwrap().last_error =
+                Some(RUNTIME_TRACK_RETRY_MARKER.into());
+        }
+        let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+        assert!(
+            handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::TrackError {
+                track_id: 1,
+                generation: 0,
+                message: if retryable {
+                    "DASH stream prebuffer failed"
+                } else {
+                    "active decode failed"
+                }
+                .into(),
+            })
+        );
+        drop(guard);
+        assert!(
+            handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited {
+                message: None,
+            })
+        );
+        tokio::time::timeout(Duration::from_secs(2), listener)
+            .await
+            .unwrap()
+            .unwrap();
+        let guard = state.read().await;
+        let snapshot = guard.db.with_conn(player::load_snapshot).unwrap();
+        assert!(!snapshot.state.is_playing);
+        assert_eq!(snapshot.queue.len(), 1);
+        assert_eq!(
+            snapshot.state.current_track.as_ref().map(|track| track.id),
+            retryable.then_some(1)
+        );
+    }
+}
+
+#[tokio::test]
 async fn retired_runtime_stalled_cannot_pause_replacement_listen_timer() {
     assert_retired_runtime_activity_event("stalled").await;
 }
@@ -2592,8 +2702,14 @@ async fn repeated_transient_runtime_error_pauses_without_advancing_queue() {
         })
         .unwrap();
     let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db.clone())));
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
     {
         let mut guard = state.write().await;
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".into(),
+            handle: handle.clone(),
+        });
         guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
             device_name: "Test DAC".to_string(),
             sample_rate: 48_000,
@@ -2605,7 +2721,7 @@ async fn repeated_transient_runtime_error_pauses_without_advancing_queue() {
         });
     }
 
-    handle_runtime_track_error(state, 1, 1, "DASH stream prebuffer failed")
+    handle_runtime_track_error(state, &handle, 1, 1, "DASH stream prebuffer failed")
         .await
         .expect("second transient failure should pause");
 
@@ -2715,7 +2831,15 @@ async fn runtime_track_error_advances_to_next_library_track() {
         });
     }
 
-    handle_runtime_track_error(state.clone(), 1, 1, "active decode failed")
+    let handle = state
+        .read()
+        .await
+        .playback_runtime
+        .as_ref()
+        .unwrap()
+        .handle
+        .clone();
+    handle_runtime_track_error(state.clone(), &handle, 1, 1, "active decode failed")
         .await
         .expect("track error should advance");
 

@@ -395,9 +395,14 @@ pub(crate) fn spawn_playback_runtime_listener(
                     generation,
                     message,
                 }) => {
-                    if let Err(error) =
-                        handle_runtime_track_error(state.clone(), track_id, generation, &message)
-                            .await
+                    if let Err(error) = handle_runtime_track_error(
+                        state.clone(),
+                        &handle,
+                        track_id,
+                        generation,
+                        &message,
+                    )
+                    .await
                     {
                         let message =
                             format!("Failed to advance playback after track error: {error}");
@@ -1650,6 +1655,7 @@ pub(crate) fn runtime_track_error_is_retryable(message: &str) -> bool {
 
 pub(crate) async fn handle_runtime_track_error(
     state: SharedState,
+    expected_runtime: &playback_runtime::PlaybackRuntimeHandle,
     failed_track_id: i64,
     generation: u64,
     message: &str,
@@ -1657,7 +1663,14 @@ pub(crate) async fn handle_runtime_track_error(
     let retryable = runtime_track_error_is_retryable(message);
     let retry_already_attempted = {
         let mut state_guard = state.write().await;
-        if current_playback_generation(&state_guard) != generation {
+        // Check after taking the write guard: the emitting runtime may have
+        // been replaced while this listener waited behind another operation.
+        if current_playback_generation(&state_guard) != generation
+            || !state_guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.handle.is_same_runtime(expected_runtime))
+        {
             return Ok(());
         }
         let retry_already_attempted = state_guard
