@@ -200,7 +200,10 @@ The server is a binary crate without a library target, so the full
   if enabled; the no-logging claim applies to application render code.
 - Device waits check cancellation using 10 ms slices and retain the two-second
   no-event fault deadline. wasapi 0.25 still collapses WAIT_FAILED into timeout;
-  investigate immediate-timeout CPU spinning and unexpected renderer unwinding.
+  immediate returns are now paced, after reproducing 552,473 calls in 35 ms.
+  An outer renderer unwind guard now publishes a typed fault after resource
+  teardown. See the wait-pacing and renderer-unwind handoffs dated 2026-10-12.
+  Real unplug/reconnect and audible recovery remain unverified.
 - Recoverable CPAL underrun/scheduling notices are deferred atomic telemetry.
   Fatal output faults pause all decks and use stream/decoder identity in the
   listener. Fatal CPAL error formatting/channel sends can still allocate on the

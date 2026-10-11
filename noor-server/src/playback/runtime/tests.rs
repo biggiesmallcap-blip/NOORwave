@@ -5125,6 +5125,7 @@ fn exclusive_output_fault_poll_pauses_graph_once_without_queue_advance() {
         ExclusiveRenderFault::EventTimeout,
         ExclusiveRenderFault::EventWaitFailed,
         ExclusiveRenderFault::DeviceWriteFailed,
+        ExclusiveRenderFault::RendererPanicked,
     ] {
         let mut state = test_runtime_loop_state();
         state.current_exclusive = true;

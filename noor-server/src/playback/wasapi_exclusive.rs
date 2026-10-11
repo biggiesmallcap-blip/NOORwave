@@ -67,6 +67,7 @@ pub(crate) enum ExclusiveRenderFault {
     EventTimeout = 1,
     EventWaitFailed = 2,
     DeviceWriteFailed = 3,
+    RendererPanicked = 4,
 }
 
 impl ExclusiveRenderFault {
@@ -80,6 +81,9 @@ impl ExclusiveRenderFault {
             }
             Self::DeviceWriteFailed => {
                 "WASAPI could not write audio to the device. Reconnect the device and resume playback."
+            }
+            Self::RendererPanicked => {
+                "WASAPI output stopped unexpectedly. Resume playback to reopen the device."
             }
         }
     }
@@ -346,6 +350,7 @@ impl ExclusiveStream {
             1 => Some(ExclusiveRenderFault::EventTimeout),
             2 => Some(ExclusiveRenderFault::EventWaitFailed),
             3 => Some(ExclusiveRenderFault::DeviceWriteFailed),
+            4 => Some(ExclusiveRenderFault::RendererPanicked),
             _ => None,
         }
     }
@@ -521,22 +526,24 @@ pub fn build_exclusive_stream(
     let thread = thread::Builder::new()
         .name("noor-wasapi-exclusive".into())
         .spawn(move || {
-            run_render_thread(
-                device_pref_owned,
-                device_label,
-                desired_sample_rate,
-                channels,
-                grace_secs,
-                latency_mode,
-                render_source_bank,
-                command_tx,
-                event_tx,
-                shutdown_clone,
-                released_clone,
-                force_release_clone,
-                render_fault,
-                init_tx,
-            );
+            run_render_thread_guarded(&released_clone, &render_fault, || {
+                run_render_thread(
+                    device_pref_owned,
+                    device_label,
+                    desired_sample_rate,
+                    channels,
+                    grace_secs,
+                    latency_mode,
+                    render_source_bank,
+                    command_tx,
+                    event_tx,
+                    shutdown_clone,
+                    Arc::clone(&released_clone),
+                    force_release_clone,
+                    Arc::clone(&render_fault),
+                    init_tx,
+                )
+            });
         })
         .map_err(|e| ExclusiveInitFailure::Other(format!("spawn render thread: {e}")))?;
 
@@ -571,6 +578,32 @@ pub fn build_exclusive_stream(
             Err(failure)
         }
     }
+}
+
+struct RenderThreadExitGuard<'a> {
+    released: &'a AtomicBool,
+    fault: &'a AtomicU8,
+}
+
+impl Drop for RenderThreadExitGuard<'_> {
+    fn drop(&mut self) {
+        if thread::panicking() && !self.released.load(Ordering::Acquire) {
+            let _ = self.fault.compare_exchange(
+                0,
+                ExclusiveRenderFault::RendererPanicked as u8,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
+            self.released.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn run_render_thread_guarded(released: &AtomicBool, fault: &AtomicU8, run: impl FnOnce()) {
+    // Declared outside the renderer body so its COM/resource locals unwind
+    // before the runtime can observe release and attempt another acquisition.
+    let _exit = RenderThreadExitGuard { released, fault };
+    run();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2000,6 +2033,7 @@ mod tests {
             ExclusiveRenderFault::EventTimeout,
             ExclusiveRenderFault::EventWaitFailed,
             ExclusiveRenderFault::DeviceWriteFailed,
+            ExclusiveRenderFault::RendererPanicked,
         ] {
             stream.fault.store(failure as u8, Ordering::Release);
             assert_eq!(stream.take_fault(), Some(failure));
@@ -2089,6 +2123,81 @@ mod tests {
             });
         assert_eq!(result, DeviceEventWait::TimedOut);
         assert!(calls <= 8, "immediate event timeouts spun {calls} times");
+    }
+
+    #[test]
+    fn exclusive_renderer_unwind_publishes_fault_after_resources_drop() {
+        struct RenderResource<'a> {
+            released: &'a AtomicBool,
+            dropped: &'a AtomicBool,
+        }
+        impl Drop for RenderResource<'_> {
+            fn drop(&mut self) {
+                assert!(
+                    !self.released.load(Ordering::Acquire),
+                    "release preceded resource teardown"
+                );
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+        let released = AtomicBool::new(false);
+        let fault = AtomicU8::new(0);
+        let dropped = AtomicBool::new(false);
+        let outcome = std::panic::catch_unwind(|| {
+            run_render_thread_guarded(&released, &fault, || {
+                let _resource = RenderResource {
+                    released: &released,
+                    dropped: &dropped,
+                };
+                panic!("injected renderer dependency panic");
+            });
+        });
+        assert!(outcome.is_err());
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(
+            released.load(Ordering::Acquire),
+            "renderer panic left output marked live"
+        );
+        assert_eq!(
+            fault.load(Ordering::Acquire),
+            ExclusiveRenderFault::RendererPanicked as u8
+        );
+    }
+
+    #[test]
+    fn exclusive_renderer_guard_preserves_normal_release_and_prior_fault() {
+        let released = AtomicBool::new(false);
+        let fault = AtomicU8::new(0);
+        run_render_thread_guarded(&released, &fault, || {
+            released.store(true, Ordering::Release)
+        });
+        assert_eq!(fault.load(Ordering::Acquire), 0);
+        assert!(released.load(Ordering::Acquire));
+        released.store(false, Ordering::Release);
+        fault.store(
+            ExclusiveRenderFault::DeviceWriteFailed as u8,
+            Ordering::Release,
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                run_render_thread_guarded(&released, &fault, || panic!("teardown panic"));
+            })
+            .is_err()
+        );
+        assert!(released.load(Ordering::Acquire));
+        assert_eq!(
+            fault.load(Ordering::Acquire),
+            ExclusiveRenderFault::DeviceWriteFailed as u8
+        );
+        // A panic after a completed release must not add a second fault event.
+        fault.store(0, Ordering::Release);
+        assert!(
+            std::panic::catch_unwind(|| {
+                run_render_thread_guarded(&released, &fault, || panic!("post-release panic"));
+            })
+            .is_err()
+        );
+        assert_eq!(fault.load(Ordering::Acquire), 0);
     }
 
     #[test]
