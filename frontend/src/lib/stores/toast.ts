@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 
 export type ToastKind = 'info' | 'success' | 'error';
 
@@ -42,6 +42,18 @@ export function showToast(
 	toasts.update((current) => [...current, { id, message, kind, actions }]);
 	scheduleDismiss(id, ttlMs);
 	return id;
+}
+
+/** Repeated runtime failures should refresh one visible notice instead of stacking. */
+export function showUniqueToast(
+	message: string,
+	kind: ToastKind = 'info',
+	ttlMs: number = DEFAULT_TTL_MS
+): number {
+	const existing = get(toasts).find((toast) => toast.message === message && toast.kind === kind);
+	if (!existing) return showToast(message, kind, ttlMs);
+	updateToast(existing.id, {}, ttlMs);
+	return existing.id;
 }
 
 /** Update an existing toast in place (e.g. live batch progress). Resets its TTL. */
