@@ -2,6 +2,7 @@ pub mod radio_continuation;
 pub mod radio_pipeline;
 pub mod remote;
 pub mod routes;
+pub(crate) mod transport;
 pub mod ws;
 
 use crate::SharedState;
@@ -195,7 +196,7 @@ async fn shutdown_handler(
     // 1s POST timeout drops us and falls through to child.kill().
     let _ = shutdown_tx.send(true);
     let mut s = state.write().await;
-    if let Err(err) = routes::flush_active_listen_session_locked(
+    if let Err(err) = transport::listen::flush_active_listen_session_locked(
         &mut s,
         chrono::Utc::now(),
         crate::playback::player::ListenSessionEndReason::Stopped,

@@ -23,6 +23,7 @@
 		repeatMode,
 		playbackQueue,
 		playerError,
+		dismissPlayerError,
 		refreshPlaybackState,
 		playTrackNow,
 		playQueueItemNow,
@@ -52,16 +53,10 @@
 	import { maybeShowRecsUpgradeNotice } from '$lib/stores/recs_upgrade_notice';
 	import { queueAnnouncement } from '$lib/stores/queue_announcer';
 	import { pendingUndo, consumeUndo } from '$lib/stores/queue_undo';
-	import { formatTrackDuration, getQualityClass } from '$lib/utils/format';
-	import {
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
-	import { api, getStoredToken, setStoredToken, clearStoredToken } from '$lib/api/client';
+	import { api, getStoredToken } from '$lib/api/client';
 	import { getApiBase } from '$lib/api/client';
-	import { remoteApi, RemoteRequestError } from '$lib/api/remote';
-	import { bootstrapRemoteConnection, BoundedRetry, clearRemoteSession, manualPinResponseError, storePairedSession } from '$lib/remote/connection';
+	import { remoteApi } from '$lib/api/remote';
+	import { bootstrapRemoteConnection, BoundedRetry } from '$lib/remote/connection';
 	import { currentDeviceName } from '$lib/remote/device_name';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
 	import Toast from '$lib/components/Toast.svelte';
@@ -70,7 +65,6 @@
 	import DiscoverySetupGuide from '$lib/components/onboarding/DiscoverySetupGuide.svelte';
 	import WelcomeRelease from '$lib/components/onboarding/WelcomeRelease.svelte';
 	import PlayerBar from '$lib/shell/PlayerBar.svelte';
-	import PlayerLayoutSelect from '$lib/shell/PlayerLayoutSelect.svelte';
 	import SidebarNav from '$lib/shell/SidebarNav.svelte';
 	import QuietMode from '$lib/components/QuietMode.svelte';
 	import { openQuietMode } from '$lib/stores/quiet_mode';
@@ -80,7 +74,6 @@
 	import { contextMenu, openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTrackMenu, buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { buildVideoMenu } from '$lib/player/video_menu';
 	import {
 		currentQueueAnchorItem,
 		currentQueueAnchorPosition,
@@ -90,10 +83,15 @@
 	import {
 		SILENT_SOURCE_LABELS,
 		formatQueueSource,
-		queueSourceSlug,
 	} from '$lib/player/queue_source';
-	import { formatPlayerStreamDetail, formatResolutionShort } from '$lib/player/stream_display';
+	import { formatPlayerStreamDetail } from '$lib/player/stream_display';
 	import { queueItemToTidalPlayable, trackToTidalPlayable } from '$lib/utils/track';
+	import PatchInfoDialog from '$lib/shell/PatchInfoDialog.svelte';
+	import QueueEmpty from '$lib/shell/QueueEmpty.svelte';
+	import MobileNowPlayingSheet from '$lib/shell/MobileNowPlayingSheet.svelte';
+	import ConnectGate from '$lib/shell/ConnectGate.svelte';
+	import QueueRow from '$lib/shell/QueueRow.svelte';
+	import VideoQueuePanel from '$lib/shell/VideoQueuePanel.svelte';
 	import ShaderWallpaper from '$lib/components/wallpaper/ShaderWallpaper.svelte';
 	import { wallpaperById } from '$lib/components/wallpaper/shaders';
 	import { wallpaper, wallpaperFps, wallpaperQuality } from '$lib/stores/wallpaper';
@@ -110,6 +108,7 @@
 	} from '$lib/tidal/login';
 	import { scheduleStartupPrewarm } from '$lib/cache/prewarm';
 	import { dataCache } from '$lib/cache/query';
+	import { clearSessionToken, setSessionToken } from '$lib/remote/session_token';
 	import {
 		clearLocalOnboardingComplete,
 		hasLocalOnboardingComplete,
@@ -121,16 +120,10 @@
 		MOBILE_MORE_ROUTES,
 		MOBILE_TAB_ROUTES,
 	} from '$lib/routes/navigation';
-	import {
-		playQueuedVideo,
-		clearVideoSession,
-		videoPanelAnchor,
-		videoSession,
-		videoSessionUpcoming,
-		type VideoSessionItem,
-	} from '$lib/stores/video_session';
+	import { videoSession } from '$lib/stores/video_session';
 	import { isVideoSectionPath } from '$lib/video/section';
 	import VideoDock from '$lib/components/video/VideoDock.svelte';
+	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 
 	let { children } = $props();
 
@@ -148,40 +141,17 @@
 	let isOnboardingRoute = $derived(page.url.pathname.startsWith('/onboarding'));
 	let isRemoteRoute = $derived(page.url.pathname.startsWith('/remote'));
 	let showConnect = $state(false);
-	let connectTokenInput = $state('');
-	let connectMethod = $state<'pairing' | 'pin'>('pairing');
-	// The server refuses the shared PIN from other devices unless the listener
-	// turned PIN sign-in on, so only offer it when it can work.
-	let pinLoginAvailable = $state(false);
-	$effect(() => {
-		if (!showConnect) return;
-		remoteApi.identity().then((identity) => {
-			pinLoginAvailable = identity.pin_login === true;
-			if (!pinLoginAvailable && connectMethod === 'pin') { connectMethod = 'pairing'; connectTokenInput = ''; }
-		}).catch(() => {});
-	});
 	let connectError = $state('');
 	let connectBusy = $state(false);
 	let networkUnavailable = $state(false);
 	const bootstrapRetries = new BoundedRetry(3);
 	let bootstrapRunning = false;
-	let pinInputEl = $state<HTMLInputElement | null>(null);
 	let pkceReloginDismissedThisSession = $state(false);
 	let pkceReloginDismissedForever = $state(false);
 	let cancelStartupPrewarm: (() => void) | null = null;
 
 	function onboardingScope(): string | null {
 		return getStoredToken();
-	}
-
-	function setSessionToken(token: string): void {
-		if (getStoredToken() !== token) dataCache.clear();
-		setStoredToken(token);
-	}
-
-	function clearSessionToken(): void {
-		clearStoredToken();
-		dataCache.clear();
 	}
 
 	async function bootstrapAuthentication(): Promise<void> {
@@ -212,7 +182,6 @@
 			if (result.phase === 'needs-auth') await tryAutoSetup();
 			else {
 				showConnect = true;
-				setTimeout(focusPin, 50);
 			}
 		} finally {
 			connectBusy = false;
@@ -240,56 +209,6 @@
 				}
 			)
 	);
-
-	function handlePinInput(event: Event) {
-		const el = event.target as HTMLInputElement;
-		const code = el.value.replace(/\D/g, '').slice(0, 6);
-		connectTokenInput = code;
-		el.value = code;
-		connectError = '';
-	}
-
-	function focusPin() {
-		pinInputEl?.focus();
-	}
-
-	async function submitConnect() {
-		connectError = '';
-		const t = connectTokenInput.trim();
-		const valid = /^\d{6}$/.test(t);
-		if (!valid) { connectError = 'Enter all 6 digits.'; return; }
-		connectBusy = true;
-		try {
-			if (connectMethod === 'pairing') {
-				const paired = await remoteApi.redeem(t, currentDeviceName());
-				const remembered = storePairedSession(paired);
-				showConnect = false;
-				if (!remembered) showToast('Connected for this session, but this phone could not save the connection.', 'success', 8000);
-				onConnected();
-				return;
-			}
-			const resp = await fetch(`${getApiBase()}/api/status`, {
-				headers: { authorization: `Bearer ${t}` }
-			});
-			const responseError = manualPinResponseError(resp.status);
-			if (responseError) {
-				connectError = responseError;
-				if (resp.status === 401 || resp.status === 403) connectTokenInput = '';
-				setTimeout(focusPin, 0);
-				return;
-			}
-			setSessionToken(t);
-			showConnect = false;
-			onConnected();
-		} catch (error) {
-			clearSessionToken();
-			if (error instanceof RemoteRequestError && error.detail.error === 'PAIRING_INVALID') connectError = 'Temporary code expired or was already used. Create a new one on the computer.';
-			else if (error instanceof RemoteRequestError && error.status === 429) connectError = 'Too many attempts. Wait a moment and create a new code.';
-			else connectError = 'Connection failed. Is the server running?';
-		} finally {
-			connectBusy = false;
-		}
-	}
 
 	let isScrubbing = $state(false);
 	let scrubPosition = $state(0);
@@ -334,7 +253,7 @@
 			_errorDismissTimer = null;
 		}
 		if (err) {
-			_errorDismissTimer = setTimeout(() => playerError.set(null), 6000);
+			_errorDismissTimer = setTimeout(() => dismissPlayerError(), 6000);
 		}
 	});
 	let nowPlayingOpen = $state(false);
@@ -397,11 +316,9 @@
 		}
 	}
 
-	async function openPatchInfo() {
+	function openPatchInfo() {
 		if (!pendingDesktopUpdate) return;
 		patchInfoOpen = true;
-		await tick();
-		patchInstallButton?.focus();
 	}
 
 	function closePatchInfo() {
@@ -409,19 +326,7 @@
 		patchInfoOpen = false;
 	}
 
-	function handlePatchDialogKeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape' && patchInfoOpen) closePatchInfo();
-	}
-
-	let mobileFavoritePending = $state(false);
 	let desktopFavoritePending = $state(false);
-
-	const shuffleLabels: Record<string, string> = {
-		off: 'Shuffle off',
-		genre: 'Genre mix',
-		weighted: 'Smart shuffle',
-		true: 'True random'
-	};
 
 	const shuffleStatusLabels: Record<string, string> = {
 		genre: 'Genre mix',
@@ -434,7 +339,6 @@
 	let serverVersion = $state('');
 	let pendingDesktopUpdate = $state<DesktopUpdateInfo | null>(null);
 	let patchInfoOpen = $state(false);
-	let patchInstallButton = $state<HTMLButtonElement | null>(null);
 	let updateInstallBusy = $state(false);
 	let updateAvailableVersion = $derived(pendingDesktopUpdate?.version ?? null);
 	let sessionModeLine = $derived(
@@ -450,25 +354,6 @@
 	let liveVersionTitle = $derived(
 		updateAvailableVersion ? `View patch v${updateAvailableVersion}` : 'Server build',
 	);
-
-	const shuffleIcons: Record<string, string> = {
-		off: '⇄',
-		genre: '◈',
-		weighted: '◉',
-		true: '⤮'
-	};
-
-	const repeatLabels: Record<string, string> = {
-		off: 'Repeat off',
-		all: 'Repeat all',
-		one: 'Repeat one'
-	};
-
-	const repeatIcons: Record<string, string> = {
-		off: '↻',
-		all: '↺',
-		one: '⊙'
-	};
 
 	const shuffleModeNames: Record<string, string> = {
 		off: 'off',
@@ -774,7 +659,6 @@
 			}
 		} catch {}
 		showConnect = true;
-		setTimeout(focusPin, 50);
 	}
 
 	// After a successful connect, boot the WS + playback state
@@ -923,15 +807,6 @@
 			!isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue);
 	}
 
-	function formatQuality(q: string | null) {
-		if (!q) return '';
-		if (q === 'HI_RES_LOSSLESS') return 'HiRes Lossless';
-		if (q === 'LOSSLESS') return 'Lossless';
-		if (q === 'HIGH') return 'High';
-		if (q === 'LOW') return 'Low';
-		return q.replaceAll('_', ' ');
-	}
-
 	type QueueItemType = (typeof $playbackQueue)[number];
 
 	/**
@@ -962,17 +837,6 @@
 		event.preventDefault();
 		event.stopPropagation();
 		openContextMenu(event, queueRowMenuItems(item), item.track.title);
-	}
-
-	function openVideoQueueMenu(video: VideoSessionItem, event: MouseEvent) {
-		openContextMenu(event, buildVideoMenu(video, { inQueue: true }), video.title);
-	}
-
-	function videoQueueKeydown(video: VideoSessionItem, event: KeyboardEvent) {
-		if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
-		event.preventDefault();
-		event.stopPropagation();
-		openMenuAtElement(event.currentTarget as HTMLElement, buildVideoMenu(video, { inQueue: true }), video.title);
 	}
 
 	function openQueueRowMenuFromButton(item: QueueItemType, event: MouseEvent) {
@@ -1159,32 +1023,12 @@
 		await restoreQueueItems(restorable);
 	}
 
-	function stopPropagation(event: Event) {
-		event.stopPropagation();
-	}
+	// Artwork URL per size, stepping down a size each time one fails to load.
+	const artwork = createArtworkFallback();
+	const artworkCandidate = artwork.candidate;
+	const markArtworkFailed = artwork.markFailed;
 
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
-
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
-	function markArtworkFailed(renderedUrl: string | null | undefined) {
-		if (!renderedUrl) return;
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
-	}
-
-	let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));
 	let mobileMiniArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 320));
-	let mobileNowPlayingArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 640));
 
 	function openNowPlayingMenu(event: MouseEvent) {
 		const track = $currentTrack;
@@ -1297,26 +1141,12 @@
 			videoQueueDrawerOpen = false;
 		}
 	});
-	function formatVideoSourceLabel(source: string, label: string | null): string {
-		if (source === 'mix') return label ?? 'Video mix';
-		if (source === 'search') return label ? `Search: ${label}` : 'Video search';
-		if (source === 'direct') return 'Direct video';
-		return 'Video session';
-	}
-
 	let streamDetailLabel = $derived(formatPlayerStreamDetail({
 		stream: $currentStreamDisplay,
 		runtime: $playbackRuntimeInfo,
 		exclusiveEngaged: $exclusiveStatus.engaged,
 	}));
 	let videoRouteActive = $derived(isVideoSectionPath(page.url.pathname));
-	// The panel's artwork slot doubles as a stage: the video dock plays there
-	// while the panel is open (see VideoDock). Cleared when the panel unmounts.
-	let videoPanelArtWrap = $state<HTMLElement | null>(null);
-	$effect(() => {
-		videoPanelAnchor.set(videoPanelArtWrap);
-		return () => videoPanelAnchor.set(null);
-	});
 	let videoChromeActive = $derived(videoRouteActive && ($videoSession.active || $videoSession.queue.length > 0));
 	let mobilePlayerVisible = $derived(Boolean($currentTrack) && !videoChromeActive);
 	let progressWidth = $derived(
@@ -1372,16 +1202,6 @@
 		nowPlayingOpen = false;
 	});
 
-	async function handleMobileFavoriteToggle() {
-		if (!$currentTrack || mobileFavoritePending) return;
-		mobileFavoritePending = true;
-		try {
-			await toggleTrackFavorite($currentTrack.id);
-		} finally {
-			mobileFavoritePending = false;
-		}
-	}
-
 	async function handleDesktopFavoriteToggle() {
 		if (!$currentTrack || desktopFavoritePending) return;
 		desktopFavoritePending = true;
@@ -1399,65 +1219,52 @@
 	});
 </script>
 
+{#snippet queueRow(item: QueueItemType, reorderable: boolean)}
+	<QueueRow
+		{item}
+		active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue)}
+		played={queueItemIsPlayed(item)}
+		artworkUrl={artworkCandidate(item.track.artwork_url, 320)}
+		onArtworkError={markArtworkFailed}
+		onplay={() => void handleQueueTrackPlay(item)}
+		onkeydown={(event) => handleQueueTrackKeydown(item, event)}
+		onmenu={(event) => openQueueRowMenu(item, event)}
+		onmenubutton={(event) => openQueueRowMenuFromButton(item, event)}
+		onartistmenu={(event) => openQueueArtistContextMenu(item, event)}
+		reorder={reorderable
+			? {
+				row: queueDrag.row,
+				draggable: queueItemCanReorder(item),
+				dragging: $queueDragState.draggingId === item.id,
+				dragOver: $queueDragState.dragOverId === item.id && $queueDragState.draggingId !== item.id,
+			}
+			: undefined}
+	/>
+{/snippet}
+
+{#snippet trackQueueEmpty()}
+	<QueueEmpty title="Nothing is lined up yet.">
+		Pick a track from <a class="queue-empty-link" href="/library">your library</a>, <a class="queue-empty-link" href="/genres">a genre</a>, or <a class="queue-empty-link" href="/playlists">a playlist</a>. Press <kbd class="queue-empty-key">Q</kbd> to collapse the queue.
+	</QueueEmpty>
+{/snippet}
+
+{#snippet queueLoadMore()}
+	{#if sessionQueue.length > queueVisibleCount}
+		<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
+			Load {Math.min(QUEUE_LOAD_MORE_STEP, sessionQueue.length - queueVisibleCount)} more
+			<span class="queue-load-more-rest">({sessionQueue.length - queueVisibleCount} waiting)</span>
+		</button>
+	{/if}
+{/snippet}
+
 {#if showConnect}
-	<div class="connect-backdrop">
-		<div class="connect-panel glass-panel">
-			<div class="connect-brand">
-				<span class="connect-brand-mark">
-					<img src="/noor-icon-transparent.svg" alt="" aria-hidden="true" />
-				</span>
-				<span class="connect-brand-name">NOOR</span>
-			</div>
-			<h2 class="connect-title">Connect to NOORwave</h2>
-			<p class="connect-copy">
-				{connectMethod === 'pairing'
-					? 'Enter the temporary 6-digit code shown beside the QR.'
-					: 'Enter the master recovery PIN from the computer settings.'}
-			</p>
-
-			<button type="button" class="pin-pad" onclick={focusPin} aria-label="Pairing code or PIN input">
-				{#each [0,1,2,3,4,5] as i}
-					<span
-						class="pin-digit"
-						class:filled={i < connectTokenInput.length}
-						class:active={i === connectTokenInput.length && !connectBusy}
-					>
-						{connectTokenInput[i] ?? ''}
-					</span>
-				{/each}
-			</button>
-
-			<input
-				bind:this={pinInputEl}
-				class="pin-hidden-input"
-				inputmode="numeric"
-				pattern="[0-9]*"
-				maxlength="6"
-				autocomplete="one-time-code"
-				value={connectTokenInput}
-				oninput={handlePinInput}
-				onkeydown={(e) => e.key === 'Enter' && void submitConnect()}
-				disabled={connectBusy}
-				aria-label={connectMethod === 'pairing' ? '6-digit temporary pairing code' : '6-digit master recovery PIN'}
-			/>
-			<button class="btn btn-primary" type="button" disabled={connectBusy || !/^\d{6}$/.test(connectTokenInput)} onclick={() => void submitConnect()}>Connect</button>
-			{#if pinLoginAvailable || connectMethod === 'pin'}
-				<button class="btn btn-glass" type="button" disabled={connectBusy} onclick={() => { connectMethod = connectMethod === 'pairing' ? 'pin' : 'pairing'; connectTokenInput = ''; connectError = ''; setTimeout(focusPin, 0); }}>
-					{connectMethod === 'pairing' ? 'Use master PIN instead' : 'Use temporary code instead'}
-				</button>
-			{/if}
-
-			{#if connectError}
-				<p class="connect-error" role="alert" aria-live="assertive">{connectError}</p>
-			{/if}
-			{#if networkUnavailable}
-				<button class="btn btn-primary" type="button" disabled={connectBusy} onclick={retryBootstrapConnection}>Retry connection</button>
-			{/if}
-			{#if connectBusy}
-				<p class="connect-copy">Connecting…</p>
-			{/if}
-		</div>
-	</div>
+	<ConnectGate
+		bind:error={connectError}
+		bootstrapBusy={connectBusy}
+		{networkUnavailable}
+		onretry={retryBootstrapConnection}
+		onconnected={() => { showConnect = false; onConnected(); }}
+	/>
 {/if}
 
 <!-- Skipped on the phone remote: the fixed shader layer shows through and
@@ -1477,8 +1284,6 @@
 	{/if}
 </div>
 
-<svelte:window onkeydown={handlePatchDialogKeydown} />
-
 <ContextMenu />
 <Toast />
 <DiscoverySetupGuide enabled={authReady && onboardingChecked && !isOnboardingRoute && !page.url.pathname.startsWith('/connect')} />
@@ -1489,74 +1294,12 @@
 <ShortcutHelp open={shortcutHelpOpen} onClose={closeShortcutHelp} />
 
 {#if patchInfoOpen && pendingDesktopUpdate}
-	<div class="patch-info-backdrop">
-		<button
-			type="button"
-			class="patch-info-dismiss"
-			aria-label="Close patch information"
-			onclick={closePatchInfo}
-		></button>
-		<div
-			class="patch-info-dialog glass-panel"
-			role="dialog"
-			aria-modal="true"
-			aria-labelledby="patch-info-title"
-			aria-describedby="patch-info-summary"
-		>
-			<header class="patch-info-header">
-				<div class="patch-info-heading">
-					<span class="patch-info-icon" aria-hidden="true">
-						<svg viewBox="0 0 24 24" focusable="false">
-							<path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14" />
-						</svg>
-					</span>
-					<div>
-						<span class="patch-info-eyebrow">Patch available</span>
-						<h2 id="patch-info-title">NOORwave v{pendingDesktopUpdate.version}</h2>
-					</div>
-				</div>
-				<button
-					type="button"
-					class="patch-info-close"
-					aria-label="Close patch information"
-					disabled={updateInstallBusy}
-					onclick={closePatchInfo}
-				>
-					<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-						<path d="m6 6 12 12M18 6 6 18" />
-					</svg>
-				</button>
-			</header>
-
-			<p id="patch-info-summary" class="patch-info-summary">
-				The engineers insist this version is better. Update?
-			</p>
-
-			<section class="patch-notes" aria-labelledby="patch-notes-title">
-				<h3 id="patch-notes-title">What changed</h3>
-				{#if pendingDesktopUpdate.notes}
-					<div class="patch-notes-copy">{pendingDesktopUpdate.notes}</div>
-				{:else}
-					<p class="patch-notes-empty">Release notes were not included with this patch.</p>
-				{/if}
-			</section>
-
-			<footer class="patch-info-actions">
-				<button type="button" class="btn btn-glass" disabled={updateInstallBusy} onclick={closePatchInfo}>
-					I Know Better
-				</button>
-				<button
-					type="button"
-					class="btn btn-primary patch-install-button"
-					disabled={updateInstallBusy}
-					bind:this={patchInstallButton}
-					onclick={() => void installPendingUpdate()}
-				>
-					{updateInstallBusy ? 'Starting…' : 'Trust the Engineers'}
-				</button>
-			</footer>
-		</div>
-	</div>
+	<PatchInfoDialog
+		update={pendingDesktopUpdate}
+		busy={updateInstallBusy}
+		oninstall={() => void installPendingUpdate()}
+		onclose={closePatchInfo}
+	/>
 {/if}
 
 {#if showPkceReloginNotice}
@@ -1704,116 +1447,10 @@
 
 	{#if videoChromeActive}
 		<aside bind:this={bottomPlayerElement} class="now-playing-panel video-queue-panel" class:queue-drawer-open={videoQueueDrawerOpen} aria-label="Video queue">
-			<div class="video-panel-top">
-				<div class="video-panel-heading"><p class="eyebrow">Video session</p><PlayerLayoutSelect effective={effectivePlayerLayout} /></div>
-				<div class="video-panel-art-wrap" bind:this={videoPanelArtWrap}>
-					{#if currentVideoArtwork}
-						<img
-							class="video-panel-art"
-							src={currentVideoArtwork}
-							alt=""
-							onerror={() => markArtworkFailed(currentVideoArtwork)}
-						/>
-					{:else}
-						<div class="video-panel-art placeholder">▶</div>
-					{/if}
-				</div>
-				<div class="video-panel-copy">
-					<strong>{$videoSession.current?.title ?? 'Video queue'}</strong>
-					<span>{$videoSession.current?.artist_name ?? formatVideoSourceLabel($videoSession.source, $videoSession.sourceLabel)}</span>
-				</div>
-				<button id="video-queue-trigger" class="video-queue-trigger" type="button" aria-label="Video queue, {$videoSessionUpcoming.length} up next" aria-expanded={videoQueueDrawerOpen} onclick={() => { videoQueueDrawerOpen = !videoQueueDrawerOpen; }}>Queue {$videoSessionUpcoming.length}</button>
-				<div class="video-panel-actions">
-					<button
-						class="video-panel-chip"
-						class:active={$videoSession.continuous}
-						type="button"
-						aria-pressed={$videoSession.continuous}
-						disabled={!$videoSession.active}
-						onclick={() => $videoSession.continuous ? videoSession.stopRadio() : videoSession.startRadio()}
-					>
-						{$videoSession.continuous ? 'Stop radio' : 'Start radio'}
-					</button>
-					<button
-						class="video-panel-chip"
-						class:active={$videoSession.autoplay}
-						type="button"
-						aria-pressed={$videoSession.autoplay}
-						onclick={() => videoSession.setAutoplay(!$videoSession.autoplay)}
-					>
-						› {$videoSession.autoplay ? 'On' : 'Autoplay'}
-					</button>
-				</div>
-				<p class="video-panel-source" aria-live="polite">
-					{$videoSession.radioIssue ?? ($videoSession.continuous
-						? (!$videoSession.autoplay ? 'Radio paused. Turn on autoplay to resume.'
-							: $videoSession.radioSearching ? `Checking ${$videoSession.radioSeedArtistName ?? 'this artist'} and related artists…`
-							: $videoSession.radioDiscoveryMessage ?? 'Radio checks related artists as the queue plays.')
-						: 'Radio adds new videos beyond this queue.')}
-				</p>
-				{#if $videoSession.continuous && $videoSession.radioHits.length > 0}
-					<div class="video-radio-hits" aria-label="Recent radio discoveries">
-						{#each $videoSession.radioHits as hit, index (`${hit.artist}-${index}`)}
-							<div class="video-radio-hit"><strong>+{hit.count}</strong><span>{hit.count === 1 ? 'video' : 'videos'} from {hit.artist}</span></div>
-						{/each}
-					</div>
-				{/if}
-				{#if $videoSession.error}
-					<p class="video-panel-error">{$videoSession.error}</p>
-				{/if}
-			</div>
+			<VideoQueuePanel layout={effectivePlayerLayout} bind:drawerOpen={videoQueueDrawerOpen} />
 			{#if effectivePlayerLayout === 'bottom' && videoQueueDrawerOpen}
 				<button class="queue-drawer-backdrop" type="button" tabindex="-1" aria-label="Close video queue" onclick={() => { videoQueueDrawerOpen = false; }}></button>
 			{/if}
-
-			<section class="video-panel-queue">
-				<div class="video-panel-queue-head">
-					<span class="eyebrow">Queue</span>
-					<span>{$videoSessionUpcoming.length} up next</span>
-					<button
-						class="video-panel-queue-clear"
-						type="button"
-						title="Clear video queue"
-						onclick={() => clearVideoSession()}
-					>⌫</button>
-				</div>
-				{#if $videoSessionUpcoming.length > 0}
-					<div class="video-panel-list">
-						{#each $videoSessionUpcoming.slice(0, 60) as video, i (`video-${video.tidal_id}-${i}`)}
-							{@const videoArt = artworkCandidate(video.artwork_url, 320)}
-							<button
-								type="button"
-								class="video-panel-row"
-								onclick={() => void playQueuedVideo(video.tidal_id)}
-								oncontextmenu={(event) => openVideoQueueMenu(video, event)}
-								onkeydown={(event) => videoQueueKeydown(video, event)}
-								aria-label={`Play ${video.title}`}
-							>
-								{#if videoArt}
-									<img
-										class="video-panel-row-art"
-										src={videoArt}
-										alt=""
-										onerror={() => markArtworkFailed(videoArt)}
-									/>
-								{:else}
-									<span class="video-panel-row-art placeholder">▶</span>
-								{/if}
-								<span class="video-panel-row-copy">
-									<strong>{video.title}</strong>
-									<span>{video.artist_name ?? 'Unknown artist'}</span>
-								</span>
-								<span class="video-panel-row-time">{formatTrackDuration(video.duration_ms ?? 0)}</span>
-							</button>
-						{/each}
-					</div>
-				{:else}
-					<div class="queue-empty">
-						<p>{$videoSession.continuous ? 'Finding more videos…' : 'No videos up next.'}</p>
-						<span>{$videoSession.continuous ? 'More from this artist and related artists will appear here.' : 'Start radio to keep listening.'}</span>
-					</div>
-				{/if}
-			</section>
 		</aside>
 	{:else}
 	<aside
@@ -1857,7 +1494,7 @@
 			onVolumePreview={(percent) => { displayVolume = percent; }}
 			onVolumeChange={(nextVolume) => void setPlayerVolume(nextVolume)}
 			onRetryPlayerError={async (retry) => { await retry(); }}
-			onDismissPlayerError={() => playerError.set(null)}
+			onDismissPlayerError={() => dismissPlayerError()}
 		/>
 		{#if effectivePlayerLayout === 'bottom' && queueDrawerOpen}
 			<button class="queue-drawer-backdrop" type="button" tabindex="-1" aria-label="Close queue" onclick={() => { queueDrawerOpen = false; }}></button>
@@ -1974,106 +1611,14 @@
 					onpointerdown={(event) => { if (event.target === queueListEl) handleQueueUserScroll(); }}
 				>
 					{#each sessionQueue.slice(0, queueVisibleCount) as item (item.id)}
-						{@const aid = item.track.artist_id}
-						{@const isPending = item.is_pending === true}
-						{@const isPlayed = queueItemIsPlayed(item)}
-						<div
-							role="listitem"
-							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue)}
-							class:played={isPlayed}
-							class:dragging={$queueDragState.draggingId === item.id}
-							class:drag-over={$queueDragState.dragOverId === item.id &&
-								$queueDragState.draggingId !== item.id}
-							class:pending={isPending}
-							class="queue-row"
-							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							data-queue-item-id={item.id}
-							draggable={queueItemCanReorder(item)}
-							oncontextmenu={(event) => openQueueRowMenu(item, event)}
-							use:queueDrag.row={item.id}
-						>
-							<!-- Full-bleed hit target: clicking anywhere on the row that
-							     isn't an interactive child plays/jumps to this track. This is a
-							     div, NOT a button, on purpose: a <button> is an interactive
-							     element and swallows the row's native HTML5 dragstart, so the row
-							     could only be dragged by the 12px grip. role/tabindex keep it
-							     keyboard- and screen-reader-operable. -->
-							<div
-								class="queue-row-hit"
-								role="button"
-								tabindex={0}
-								aria-label={isPending ? `Play ${item.track.title} (resolving)` : `Play ${item.track.title}`}
-								onclick={() => void handleQueueTrackPlay(item)}
-								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
-							></div>
-							<span class="queue-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
-							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
-								{#if isPending}
-									<div class="queue-art placeholder pending-art" title="Resolving track...">
-										<span class="queue-spinner" aria-hidden="true"></span>
-									</div>
-								{:else}
-									{@const queueArt = artworkCandidate(item.track.artwork_url, 320)}
-									{#if queueArt}
-										<img
-											class="queue-art"
-											src={queueArt}
-											alt=""
-											onerror={() => markArtworkFailed(queueArt)}
-										/>
-								{:else}
-									<div class="queue-art placeholder">♫</div>
-									{/if}
-								{/if}
-								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
-							</div>
-
-							<div class="queue-meta">
-								<span class="queue-title">{item.track.title}</span>
-								{#if isPending}
-									<span class="queue-artist pending-label">
-										<span class="queue-inline-spinner" aria-hidden="true"></span>
-										Resolving on TIDAL...
-									</span>
-								{:else if aid && aid > 0}
-									<a
-										class="queue-artist"
-										href="/artists/{aid}"
-										onclick={stopPropagation}
-										oncontextmenu={(event) => openQueueArtistContextMenu(item, event)}
-									>{item.track.artist_name ?? 'Unknown artist'}</a>
-								{:else}
-									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
-								{/if}
-							</div>
-
-							<div class="queue-side">
-								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
-								{#if !isPending}
-									<button
-										class="queue-overflow"
-										aria-label="More actions"
-										title="More actions"
-										onclick={(event) => openQueueRowMenuFromButton(item, event)}
-									>⋯</button>
-								{/if}
-							</div>
-						</div>
+						{@render queueRow(item, true)}
 					{/each}
 				</div>
 			{:else}
-				<div class="queue-empty">
-					<p>Nothing is lined up yet.</p>
-					<span>Pick a track from <a class="queue-empty-link" href="/library">your library</a>, <a class="queue-empty-link" href="/genres">a genre</a>, or <a class="queue-empty-link" href="/playlists">a playlist</a>. Press <kbd class="queue-empty-key">Q</kbd> to collapse the queue.</span>
-				</div>
+				{@render trackQueueEmpty()}
 			{/if}
 
-			{#if sessionQueue.length > queueVisibleCount}
-				<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
-					Load {Math.min(QUEUE_LOAD_MORE_STEP, sessionQueue.length - queueVisibleCount)} more
-					<span class="queue-load-more-rest">({sessionQueue.length - queueVisibleCount} waiting)</span>
-				</button>
-			{/if}
+			{@render queueLoadMore()}
 		</section>
 	</aside>
 	{/if}
@@ -2176,222 +1721,26 @@
 
 	<!-- Now Playing sheet (mobile only) -->
 	{#if nowPlayingOpen && $currentTrack && !videoChromeActive}
-		<button
-			class="mobile-np-backdrop"
-			type="button"
-			aria-label="Close now playing"
-			onclick={() => { nowPlayingOpen = false; }}
-		></button>
-		<div class="mobile-np-sheet" role="dialog" aria-label="Now playing" aria-modal="true">
-			<div class="mobile-np-handle"></div>
-
-			<div class="mobile-np-art-wrap">
-				{#key $currentTrack.artwork_url}
-					{#if mobileNowPlayingArtwork}
-						<img
-							class="mobile-np-art"
-							src={mobileNowPlayingArtwork}
-							alt=""
-							onerror={() => markArtworkFailed(mobileNowPlayingArtwork)}
-						/>
-					{:else}
-						<div class="mobile-np-art placeholder">♫</div>
-					{/if}
-				{/key}
-				{#if $currentStreamDisplay}
-					<span class={`quality-badge mobile-np-quality ${getQualityClass($currentStreamDisplay.audio_quality)}`}>
-						{formatQuality($currentStreamDisplay.audio_quality)}
-					</span>
-					{#if formatResolutionShort($currentStreamDisplay)}
-						<span class="quality-badge mobile-np-resolution" title="Actual playback resolution (bit-depth / kHz)">
-							{formatResolutionShort($currentStreamDisplay)}
-						</span>
-					{/if}
-				{:else if $currentTrack.best_quality}
-					<span class={`quality-badge mobile-np-quality ${getQualityClass($currentTrack.best_quality)}`}>
-						{formatQuality($currentTrack.best_quality)}
-					</span>
-				{/if}
+		<MobileNowPlayingSheet
+			onclose={() => { nowPlayingOpen = false; }}
+			bind:scrubPosition
+			{progressWidth}
+			onscrubstart={beginScrub}
+			onscrubcommit={() => void commitScrub()}
+			{queueCountLabel}
+		>
+		{#if sessionQueue.length > 0}
+			<div class="mobile-np-queue-list" role="list">
+				{#each sessionQueue.slice(0, queueVisibleCount) as item (item.id)}
+					{@render queueRow(item, false)}
+				{/each}
 			</div>
+		{:else}
+			{@render trackQueueEmpty()}
+		{/if}
 
-			<div class="mobile-np-info">
-				<div class="mobile-np-copy">
-					<strong class="mobile-np-title">{$currentTrack.title}</strong>
-					<span class="mobile-np-artist">{$currentTrack.artist_name ?? 'Unknown artist'}</span>
-				</div>
-				<button
-					class="mobile-np-like"
-					class:active={$currentTrack.is_favorite}
-					type="button"
-					aria-label={$currentTrack.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-					disabled={mobileFavoritePending}
-					onclick={() => void handleMobileFavoriteToggle()}
-				>
-					{$currentTrack.is_favorite ? '♥' : '♡'}
-				</button>
-			</div>
-
-			<div class="mobile-np-scrub">
-				<div class="mobile-np-scrub-track" style="--pct: {progressWidth}">
-					<div class="mobile-np-scrub-fill" style="width: {progressWidth}"></div>
-					<input
-						class="mobile-np-scrub-input"
-						type="range"
-						min="0"
-						max={$currentTrack.duration_ms ?? 0}
-						step="1000"
-						bind:value={scrubPosition}
-						oninput={beginScrub}
-						onchange={() => void commitScrub()}
-						disabled={!$currentTrack.duration_ms}
-						aria-label="Seek playback"
-					/>
-				</div>
-				<div class="mobile-np-times">
-					<span>{formatTrackDuration(scrubPosition)}</span>
-					<span>{formatTrackDuration($currentTrack.duration_ms ?? 0)}</span>
-				</div>
-			</div>
-
-			<div class="mobile-np-transport">
-				<button class="mobile-np-btn" type="button" aria-label="Previous" onclick={() => void playPreviousTrack()}>⏮</button>
-				<button class="mobile-np-btn primary" type="button" aria-label="Play or pause" onclick={() => void togglePlayback()}>
-					<PlayPauseIcon playing={$isPlaying} />
-				</button>
-				<button class="mobile-np-btn" type="button" aria-label="Next" onclick={() => void playNextTrack()}>⏭</button>
-			</div>
-
-			<div class="mobile-np-secondary">
-				<button
-					class="mobile-np-chip"
-					class:active={$shuffleMode !== 'off'}
-					type="button"
-					aria-label={shuffleLabels[$shuffleMode]}
-					onclick={() => void cyclePlayerShuffleMode()}
-				>
-					<span>{shuffleIcons[$shuffleMode]}</span>
-					<span>{$shuffleMode === 'off' ? 'Shuffle' : shuffleLabels[$shuffleMode]}</span>
-				</button>
-				<button
-					class="mobile-np-chip"
-					class:active={$repeatMode !== 'off'}
-					type="button"
-					aria-label={repeatLabels[$repeatMode]}
-					onclick={() => void cyclePlayerRepeatMode()}
-				>
-					<span>{repeatIcons[$repeatMode]}</span>
-					<span>{$repeatMode === 'off' ? 'Repeat' : repeatLabels[$repeatMode]}</span>
-				</button>
-				<button
-					class="mobile-np-chip"
-					class:active={$automixEnabled}
-					type="button"
-					aria-label={$automixEnabled ? 'Disable automix' : 'Enable automix'}
-					onclick={() => void togglePlayerAutomix()}
-				>
-					<span aria-hidden="true">
-						<svg width="13" height="13" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg">
-							<path
-								d="M7.5 1.6A5.1 5.1 0 0 0 2.4 6.7v1.2h-.2a1 1 0 0 0-1 1v2.1a1 1 0 0 0 1 1h1.5a.6.6 0 0 0 .6-.6V6.7a3.2 3.2 0 0 1 6.4 0v4.7a.6.6 0 0 0 .6.6h1.5a1 1 0 0 0 1-1V8.9a1 1 0 0 0-1-1h-.2V6.7A5.1 5.1 0 0 0 7.5 1.6z"
-								fill="currentColor"
-							/>
-						</svg>
-					</span>
-					<span>{$automixEnabled ? 'Automix on' : 'Automix'}</span>
-				</button>
-			</div>
-
-			<div class="mobile-np-queue-header">
-				<span class="eyebrow">Up next</span>
-				<span class="mobile-np-queue-count">{queueCountLabel}</span>
-			</div>
-
-			{#if sessionQueue.length > 0}
-				<div class="mobile-np-queue-list" role="list">
-					{#each sessionQueue.slice(0, queueVisibleCount) as item (item.id)}
-						{@const aid = item.track.artist_id}
-						{@const isPending = item.is_pending === true}
-						{@const isPlayed = queueItemIsPlayed(item)}
-						<div
-							role="listitem"
-							class="queue-row"
-							class:active={isQueueItemActive(item, $currentTrack, $currentQueueItemId, $playbackQueue)}
-							class:played={isPlayed}
-							class:pending={isPending}
-							title={isPending ? 'Resolving on TIDAL...' : undefined}
-							oncontextmenu={(event) => openQueueRowMenu(item, event)}
-						>
-							<button
-								class="queue-row-hit"
-								type="button"
-								aria-label={isPending ? `Play ${item.track.title} (resolving)` : `Play ${item.track.title}`}
-								onclick={() => void handleQueueTrackPlay(item)}
-								onkeydown={(event) => handleQueueTrackKeydown(item, event)}
-							></button>
-							<div class="queue-art-wrap" title={formatQueueSource(item.source)}>
-								{#if isPending}
-									<div class="queue-art placeholder pending-art" title="Resolving track...">
-										<span class="queue-spinner" aria-hidden="true"></span>
-									</div>
-								{:else}
-									{@const queueArt = artworkCandidate(item.track.artwork_url, 320)}
-									{#if queueArt}
-										<img
-											class="queue-art"
-											src={queueArt}
-											alt=""
-											onerror={() => markArtworkFailed(queueArt)}
-										/>
-								{:else}
-									<div class="queue-art placeholder">♫</div>
-									{/if}
-								{/if}
-								<span class="queue-source-dot source-{queueSourceSlug(item.source)}" aria-hidden="true"></span>
-							</div>
-							<div class="queue-meta">
-								<span class="queue-title">{item.track.title}</span>
-								{#if isPending}
-									<span class="queue-artist pending-label">
-										<span class="queue-inline-spinner" aria-hidden="true"></span>
-										Resolving on TIDAL...
-									</span>
-								{:else if aid && aid > 0}
-									<a
-										class="queue-artist"
-										href="/artists/{aid}"
-										onclick={stopPropagation}
-										oncontextmenu={(event) => openQueueArtistContextMenu(item, event)}
-									>{item.track.artist_name ?? 'Unknown artist'}</a>
-								{:else}
-									<span class="queue-artist">{item.track.artist_name ?? 'Unknown artist'}</span>
-								{/if}
-							</div>
-							<div class="queue-side">
-								<span class="queue-time">{formatTrackDuration(item.track.duration_ms)}</span>
-								<button
-									class="queue-overflow"
-									aria-label="More actions"
-									title="More actions"
-									onclick={(e) => openQueueRowMenuFromButton(item, e)}
-								>⋯</button>
-							</div>
-						</div>
-					{/each}
-				</div>
-			{:else}
-				<div class="queue-empty">
-					<p>Nothing is lined up yet.</p>
-					<span>Pick a track from <a class="queue-empty-link" href="/library">your library</a>, <a class="queue-empty-link" href="/genres">a genre</a>, or <a class="queue-empty-link" href="/playlists">a playlist</a>. Press <kbd class="queue-empty-key">Q</kbd> to collapse the queue.</span>
-				</div>
-			{/if}
-
-			{#if sessionQueue.length > queueVisibleCount}
-				<button class="queue-load-more" type="button" onclick={loadMoreQueue}>
-					Load {Math.min(QUEUE_LOAD_MORE_STEP, sessionQueue.length - queueVisibleCount)} more
-					<span class="queue-load-more-rest">({sessionQueue.length - queueVisibleCount} waiting)</span>
-				</button>
-			{/if}
-		</div>
+		{@render queueLoadMore()}
+		</MobileNowPlayingSheet>
 	{/if}
 </div>
 {/if}
@@ -2665,309 +2014,22 @@
 		background: rgba(0, 0, 0, 0.22);
 	}
 
-	.video-panel-heading {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 8px;
-	}
-
-	.video-queue-trigger {
-		min-height: 40px;
-		padding: 0 12px;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-		font: inherit;
-		cursor: pointer;
-	}
-
-	.video-queue-trigger:hover,
-	.video-queue-trigger[aria-expanded='true'] {
-		border-color: var(--accent-line);
-		color: var(--accent-strong);
-		background: var(--accent-soft);
-	}
-
-	.app-shell:not([data-player-layout='bottom']) .video-queue-trigger { display: none; }
-
 	.app-shell[data-player-layout='bottom'] .video-queue-panel { padding: 12px 16px; }
 	.app-shell[data-player-layout='bottom'] .video-queue-panel.queue-drawer-open {
 		z-index: var(--z-overlay);
 	}
-	.app-shell[data-player-layout='bottom'] .video-panel-top {
-		display: grid;
-		grid-template-columns: 96px minmax(140px, 1fr) minmax(180px, 1.25fr) auto auto 40px;
-		grid-template-areas: 'art copy source actions queue heading';
-		align-items: center;
-		column-gap: 12px;
-	}
-	.app-shell[data-player-layout='bottom'] .video-panel-heading { grid-area: heading; }
-	.app-shell[data-player-layout='bottom'] .video-panel-heading .eyebrow { display: none; }
-	.app-shell[data-player-layout='bottom'] .video-panel-art-wrap { grid-area: art; width: 96px; }
-	.app-shell[data-player-layout='bottom'] .video-panel-copy { grid-area: copy; }
-	.app-shell[data-player-layout='bottom'] .video-panel-actions { grid-area: actions; }
-	.app-shell[data-player-layout='bottom'] .video-queue-trigger { grid-area: queue; }
-	.app-shell[data-player-layout='bottom'] .video-panel-source { grid-area: source; }
-	.app-shell[data-player-layout='bottom'] .video-panel-source {
-		min-width: 0;
-		margin: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.app-shell[data-player-layout='bottom'] .video-radio-hits { display: none; }
-	.app-shell[data-player-layout='bottom'] .video-panel-error { grid-column: 2 / -1; }
-	.app-shell[data-player-layout='bottom'] .video-panel-queue { display: none; }
-	.app-shell[data-player-layout='bottom'] .video-queue-panel.queue-drawer-open .video-panel-queue {
-		position: fixed;
-		z-index: calc(var(--z-overlay) + 1);
-		right: 16px;
-		bottom: calc(var(--bottom-player-height) + var(--space-2));
-		display: flex;
-		flex-direction: column;
-		width: min(420px, calc(100vw - 32px));
-		max-height: min(60dvh, 520px);
-		padding: 16px;
-		border: 1px solid var(--border-strong);
-		border-radius: var(--radius-lg);
-		background: var(--bg-surface-strong);
-		box-shadow: var(--panel-shadow);
-		overflow-y: auto;
-	}
 
-	/* ── Mobile-only elements: hidden at desktop ─────────── */
 	.video-queue-panel {
 		padding: 18px;
 		gap: 16px;
 	}
 
-	.video-panel-top,
-	.video-panel-queue {
-		min-width: 0;
-	}
-
-	.video-panel-top {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.video-panel-art-wrap {
-		aspect-ratio: 16 / 9;
-		width: 100%;
-		border-radius: 8px;
-		overflow: hidden;
-		background: color-mix(in srgb, var(--instrument-surface-strong) 75%, transparent);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.video-panel-art {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		display: block;
-	}
-
-	.video-panel-art.placeholder {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		color: var(--text-secondary);
-		font-size: var(--font-size-2xl);
-	}
-
-	.video-panel-copy {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		min-width: 0;
-	}
-
-	.video-panel-copy strong {
-		color: var(--text-primary);
-		font-size: var(--font-size-md);
-		line-height: var(--line-height-snug);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.video-panel-copy span,
-	.video-panel-source,
-	.video-panel-queue-head {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-	}
-
-	.video-panel-actions {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 10px;
-	}
-
-	.video-panel-source { margin: -4px 0 0; line-height: var(--line-height-normal); }
-	.video-radio-hits {
-		max-height: 76px;
-		overflow-y: auto;
-		display: grid;
-		gap: 5px;
-		padding: 2px 0;
-	}
-	.video-radio-hit {
-		display: flex;
-		align-items: baseline;
-		gap: 7px;
-		min-width: 0;
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
-	}
-	.video-radio-hit strong { color: var(--accent-strong); white-space: nowrap; }
-	.video-radio-hit span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-	.video-panel-chip {
-		border: 1px solid var(--border-subtle);
-		border-radius: 999px;
-		background: color-mix(in srgb, var(--instrument-surface) 80%, transparent);
-		color: var(--text-primary);
-		font: inherit;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-bold);
-		padding: 6px 10px;
-		cursor: pointer;
-	}
-
-	.video-panel-chip.active {
-		border-color: color-mix(in srgb, var(--accent-line) 70%, transparent);
-		background: color-mix(in srgb, var(--accent-soft) 75%, transparent);
-	}
-
-	.video-panel-error {
-		margin: 0;
-		color: var(--state-error);
-		font-size: var(--font-size-xs);
-	}
-
-	.video-panel-queue {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		border-top: 1px solid var(--border-subtle);
-		padding-top: 14px;
-	}
-
-	.video-panel-queue-head {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 10px;
-		padding-bottom: 10px;
-	}
-
-	.video-panel-queue-clear {
-		margin-left: auto;
-		background: none;
-		border: none;
-		color: var(--text-muted);
-		cursor: pointer;
-		font-size: var(--font-size-sm);
-		padding: 0.15rem 0.3rem;
-		border-radius: 4px;
-		line-height: 1;
-	}
-	.video-panel-queue-clear:hover {
-		color: var(--text-primary);
-		background: var(--bg-hover);
-	}
-
-	.video-panel-list {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		overflow-y: auto;
-		padding-right: 2px;
-	}
-
-	.video-panel-row {
-		width: 100%;
-		min-width: 0;
-		display: grid;
-		grid-template-columns: 48px minmax(0, 1fr) auto;
-		align-items: center;
-		gap: 10px;
-		border: 1px solid transparent;
-		border-radius: 8px;
-		background: transparent;
-		color: inherit;
-		font: inherit;
-		text-align: left;
-		padding: 7px;
-		cursor: pointer;
-	}
-
-	.video-panel-row:hover,
-	.video-panel-row:focus-visible,
-	.video-panel-row.active {
-		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
-		border-color: var(--border-subtle);
-		outline: none;
-	}
-
-	.video-panel-row.active {
-		border-color: color-mix(in srgb, var(--accent-line) 60%, transparent);
-	}
-
-	.video-panel-row-art {
-		width: 48px;
-		aspect-ratio: 16 / 9;
-		border-radius: 4px;
-		object-fit: cover;
-		background: color-mix(in srgb, var(--instrument-surface-strong) 85%, transparent);
-	}
-
-	.video-panel-row-art.placeholder {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-sm);
-	}
-
-	.video-panel-row-copy {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
-	}
-
-	.video-panel-row-copy strong,
-	.video-panel-row-copy span {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.video-panel-row-copy strong {
-		font-size: var(--font-size-sm);
-		color: var(--text-primary);
-	}
-
-	.video-panel-row-copy span,
-	.video-panel-row-time {
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
-	}
-
+	/* ── Mobile-only elements: hidden at desktop ─────────── */
 	.mobile-top-bar,
 	.mobile-mini-player-bar,
 	.mobile-tab-bar,
 	.mobile-more-backdrop,
-	.mobile-more-sheet,
-	.mobile-np-backdrop,
-	.mobile-np-sheet {
+	.mobile-more-sheet {
 		display: none;
 	}
 
@@ -3256,9 +2318,6 @@
 	   but flatten translates, rotations, and the spinner so vestibular
 	   users don't get unwanted motion in the queue surface. */
 	@media (prefers-reduced-motion: reduce) {
-		.queue-row,
-		.queue-row:hover,
-		.queue-row:focus-within,
 		.queue-icon-btn:hover:not(:disabled),
 		.queue-undo-btn:hover,
 		.queue-jump-chip:hover,
@@ -3267,10 +2326,6 @@
 		}
 		.now-playing-panel.queue-expanded .queue-expand-btn {
 			transform: none;
-		}
-		.queue-spinner,
-		.queue-inline-spinner {
-			animation: none;
 		}
 		.queue-undo-bar {
 			animation: none;
@@ -3471,316 +2526,6 @@
 		pointer-events: none;
 	}
 
-	.queue-row {
-		position: relative;
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 6px 8px;
-		border: 1px solid color-mix(in srgb, var(--instrument-border) 46%, transparent);
-		border-radius: var(--radius-sm);
-		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
-		transition:
-			border-color var(--motion-fast),
-			background var(--motion-fast),
-			transform var(--motion-fast);
-	}
-
-	/* Full-bleed click target sits behind the row content. Non-interactive
-	   content (art, title, time) has pointer-events:none so clicks fall through
-	   to it; interactive children (grip, artist link, overflow) re-enable. */
-	.queue-row-hit {
-		position: absolute;
-		inset: 0;
-		z-index: 0;
-		margin: 0;
-		padding: 0;
-		border: none;
-		background: transparent;
-		border-radius: inherit;
-		cursor: pointer;
-	}
-
-	.queue-row-hit:focus-visible {
-		outline: 2px solid var(--accent-strong);
-		outline-offset: -2px;
-	}
-
-	.queue-row > .queue-grip,
-	.queue-row > .queue-art-wrap,
-	.queue-row > .queue-meta,
-	.queue-row > .queue-side {
-		position: relative;
-		z-index: 1;
-	}
-
-	.queue-art-wrap,
-	.queue-meta,
-	.queue-time {
-		pointer-events: none;
-	}
-
-	.queue-grip,
-	.queue-meta .queue-artist[href],
-	.queue-overflow {
-		pointer-events: auto;
-	}
-
-	.queue-row:hover,
-	.queue-row:focus-within {
-		border-color: color-mix(in srgb, var(--instrument-border) 72%, transparent);
-		background: color-mix(in srgb, var(--instrument-surface-strong) 86%, transparent);
-		transform: translateY(-1px);
-	}
-
-	.queue-row.active .queue-title {
-		color: var(--playing);
-	}
-
-	.queue-row.active {
-		border-color: color-mix(in srgb, var(--playing) 28%, transparent);
-		background: var(--playing-soft);
-	}
-
-	.queue-row.active::before {
-		content: '';
-		position: absolute;
-		left: 0;
-		top: 10px;
-		bottom: 10px;
-		width: 2px;
-		border-radius: 2px;
-		background: var(--playing);
-	}
-
-	.queue-row.played {
-		opacity: 0.56;
-		background: color-mix(in srgb, var(--instrument-surface) 48%, transparent);
-	}
-
-	.queue-row.played:hover,
-	.queue-row.played:focus-within {
-		opacity: 0.78;
-	}
-
-	.queue-row.played .queue-grip {
-		visibility: hidden;
-	}
-
-	.queue-row.dragging {
-		opacity: 0.4;
-		cursor: grabbing;
-	}
-
-	/* The dropped row lands at the target's index, i.e. above it, so the
-	   accent line sits on the target's top edge to read as "drops here". */
-	.queue-row.drag-over {
-		border-color: var(--accent-line);
-		background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
-		box-shadow: inset 0 2px 0 var(--accent-strong);
-	}
-
-	.queue-row.pending {
-		cursor: default;
-		opacity: 0.78;
-	}
-
-	.queue-row.pending:hover,
-	.queue-row.pending:focus-within {
-		transform: none;
-	}
-
-	.queue-row.pending .queue-title {
-		color: var(--text-secondary);
-	}
-
-	.queue-art.placeholder.pending-art {
-		opacity: 0.7;
-	}
-
-	.queue-spinner {
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		border: 2px solid var(--border-subtle, rgba(255, 255, 255, 0.15));
-		border-top-color: var(--text-secondary, rgba(255, 255, 255, 0.7));
-		animation: queue-spinner-spin 0.9s linear infinite;
-	}
-
-	@keyframes queue-spinner-spin {
-		to { transform: rotate(360deg); }
-	}
-
-	.queue-grip {
-		flex-shrink: 0;
-		width: 12px;
-		text-align: center;
-		font-size: var(--font-size-xs);
-		line-height: 1;
-		color: var(--text-tertiary);
-		cursor: grab;
-		opacity: 0.35;
-		transition: opacity var(--motion-fast);
-		user-select: none;
-	}
-
-	.queue-row:hover .queue-grip,
-	.queue-row:focus-within .queue-grip {
-		opacity: 0.8;
-	}
-
-	.queue-row.dragging .queue-grip {
-		cursor: grabbing;
-	}
-
-	.queue-art-wrap {
-		position: relative;
-		flex-shrink: 0;
-		line-height: 0;
-	}
-
-	.queue-art {
-		width: 42px;
-		height: 42px;
-		border-radius: 12px;
-		object-fit: cover;
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		display: block;
-	}
-
-	.queue-art.placeholder {
-		display: grid;
-		place-items: center;
-		color: var(--text-tertiary);
-	}
-
-	/* The dot in the bottom-right of queue artwork encodes where the track came
-	   from; its colours live in app.css so the legend on the automix page can
-	   reuse them. Tooltip on .queue-art-wrap names the source. */
-
-	.queue-meta {
-		min-width: 0;
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	.queue-title {
-		font-weight: var(--font-weight-semibold);
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-snug);
-		margin: 0;
-		/* Two-line clamp lets long titles breathe instead of chopping words. */
-		display: -webkit-box;
-		-webkit-box-orient: vertical;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		overflow: hidden;
-		overflow-wrap: anywhere;
-		word-break: break-word;
-	}
-
-	.queue-artist {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-		line-height: var(--line-height-snug);
-		text-decoration: none;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 100%;
-	}
-
-	a.queue-artist {
-		cursor: pointer;
-	}
-
-	a.queue-artist:hover {
-		color: var(--text-primary);
-		text-decoration: underline;
-	}
-
-	.queue-artist.pending-label {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		color: var(--text-tertiary);
-	}
-
-	.queue-inline-spinner {
-		width: 10px;
-		height: 10px;
-		border-radius: 999px;
-		border: 1.5px solid var(--border-subtle, rgba(255, 255, 255, 0.15));
-		border-top-color: var(--text-secondary, rgba(255, 255, 255, 0.7));
-		animation: queue-spinner-spin 0.9s linear infinite;
-		flex-shrink: 0;
-	}
-
-	.queue-time,
-	.queue-empty span {
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
-	}
-
-	.queue-side {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 6px;
-		flex-shrink: 0;
-		margin-left: auto;
-	}
-
-	/* Single overflow button replaces the old cluster of hover pills: low-key by
-	   default, brightens on row hover/focus. The context menu holds every action
-	   (play next, favourite, radio, remove), so the row stays calm. */
-	.queue-overflow {
-		width: 28px;
-		height: 28px;
-		padding: 0;
-		display: inline-grid;
-		place-items: center;
-		border-radius: 999px;
-		border: 1px solid transparent;
-		background: transparent;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-md);
-		line-height: 1;
-		cursor: pointer;
-		opacity: 0.55;
-		transition: background var(--motion-fast), color var(--motion-fast),
-			border-color var(--motion-fast), opacity var(--motion-fast);
-	}
-
-	.queue-row:hover .queue-overflow,
-	.queue-row:focus-within .queue-overflow {
-		opacity: 1;
-	}
-
-	@media (hover: none) {
-		.queue-overflow { opacity: 1; }
-	}
-
-	.queue-overflow:hover {
-		background: color-mix(in srgb, var(--instrument-surface-strong) 92%, transparent);
-		border-color: color-mix(in srgb, var(--instrument-border) 70%, transparent);
-		color: var(--text-primary);
-	}
-
-	.queue-empty {
-		padding: 18px 0;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.queue-empty p {
-		font-weight: var(--font-weight-semibold);
-	}
-
 	.queue-empty-link {
 		color: var(--text-secondary);
 		text-decoration: underline;
@@ -3835,15 +2580,6 @@
 		.workspace {
 			padding: calc(24px + var(--safe-top)) calc(24px + var(--safe-right)) calc(40px + var(--safe-bottom)) calc(24px + var(--safe-left));
 		}
-	}
-
-	@media (max-width: 1050px) and (min-width: 680px) {
-		.app-shell[data-player-layout='bottom'] .video-panel-top {
-			grid-template-columns: 72px minmax(0, 1fr) auto auto 40px;
-			grid-template-areas: 'art copy actions queue heading';
-		}
-		.app-shell[data-player-layout='bottom'] .video-panel-art-wrap { width: 72px; }
-		.app-shell[data-player-layout='bottom'] .video-panel-source { display: none; }
 	}
 
 	@media (max-width: 1239px) and (min-width: 680px) {
@@ -3957,6 +2693,10 @@
 			grid-template-columns: 1fr;
 			grid-template-rows: auto;
 			background: transparent;
+			/* The desktop compositor-layer transform would make this page-tall
+			   shell the containing block for the fixed mini player, tab bar and
+			   sheets, pinning them to the end of the page instead of the screen. */
+			transform: none;
 		}
 		.workspace { grid-area: auto; }
 
@@ -4287,264 +3027,6 @@
 			font-size: var(--font-size-md);
 		}
 
-		/* ── Now Playing sheet ── */
-		.mobile-np-backdrop {
-			position: fixed;
-			inset: 0;
-			background: rgba(0, 0, 0, 0.52);
-			z-index: 50;
-			border: none;
-			padding: 0;
-			cursor: default;
-		}
-
-		.mobile-np-sheet {
-			position: fixed;
-			left: 0;
-			right: 0;
-			bottom: 0;
-			max-height: 92dvh;
-			overflow-y: auto;
-			-webkit-overflow-scrolling: touch;
-			background: var(--bg-elevated);
-			border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-			border-top: 1px solid var(--border-subtle);
-			z-index: 51;
-			padding: 12px 20px calc(var(--safe-bottom) + 24px);
-			display: flex;
-			flex-direction: column;
-			gap: 16px;
-			box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.32);
-			animation: np-sheet-up var(--motion-slow) both;
-		}
-
-		@keyframes np-sheet-up {
-			from { transform: translateY(100%); }
-			to   { transform: translateY(0); }
-		}
-
-		.mobile-np-handle {
-			width: 36px;
-			height: 4px;
-			border-radius: 999px;
-			background: var(--border-strong);
-			margin: 0 auto;
-			flex-shrink: 0;
-		}
-
-		.mobile-np-art-wrap {
-			position: relative;
-			width: min(260px, calc(100vw - 80px));
-			aspect-ratio: 1;
-			border-radius: 20px;
-			overflow: hidden;
-			align-self: center;
-			background: var(--bg-surface);
-			border: 1px solid var(--border-subtle);
-			flex-shrink: 0;
-		}
-
-		.mobile-np-art {
-			width: 100%;
-			height: 100%;
-			object-fit: cover;
-			display: block;
-		}
-
-		.mobile-np-art.placeholder {
-			display: grid;
-			place-items: center;
-			color: var(--text-tertiary);
-			font-size: var(--font-size-4xl);
-		}
-
-		.mobile-np-quality {
-			position: absolute;
-			top: 10px;
-			right: 10px;
-		}
-
-		.mobile-np-resolution {
-			position: absolute;
-			top: 38px;
-			right: 10px;
-			font-variant-numeric: tabular-nums;
-			font-size: var(--font-size-xs);
-			letter-spacing: 0.04em;
-			opacity: 0.85;
-		}
-
-		.mobile-np-info {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 12px;
-			min-width: 0;
-		}
-
-		.mobile-np-copy {
-			display: flex;
-			flex-direction: column;
-			gap: 4px;
-			min-width: 0;
-			flex: 1;
-		}
-
-		.mobile-np-title {
-			font-family: var(--font-display);
-			font-size: var(--font-size-lg);
-			line-height: var(--line-height-tight);
-			letter-spacing: -0.01em;
-			white-space: nowrap;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			display: block;
-		}
-
-		.mobile-np-artist {
-			color: var(--text-secondary);
-			font-size: var(--font-size-sm);
-			white-space: nowrap;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			display: block;
-		}
-
-		.mobile-np-like {
-			width: 42px;
-			height: 42px;
-			border-radius: 50%;
-			display: grid;
-			place-items: center;
-			font-size: var(--font-size-lg);
-			color: var(--text-secondary);
-			flex-shrink: 0;
-			border: none;
-			background: none;
-			cursor: pointer;
-			transition: color var(--motion-fast), transform var(--motion-fast);
-			-webkit-tap-highlight-color: transparent;
-		}
-
-		.mobile-np-like:active { transform: scale(0.88); }
-		.mobile-np-like.active { color: #ff4d6d; }
-
-		.mobile-np-scrub {
-			display: flex;
-			flex-direction: column;
-			gap: 8px;
-		}
-
-		.mobile-np-scrub-track {
-			position: relative;
-			height: 4px;
-			border-radius: 999px;
-			background: var(--border-subtle);
-		}
-
-		.mobile-np-scrub-fill {
-			position: absolute;
-			top: 0;
-			left: 0;
-			height: 100%;
-			background: var(--accent);
-			border-radius: inherit;
-			pointer-events: none;
-		}
-
-		.mobile-np-scrub-input {
-			position: absolute;
-			inset: -14px 0;
-			width: 100%;
-			opacity: 0;
-			cursor: pointer;
-		}
-
-		.mobile-np-times {
-			display: flex;
-			justify-content: space-between;
-			color: var(--text-secondary);
-			font-size: var(--font-size-xs);
-			font-variant-numeric: tabular-nums;
-		}
-
-		.mobile-np-transport {
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			gap: 20px;
-		}
-
-		.mobile-np-btn {
-			width: 48px;
-			height: 48px;
-			border-radius: 50%;
-			display: grid;
-			place-items: center;
-			background: var(--bg-surface);
-			border: 1px solid var(--border-subtle);
-			color: var(--text-primary);
-			font-size: var(--font-size-lg);
-			cursor: pointer;
-			transition: transform var(--motion-fast), opacity var(--motion-fast);
-			-webkit-tap-highlight-color: transparent;
-		}
-
-		.mobile-np-btn:active { transform: scale(0.92); }
-
-		.mobile-np-btn.primary {
-			width: 60px;
-			height: 60px;
-			background: var(--accent);
-			border-color: transparent;
-			color: var(--text-on-accent);
-			font-size: var(--font-size-xl);
-			box-shadow: 0 8px 24px var(--accent-glow);
-		}
-
-		.mobile-np-secondary {
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			gap: 10px;
-			flex-wrap: wrap;
-		}
-
-		.mobile-np-chip {
-			display: inline-flex;
-			align-items: center;
-			gap: 6px;
-			padding: 8px 14px;
-			border-radius: 999px;
-			border: 1px solid var(--border-subtle);
-			background: var(--bg-surface);
-			color: var(--text-secondary);
-			font-size: var(--font-size-xs);
-			font-weight: var(--font-weight-semibold);
-			cursor: pointer;
-			transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
-			-webkit-tap-highlight-color: transparent;
-		}
-
-		.mobile-np-chip.active {
-			background: var(--accent-soft);
-			border-color: var(--accent-line);
-			color: var(--accent-strong);
-		}
-
-		.mobile-np-queue-header {
-			display: flex;
-			align-items: baseline;
-			justify-content: space-between;
-			padding-top: 8px;
-			border-top: 1px solid var(--border-subtle);
-		}
-
-		.mobile-np-queue-count {
-			color: var(--text-secondary);
-			font-size: var(--font-size-sm);
-		}
-
 		.mobile-np-queue-list {
 			display: flex;
 			flex-direction: column;
@@ -4552,200 +3034,7 @@
 		}
 	}
 
-	/* ── Small phones (≤ 760px): queue touch tweaks ─────── */
-	@media (max-width: 760px) {
-		.queue-row { align-items: flex-start; }
-		.queue-side { align-items: flex-end; }
-		.queue-time { display: none; }
-		/* Overflow stays tappable without a hover state on touch. */
-		.queue-overflow { opacity: 1; }
-	}
-
-	/* ─── Connect screen ───────────────────── */
-
-	.patch-info-backdrop {
-		position: fixed;
-		inset: 0;
-		z-index: var(--z-modal, 80);
-		display: grid;
-		place-items: center;
-		padding: 20px;
-		background: rgba(0, 0, 0, 0.62);
-		backdrop-filter: blur(10px);
-	}
-
-	.patch-info-dismiss {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		border: 0;
-		background: transparent;
-		cursor: default;
-	}
-
-	.patch-info-dialog {
-		position: relative;
-		width: min(100%, 560px);
-		max-height: min(720px, calc(100svh - 40px));
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		border-radius: 8px;
-		box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
-	}
-
-	.patch-info-header {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: 16px;
-		padding: 24px 24px 14px;
-	}
-
-	.patch-info-heading {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		min-width: 0;
-	}
-
-	.patch-info-icon {
-		width: 38px;
-		height: 38px;
-		flex: 0 0 38px;
-		display: grid;
-		place-items: center;
-		border: 1px solid color-mix(in srgb, var(--state-warning, #ffcc66) 58%, transparent);
-		border-radius: 50%;
-		background: color-mix(in srgb, var(--state-warning, #ffcc66) 18%, transparent);
-		color: color-mix(in srgb, var(--state-warning, #ffcc66) 84%, white);
-	}
-
-	.patch-info-icon svg,
-	.patch-info-close svg {
-		width: 20px;
-		height: 20px;
-		fill: none;
-		stroke: currentColor;
-		stroke-width: 1.8;
-		stroke-linecap: round;
-		stroke-linejoin: round;
-	}
-
-	.patch-info-eyebrow {
-		display: block;
-		margin-bottom: 2px;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.patch-info-dialog h2 {
-		margin: 0;
-		font-size: var(--font-size-xl);
-		letter-spacing: 0;
-	}
-
-	.patch-info-close {
-		width: 34px;
-		height: 34px;
-		flex: 0 0 34px;
-		display: grid;
-		place-items: center;
-		border: 0;
-		border-radius: 6px;
-		background: transparent;
-		color: var(--text-tertiary);
-		cursor: pointer;
-	}
-
-	.patch-info-close:hover,
-	.patch-info-close:focus-visible {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-		outline: none;
-	}
-
-	.patch-info-summary {
-		margin: 0;
-		padding: 0 24px 20px;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-normal);
-	}
-
-	.patch-notes {
-		min-height: 120px;
-		overflow-y: auto;
-		padding: 18px 24px;
-		border-block: 1px solid var(--border-subtle);
-		background: color-mix(in srgb, var(--instrument-surface) 45%, transparent);
-	}
-
-	.patch-notes h3 {
-		margin: 0 0 10px;
-		font-size: var(--font-size-sm);
-		letter-spacing: 0;
-	}
-
-	.patch-notes-copy,
-	.patch-notes-empty {
-		margin: 0;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-normal);
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
-	}
-
-	.patch-info-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: 10px;
-		padding: 18px 24px 22px;
-	}
-
-	.patch-install-button {
-		min-width: 176px;
-	}
-
-	@media (max-width: 560px) {
-		.patch-info-backdrop {
-			padding: 12px;
-		}
-
-		.patch-info-dialog {
-			max-height: calc(100svh - 24px);
-		}
-
-		.patch-info-header {
-			padding: 20px 18px 12px;
-		}
-
-		.patch-info-summary,
-		.patch-notes {
-			padding-inline: 18px;
-		}
-
-		.patch-info-actions {
-			padding: 16px 18px 18px;
-		}
-
-		.patch-install-button {
-			min-width: 0;
-		}
-	}
-
-	@media (max-width: 420px) {
-		.patch-info-actions {
-			flex-direction: column;
-		}
-
-		.patch-info-actions .btn {
-			width: 100%;
-		}
-	}
+	/* --- TIDAL re-login notice --- */
 
 	.pkce-relogin-backdrop {
 		position: fixed;
@@ -4783,127 +3072,5 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 10px;
-	}
-
-	.connect-backdrop {
-		position: fixed;
-		inset: 0;
-		z-index: var(--z-tooltip);
-		background: var(--bg-base, #0d0d12);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 24px;
-	}
-
-	.connect-panel {
-		width: 100%;
-		max-width: 400px;
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-		padding: 32px;
-		border-radius: var(--radius-lg, 16px);
-	}
-
-	.connect-brand {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		margin-bottom: 4px;
-	}
-
-	.connect-brand-mark {
-		width: 36px;
-		height: 36px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.connect-brand-mark img {
-		width: 100%;
-		height: 100%;
-		object-fit: contain;
-	}
-
-	.connect-brand-name {
-		font-size: var(--font-size-lg);
-		font-weight: 800;
-		letter-spacing: 0.12em;
-		color: var(--text-primary);
-	}
-
-	.connect-title {
-		font-size: var(--font-size-lg);
-		font-weight: var(--font-weight-bold);
-		color: var(--text-primary);
-	}
-
-	.connect-copy {
-		font-size: var(--font-size-sm);
-		color: var(--text-secondary);
-		line-height: var(--line-height-normal);
-	}
-
-	.pin-pad {
-		display: flex;
-		gap: 10px;
-		justify-content: center;
-		margin: 8px 0 4px;
-		background: none;
-		border: none;
-		padding: 0;
-		cursor: text;
-	}
-
-	.pin-digit {
-		flex: 0 0 auto;
-		width: 44px;
-		height: 56px;
-		border-radius: var(--radius-sm, 8px);
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-family: var(--font-mono, monospace);
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-semibold);
-		color: var(--text-primary);
-		transition: border-color var(--motion-fast), background var(--motion-fast);
-	}
-
-	.pin-digit.filled {
-		background: var(--accent-soft);
-		border-color: var(--accent-line);
-	}
-
-	.pin-digit.active {
-		border-color: var(--accent);
-		box-shadow: 0 0 0 3px var(--accent-soft);
-	}
-
-	.pin-hidden-input {
-		position: absolute;
-		opacity: 0;
-		pointer-events: none;
-		width: 1px;
-		height: 1px;
-	}
-
-	.connect-error {
-		font-size: var(--font-size-sm);
-		color: #ffb0b0;
-		text-align: center;
-	}
-
-	@media (max-width: 420px) {
-		.pin-digit {
-			width: 40px;
-			height: 52px;
-			font-size: var(--font-size-xl);
-		}
-		.pin-pad { gap: 8px; }
 	}
 </style>

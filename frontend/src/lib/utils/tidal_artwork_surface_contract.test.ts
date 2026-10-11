@@ -12,6 +12,8 @@ function source(path: string): string {
 
 const playerBar = source('lib/shell/PlayerBar.svelte');
 const appShell = source('routes/+layout.svelte');
+const videoPanel = source('lib/shell/VideoQueuePanel.svelte');
+const mobileSheet = source('lib/shell/MobileNowPlayingSheet.svelte');
 // The artist view (hero artwork, rails) is shared by the library and TIDAL
 // routes via ArtistDetail; both route files are thin wrappers.
 const sharedArtistView = source('routes/artists/ArtistDetail.svelte');
@@ -24,22 +26,25 @@ const artworkImage = source('lib/components/ui/ArtworkImage.svelte');
 
 describe('TIDAL artwork surface contracts', () => {
 	test('player and app shell artwork uses allowed sizes with error fallback', () => {
-		expect(playerBar).toContain('tidalArtworkFallbackSizes');
+		expect(playerBar).toContain('createArtworkFallback()');
 		expect(playerBar).toContain('let nowPlayingArtwork = $derived(artworkCandidate(track?.artwork_url, 640));');
 		expect(playerBar).toContain('onerror={() => markArtworkFailed(nowPlayingArtwork)}');
 		expect(playerBar).not.toContain('src={track.artwork_url}');
 
-		expect(appShell).toContain('tidalArtworkFallbackSizes');
-		expect(appShell).toContain('let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));');
-		expect(appShell).toContain('let mobileNowPlayingArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 640));');
-		expect(appShell).toContain('const queueArt = artworkCandidate(item.track.artwork_url, 320)');
+		expect(appShell).toContain('createArtworkFallback()');
+		expect(videoPanel).toContain('let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));');
+		expect(mobileSheet).toContain('let mobileNowPlayingArtwork = $derived(artworkCandidate($currentTrack?.artwork_url, 640));');
+		expect(mobileSheet).not.toContain('src={$currentTrack.artwork_url}');
+		expect(appShell).toContain('artworkUrl={artworkCandidate(item.track.artwork_url, 320)}');
+		expect(appShell).toContain('onArtworkError={markArtworkFailed}');
 		expect(appShell).not.toContain('src={$currentTrack.artwork_url}');
 		expect(appShell).not.toContain('src={item.track.artwork_url}');
 		expect(appShell).not.toContain('src={video.artwork_url}');
+		expect(videoPanel).not.toContain('src={video.artwork_url}');
 	});
 
 	test('artist routes render TIDAL artwork through allowed sizes with fallbacks', () => {
-		expect(sharedArtistView).toContain('tidalArtworkFallbackSizes');
+		expect(sharedArtistView).toContain('createArtworkFallback()');
 		expect(sharedArtistView).toContain('let heroPortraitSrc = $derived(artworkCandidate(heroPortraitUrl, 640));');
 		expect(sharedArtistView).toContain('let heroBackdropSrc = $derived(artworkCandidate(heroBackdropUrl, 1280));');
 		expect(sharedArtistView).toContain('onerror={() => markArtworkFailed(heroBackdropSrc)}');

@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 const source = readFileSync(resolve(import.meta.dirname, '../src/routes/+layout.svelte'), 'utf8');
 const settingsSource = readFileSync(resolve(import.meta.dirname, '../src/routes/settings/+page.svelte'), 'utf8');
+const dialogSource = readFileSync(resolve(import.meta.dirname, '../src/lib/shell/PatchInfoDialog.svelte'), 'utf8');
 const traySource = readFileSync(resolve(import.meta.dirname, '../../noor-app/src/tray.rs'), 'utf8');
 
 describe('layout status copy', () => {
@@ -31,10 +32,11 @@ describe('layout status copy', () => {
 		expect(source).toContain('class="live-version patch-available"');
 		expect(source).toContain('View patch v${updateAvailableVersion}');
 		expect(source).toContain('onclick={() => void openPatchInfo()}');
-		expect(source).toContain('class="patch-info-dialog glass-panel"');
-		expect(source).toContain('The engineers insist this version is better. Update?');
-		expect(source).toContain('Trust the Engineers');
-		expect(source).toContain('I Know Better');
+		expect(source).toContain('<PatchInfoDialog');
+		expect(dialogSource).toContain('class="patch-info-dialog glass-panel"');
+		expect(dialogSource).toContain('The engineers insist this version is better. Update?');
+		expect(dialogSource).toContain('Trust the Engineers');
+		expect(dialogSource).toContain('I Know Better');
 		expect(source).not.toContain('window.confirm(');
 		expect(source).toContain("await invoke('install_pending_update');");
 	});

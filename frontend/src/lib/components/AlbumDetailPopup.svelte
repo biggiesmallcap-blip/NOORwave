@@ -6,14 +6,10 @@
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { formatTrackDuration } from '$lib/utils/format';
-	import {
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
 	import { portal } from '$lib/actions/portal';
 	import ActionBar from '$lib/components/ui/ActionBar.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
+	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 	import { goto } from '$app/navigation';
 
 	let { album, tracks, loading, onClose, isLocal = true, onPlay, onShuffle, onPlayFrom, artistHref = null, albumHref = null }: {
@@ -49,7 +45,10 @@
 		 */
 		albumHref?: string | null;
 	} = $props();
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	// Artwork URL per size, stepping down a size each time one fails to load.
+	const artwork = createArtworkFallback();
+	const artworkCandidate = artwork.candidate;
+	const markArtworkFailed = artwork.markFailed;
 	let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));
 
 	// Scroll-to-dismiss. The track list scrolls normally; once it can't scroll
@@ -97,23 +96,6 @@
 		e.preventDefault();
 		e.stopPropagation();
 		requestClose();
-	}
-
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
-	function markArtworkFailed(renderedUrl: string | null | undefined) {
-		if (!renderedUrl) return;
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
 	}
 
 	function handleKey(e: KeyboardEvent) {

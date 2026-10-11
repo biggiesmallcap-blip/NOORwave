@@ -93,7 +93,6 @@
 			if (runtimeResponse) {
 				runtimeAvailable = runtimeResponse.available;
 				runtime = runtimeResponse.runtime;
-				currentStreamDisplay.set(runtimeResponse.stream ?? null);
 			}
 			audioStats = statsResponse?.stats ?? null;
 			discoveryStatus = discoveryResponse?.status ?? null;

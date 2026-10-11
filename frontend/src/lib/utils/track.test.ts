@@ -10,6 +10,7 @@ import {
 	albumEntryStartIndex,
 	albumEntryToMixedQueueItem,
 	currentTrackMatchesTracks,
+	libraryTrackToTidalPlayable,
 	mergeAlbumTracks,
 	queueItemToTidalPlayable,
 	tidalDiscographyTrackToPlayable,
@@ -63,6 +64,31 @@ describe('trackToTidalPlayable', () => {
 			is_in_library: true,
 			is_favorite: false,
 		});
+	});
+});
+
+describe('libraryTrackToTidalPlayable', () => {
+	test('keeps the library row and all TIDAL ids for an owned TIDAL track', () => {
+		const playable = libraryTrackToTidalPlayable({ ...baseTrack, source: 'tidal' });
+		expect(playable).toMatchObject({
+			tidal_id: baseTrack.tidal_id,
+			local_id: 42,
+			is_in_library: true,
+			artist_tidal_id: 1001,
+			album_tidal_id: 2002,
+		});
+	});
+
+	test('fills a missing artist id from the page context', () => {
+		const playable = libraryTrackToTidalPlayable(
+			{ ...baseTrack, artist_tidal_id: null },
+			{ artistTidalId: 77 },
+		);
+		expect(playable?.artist_tidal_id).toBe(77);
+	});
+
+	test('returns null for a local-only track', () => {
+		expect(libraryTrackToTidalPlayable({ ...baseTrack, tidal_id: null })).toBeNull();
 	});
 });
 

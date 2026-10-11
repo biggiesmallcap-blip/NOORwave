@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+	artworkFallbackCandidate,
 	firstArtworkUrl,
 	tidalArtworkFallbackSizes,
 	upscaleTidalArtwork,
@@ -129,5 +130,30 @@ describe('tidalArtworkFallbackSizes', () => {
 
 	test('returns no retry sizes for malformed TIDAL image paths', () => {
 		expect(tidalArtworkFallbackSizes('https://resources.tidal.com/images//640x640.jpg', 320)).toEqual([]);
+	});
+});
+
+describe('artworkFallbackCandidate', () => {
+	const art = 'https://resources.tidal.com/images/bc8d/cf41/640x640.jpg';
+	const at = (size: number) => `https://resources.tidal.com/images/bc8d/cf41/${size}x${size}.jpg`;
+
+	test('renders the requested size while nothing has failed', () => {
+		expect(artworkFallbackCandidate(art, 640, () => false)).toBe(at(640));
+	});
+
+	test('steps to the next fallback size once a URL has failed', () => {
+		const failed = new Set([at(640), at(320)]);
+		expect(artworkFallbackCandidate(art, 640, (url) => failed.has(url))).toBe(at(750));
+	});
+
+	test('gives up when every size failed, and for a missing URL', () => {
+		expect(artworkFallbackCandidate(art, 640, () => true)).toBeNull();
+		expect(artworkFallbackCandidate(null, 640, () => false)).toBeNull();
+	});
+
+	test('a failed non-TIDAL URL has nothing to fall back to', () => {
+		const other = 'https://img.example/cover.jpg';
+		expect(artworkFallbackCandidate(other, 320, () => false)).toBe(other);
+		expect(artworkFallbackCandidate(other, 320, (url) => url === other)).toBeNull();
 	});
 });

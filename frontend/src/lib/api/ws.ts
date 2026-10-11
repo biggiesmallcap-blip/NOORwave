@@ -25,6 +25,7 @@ export type WsMessage =
 	| { type: 'track_skipped'; track_id: number; title: string; reason: string }
 	| { type: 'library_synced' }
 	| { type: 'tidal_content_settings_changed' }
+	| { type: 'tidal_session_changed' }
 	| { type: 'radio_similarity_computed'; pairs: number }
 	| { type: 'musicbrainz_enriched' }
 	| { type: 'sync_progress'; service: string; progress: number }
@@ -200,6 +201,9 @@ export function connectWebSocket() {
 				void refreshPlaybackRuntime();
 			}
 			if (data?.type === 'connected') {
+				void loadTidalStatus();
+			}
+			if (data?.type === 'tidal_session_changed') {
 				void loadTidalStatus();
 			}
 			if (data?.type === 'sync_progress' && data?.service === 'tidal') {

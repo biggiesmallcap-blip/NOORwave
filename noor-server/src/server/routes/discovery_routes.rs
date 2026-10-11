@@ -584,13 +584,13 @@ pub async fn spawn_discovery_training(
     cancel.store(false, Ordering::SeqCst);
 
     tokio::spawn(async move {
-        let (event_tx, http_client, tidal_http_client, tidal_tokens) = {
+        let (event_tx, http_client, session, tidal_tokens) = {
             let guard = state.read().await;
             (
                 guard.event_tx.clone(),
                 guard.http_client.clone(),
-                guard.tidal_http_client.clone(),
-                guard.tidal_tokens.clone(),
+                guard.tidal.clone(),
+                guard.tidal.tokens(),
             )
         };
         let lastfm = LastFmClient::load(http_client, &db);
@@ -602,8 +602,7 @@ pub async fn spawn_discovery_training(
                 .flatten(),
         };
         let tidal = tokens.map(|tokens| {
-            TidalClient::with_http(tidal_http_client, tokens.access_token, tokens.country_code)
-                .with_metadata_store(db.clone())
+            TidalClient::for_session(session, &tokens.country_code).with_metadata_store(db.clone())
         });
         let external_refresh_clients =
             discovery_learning::ExternalProviderRefreshClients { lastfm, tidal };

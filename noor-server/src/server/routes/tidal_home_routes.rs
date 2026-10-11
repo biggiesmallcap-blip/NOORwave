@@ -126,15 +126,15 @@ pub(super) async fn get_tidal_mixes(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
     // Persisted-tokens fallback covers the cold-boot race: the home page
-    // mounts before `tidal_status` has rehydrated `state.tidal_tokens` from
+    // mounts before `tidal_status` has rehydrated `state.tidal` from
     // disk, so a direct in-memory check returns 503 even though the user is
     // connected. Other TIDAL endpoints follow this same pattern.
-    let (tokens, tidal_http_client, mixes_cache) = {
+    let (tokens, tidal_session, mixes_cache) = {
         let in_memory = {
             let s = state.read().await;
             (
-                s.tidal_tokens.clone(),
-                s.tidal_http_client.clone(),
+                s.tidal.tokens(),
+                s.tidal.clone(),
                 s.tidal_mixes_cache.clone(),
             )
         };
@@ -165,23 +165,10 @@ pub(super) async fn get_tidal_mixes(
             ));
         }
     }
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
     let mixes = match client.get_my_mixes().await {
         Ok(mixes) => mixes,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry = super::recover_tidal_client(&state, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            retry.get_my_mixes().await.map_err(|e| {
-                tracing::warn!("TIDAL get_my_mixes failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_my_mixes failed: {e}");
             return Err(StatusCode::BAD_GATEWAY);
@@ -201,12 +188,12 @@ pub(super) async fn get_tidal_mixes(
 pub(super) async fn get_tidal_radio_stations(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let (tokens, tidal_http_client, radio_cache) = {
+    let (tokens, tidal_session, radio_cache) = {
         let in_memory = {
             let s = state.read().await;
             (
-                s.tidal_tokens.clone(),
-                s.tidal_http_client.clone(),
+                s.tidal.tokens(),
+                s.tidal.clone(),
                 s.tidal_radio_stations_cache.clone(),
             )
         };
@@ -236,23 +223,10 @@ pub(super) async fn get_tidal_radio_stations(
         }
     }
 
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
     let stations = match client.get_my_radio_stations().await {
         Ok(s) => s,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry = super::recover_tidal_client(&state, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            retry.get_my_radio_stations().await.map_err(|e| {
-                tracing::warn!("TIDAL get_my_radio_stations failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_my_radio_stations failed: {e}");
             return Err(StatusCode::BAD_GATEWAY);
@@ -275,23 +249,19 @@ pub(super) async fn get_tidal_home_modules(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
     let started_at = Instant::now();
-    let (tokens, tidal_http_client, page_modules_cache) = {
+    let (tokens, page_modules_cache) = {
         let in_memory = {
             let s = state.read().await;
-            (
-                s.tidal_tokens.clone(),
-                s.tidal_http_client.clone(),
-                s.tidal_page_modules_cache.clone(),
-            )
+            (s.tidal.tokens(), s.tidal_page_modules_cache.clone())
         };
         match in_memory.0 {
-            Some(t) => (Some(t), in_memory.1, in_memory.2),
+            Some(t) => (Some(t), in_memory.1),
             None => {
                 let persisted = super::load_persisted_tidal_tokens(&state)
                     .await
                     .ok()
                     .flatten();
-                (persisted, in_memory.1, in_memory.2)
+                (persisted, in_memory.1)
             }
         }
     };
@@ -300,8 +270,7 @@ pub(super) async fn get_tidal_home_modules(
     };
 
     let (modules, cache_hit) =
-        load_tidal_home_modules_cached(&state, &tokens, tidal_http_client, &page_modules_cache)
-            .await?;
+        load_tidal_home_modules_cached(&state, &tokens, &page_modules_cache).await?;
     let elapsed_ms = started_at.elapsed().as_millis();
     if elapsed_ms >= ROUTE_TIMING_INFO_THRESHOLD_MS {
         tracing::info!(
@@ -336,23 +305,19 @@ pub(super) async fn get_tidal_discover_module_items(
     let module_id = normalize_tidal_module_id(&module_id)?;
     let limit = normalize_tidal_module_items_limit(params.get("limit").map(String::as_str));
 
-    let (tokens, tidal_http_client, page_modules_cache) = {
+    let (tokens, page_modules_cache) = {
         let in_memory = {
             let s = state.read().await;
-            (
-                s.tidal_tokens.clone(),
-                s.tidal_http_client.clone(),
-                s.tidal_page_modules_cache.clone(),
-            )
+            (s.tidal.tokens(), s.tidal_page_modules_cache.clone())
         };
         match in_memory.0 {
-            Some(t) => (Some(t), in_memory.1, in_memory.2),
+            Some(t) => (Some(t), in_memory.1),
             None => {
                 let persisted = super::load_persisted_tidal_tokens(&state)
                     .await
                     .ok()
                     .flatten();
-                (persisted, in_memory.1, in_memory.2)
+                (persisted, in_memory.1)
             }
         }
     };
@@ -360,13 +325,8 @@ pub(super) async fn get_tidal_discover_module_items(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    let (modules, home_cache_hit) = load_tidal_home_modules_cached(
-        &state,
-        &tokens,
-        tidal_http_client.clone(),
-        &page_modules_cache,
-    )
-    .await?;
+    let (modules, home_cache_hit) =
+        load_tidal_home_modules_cached(&state, &tokens, &page_modules_cache).await?;
 
     let Some(module) = modules.into_iter().find(|m| m.id == module_id) else {
         return Err(StatusCode::NOT_FOUND);
@@ -376,33 +336,14 @@ pub(super) async fn get_tidal_discover_module_items(
     // Modules without a `dataApiPath` (e.g. ALBUM_LIST already returning all
     // items inline) just echo back the preview items. That's the whole set.
     let items = if let Some(path) = module.more_path.as_deref() {
-        let access_token = tokens.access_token.clone();
         let country_code = tokens.country_code.clone();
-        let live = TidalClient::with_http(tidal_http_client, access_token, country_code)
+        let live = TidalClient::for_session(state.read().await.tidal.clone(), &country_code)
             .with_metadata_store(state.read().await.db.clone());
         match live
             .get_module_items_via_path(path, &module_kind, limit)
             .await
         {
             Ok(items) if !items.is_empty() => items,
-            Err(e) if super::error_looks_like_auth(&e) => {
-                match super::recover_tidal_client(&state, &tokens).await {
-                    Ok(retry_client) => match retry_client
-                        .get_module_items_via_path(path, &module_kind, limit)
-                        .await
-                    {
-                        Ok(items) if !items.is_empty() => items,
-                        _ => module.items,
-                    },
-                    Err(refresh_err) => {
-                        tracing::warn!(
-                            ?refresh_err,
-                            "TIDAL discover module refresh failed; serving preview items"
-                        );
-                        module.items
-                    }
-                }
-            }
             _ => module.items, // fall back to the preview if the show-more call fails or returns 0
         }
     } else {
@@ -453,19 +394,19 @@ pub(super) async fn get_tidal_mix_tracks(
     let mix_id = normalize_tidal_mix_id(&mix_id)
         .map_err(|status| (status, Json(json!({ "error": "invalid TIDAL mix id" }))))?;
 
-    let (tokens, tidal_http_client) = {
+    let (tokens, tidal_session) = {
         let s = state.read().await;
-        let tidal_http = s.tidal_http_client.clone();
-        let in_memory = s.tidal_tokens.clone();
+        let tidal_session = s.tidal.clone();
+        let in_memory = s.tidal.tokens();
         drop(s);
         match in_memory {
-            Some(t) => (Some(t), tidal_http),
+            Some(t) => (Some(t), tidal_session),
             None => {
                 let persisted = super::load_persisted_tidal_tokens(&state)
                     .await
                     .ok()
                     .flatten();
-                (persisted, tidal_http)
+                (persisted, tidal_session)
             }
         }
     };
@@ -475,33 +416,10 @@ pub(super) async fn get_tidal_mix_tracks(
             Json(json!({ "error": "TIDAL not connected" })),
         ));
     };
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
     let items = match client.get_mix_tracks(mix_id).await {
         Ok(items) => items,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry_client =
-                super::recover_tidal_client(&state, &tokens)
-                    .await
-                    .map_err(|refresh_err| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(json!({
-                                "error": format!("TIDAL session refresh failed: {}", refresh_err)
-                            })),
-                        )
-                    })?;
-            retry_client.get_mix_tracks(mix_id).await.map_err(|e2| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e2.to_string() })),
-                )
-            })?
-        }
         Err(e) => {
             return Err((
                 StatusCode::BAD_GATEWAY,
@@ -626,12 +544,12 @@ async fn fetch_page_modules(
     state: SharedState,
     page_path: String,
 ) -> Result<Json<Value>, StatusCode> {
-    let (tokens, tidal_http_client, page_modules_cache) = {
+    let (tokens, tidal_session, page_modules_cache) = {
         let in_memory = {
             let s = state.read().await;
             (
-                s.tidal_tokens.clone(),
-                s.tidal_http_client.clone(),
+                s.tidal.tokens(),
+                s.tidal.clone(),
                 s.tidal_page_modules_cache.clone(),
             )
         };
@@ -650,12 +568,8 @@ async fn fetch_page_modules(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
     let cache_key = tidal_page_modules_cache_key(&tokens.country_code, &page_path);
     if let Some(cached) = get_cached_tidal_page_modules(&page_modules_cache, &cache_key) {
         return Ok(Json(
@@ -664,15 +578,6 @@ async fn fetch_page_modules(
     }
     let modules = match client.get_page_modules(&page_path).await {
         Ok(m) => m,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry = super::recover_tidal_client(&state, &tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            retry.get_page_modules(&page_path).await.map_err(|e| {
-                tracing::warn!("TIDAL get_page_modules({page_path}) failed after refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_page_modules({page_path}) failed: {e}");
             return Err(StatusCode::BAD_GATEWAY);
@@ -687,7 +592,6 @@ async fn fetch_page_modules(
 async fn load_tidal_home_modules_cached(
     state: &SharedState,
     tokens: &crate::services::tidal::auth::TidalTokens,
-    tidal_http_client: reqwest::Client,
     page_modules_cache: &TidalPageModulesCache,
 ) -> Result<(Vec<TidalHomeModule>, bool), StatusCode> {
     let cache_key =
@@ -696,23 +600,10 @@ async fn load_tidal_home_modules_cached(
         return Ok((cached, true));
     }
 
-    let client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
+    let client = TidalClient::for_session(state.read().await.tidal.clone(), &tokens.country_code)
+        .with_metadata_store(state.read().await.db.clone());
     let modules = match client.get_home_modules().await {
         Ok(m) => m,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let retry = super::recover_tidal_client(state, tokens)
-                .await
-                .map_err(|_| StatusCode::BAD_GATEWAY)?;
-            retry.get_home_modules().await.map_err(|e| {
-                tracing::warn!("TIDAL get_home_modules failed after token refresh: {e}");
-                StatusCode::BAD_GATEWAY
-            })?
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_home_modules failed: {e}");
             return Err(StatusCode::BAD_GATEWAY);
@@ -763,7 +654,7 @@ pub(super) async fn get_tidal_moods(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
     let started_at = Instant::now();
-    let (tokens, tidal_http_client) = load_tidal_session(&state).await;
+    let tokens = load_tidal_session(&state).await;
     let Some(tokens) = tokens else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -830,17 +721,10 @@ pub(super) async fn get_tidal_moods(
         let mood_cache_bg = mood_cache.clone();
         let page_modules_cache_bg = page_modules_cache.clone();
         let tokens_bg = tokens.clone();
-        let tidal_http_client_bg = tidal_http_client.clone();
         tokio::spawn(async move {
             let _refresh_guard = refresh_guard;
-            refresh_tidal_moods_cache(
-                state_bg,
-                mood_cache_bg,
-                page_modules_cache_bg,
-                tokens_bg,
-                tidal_http_client_bg,
-            )
-            .await;
+            refresh_tidal_moods_cache(state_bg, mood_cache_bg, page_modules_cache_bg, tokens_bg)
+                .await;
         });
     } else if pending_probe_count > 0 {
         tracing::debug!(
@@ -882,38 +766,15 @@ async fn refresh_tidal_moods_cache(
     mood_cache: TidalMoodCategoriesCache,
     page_modules_cache: TidalPageModulesCache,
     tokens: crate::services::tidal::auth::TidalTokens,
-    tidal_http_client: reqwest::Client,
 ) {
     let started_at = Instant::now();
-    let mut active_client = TidalClient::with_http(
-        tidal_http_client.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .with_metadata_store(state.read().await.db.clone());
-    let mut active_country_code = tokens.country_code.clone();
+    let active_client =
+        TidalClient::for_session(state.read().await.tidal.clone(), &tokens.country_code)
+            .with_metadata_store(state.read().await.db.clone());
+    let active_country_code = tokens.country_code.clone();
     let db = state.read().await.db.clone();
     let raw = match active_client.get_page_raw("pages/moods").await {
         Ok(r) => r,
-        Err(e) if super::error_looks_like_auth(&e) => {
-            let Ok((retry, refreshed)) =
-                super::recover_tidal_client_with_tokens(&state, &tokens).await
-            else {
-                tracing::warn!("TIDAL get_tidal_moods refresh failed");
-                return;
-            };
-            match retry.get_page_raw("pages/moods").await {
-                Ok(r) => {
-                    active_country_code = refreshed.country_code;
-                    active_client = retry;
-                    r
-                }
-                Err(e) => {
-                    tracing::warn!("TIDAL get_tidal_moods failed after refresh: {e}");
-                    return;
-                }
-            }
-        }
         Err(e) => {
             tracing::warn!("TIDAL get_tidal_moods failed: {e}");
             cache_default_moods_with_thumbnails(
@@ -1471,23 +1332,14 @@ pub(super) async fn get_tidal_mood_page(
 // Shared TIDAL session loader -- mirrors the inline block other handlers use.
 async fn load_tidal_session(
     state: &SharedState,
-) -> (
-    Option<crate::services::tidal::auth::TidalTokens>,
-    reqwest::Client,
-) {
-    let in_memory = {
-        let s = state.read().await;
-        (s.tidal_tokens.clone(), s.tidal_http_client.clone())
-    };
-    match in_memory.0 {
-        Some(t) => (Some(t), in_memory.1),
-        None => {
-            let persisted = super::load_persisted_tidal_tokens(state)
-                .await
-                .ok()
-                .flatten();
-            (persisted, in_memory.1)
-        }
+) -> Option<crate::services::tidal::auth::TidalTokens> {
+    let in_memory = state.read().await.tidal.tokens();
+    match in_memory {
+        Some(t) => Some(t),
+        None => super::load_persisted_tidal_tokens(state)
+            .await
+            .ok()
+            .flatten(),
     }
 }
 

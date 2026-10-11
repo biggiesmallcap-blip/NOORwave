@@ -8,7 +8,7 @@ vi.mock('$lib/api/client', () => ({
 }));
 
 import { api } from '$lib/api/client';
-import { playbackSeekRevision, setPlayerPosition } from './player';
+import { playbackSeekRevision, setPlayerPosition, setPlayerStateForTests } from './player';
 
 const state = {
 	current_track: null, current_queue_item_id: null, is_playing: false, position_ms: 5000,
@@ -16,7 +16,7 @@ const state = {
 	automix_enabled: false, automix_discover_new: false, automix_use_learning: true, automix_allow_external: false
 } as PlaybackState;
 
-beforeEach(() => { vi.mocked(api.setPlaybackPosition).mockReset(); playbackSeekRevision.set(0); });
+beforeEach(() => { vi.mocked(api.setPlaybackPosition).mockReset(); setPlayerStateForTests({ playbackSeekRevision: 0 }); });
 
 describe('accepted seeks invalidate a cached DJ animation', () => {
 	test('a successful seek advances the revision before the next DJ status poll', async () => {

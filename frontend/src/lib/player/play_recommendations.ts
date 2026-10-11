@@ -1,10 +1,11 @@
 import { api, type ProviderRecommendationItem, type TidalPlayable } from '$lib/api/client';
+import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 import {
 	playAlbum,
 	playArtist,
 	playTidalAlbum,
 	playTidalTracksNow,
-	playerError,
+	reportPlayerError,
 } from '$lib/stores/player';
 import {
 	findAlbumMatch,
@@ -64,7 +65,7 @@ export async function playRecommendationAlbum(item: ProviderRecommendationItem):
 	const resolved = await resolveRecommendationAlbum(item);
 	if (resolved?.localId) return playAlbum(resolved.localId);
 	if (resolved?.tidalId) return playTidalAlbum(resolved.tidalId);
-	playerError.set({ message: "Couldn't find that album on Tidal." });
+	reportPlayerError("Couldn't find that album on Tidal.");
 }
 
 export async function playRecommendationArtist(item: ProviderRecommendationItem): Promise<void> {
@@ -72,31 +73,21 @@ export async function playRecommendationArtist(item: ProviderRecommendationItem)
 	if (resolved?.localId) return playArtist(resolved.localId);
 	const tidalId = resolved?.tidalId ?? null;
 	if (!tidalId) {
-		playerError.set({ message: "Couldn't find that artist on Tidal." });
+		reportPlayerError("Couldn't find that artist on Tidal.");
 		return;
 	}
 	try {
 		const profile = await api.getTidalArtistProfile(tidalId);
 		const tracks: TidalPlayable[] = (profile.top_tracks ?? []).map((track) => ({
-			tidal_id: track.tidal_id,
-			title: track.title,
+			...tidalDiscographyTrackToPlayable(track, { artistTidalId: tidalId }),
 			artist_name: track.artist_name ?? item.artist_name ?? item.title,
-			album_title: track.album_title,
-			artwork_url: track.artwork_url,
-			duration_ms: track.duration_ms,
-			artist_tidal_id: track.artist_tidal_id ?? tidalId,
-			album_tidal_id: track.album_tidal_id ?? null,
-			track_id: track.track_id,
-			local_id: track.track_id ?? null,
-			is_in_library: track.is_in_library,
-			is_favorite: track.is_favorite,
 		}));
 		if (!tracks.length) {
-			playerError.set({ message: 'No playable tracks for that artist yet.' });
+			reportPlayerError('No playable tracks for that artist yet.');
 			return;
 		}
 		await playTidalTracksNow(tracks, item.title);
 	} catch {
-		playerError.set({ message: "Couldn't load that artist's top tracks." });
+		reportPlayerError("Couldn't load that artist's top tracks.");
 	}
 }

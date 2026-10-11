@@ -8,6 +8,7 @@ const watch = readFileSync(join(here, 'watch/+page.svelte'), 'utf8');
 const sectionLayout = readFileSync(join(here, '+layout.svelte'), 'utf8');
 const search = readFileSync(join(here, '../../lib/components/video/VideoSearchResults.svelte'), 'utf8');
 const layoutSource = readFileSync(join(here, '../+layout.svelte'), 'utf8');
+const videoPanel = readFileSync(join(here, '../../lib/shell/VideoQueuePanel.svelte'), 'utf8');
 
 describe('video search results contract', () => {
 	test('guards video search pagination against stale queries', () => {
@@ -73,17 +74,20 @@ describe('watch page contract', () => {
 		expect(layoutSource).toContain("shell.style.setProperty('--bottom-player-height'");
 		expect(layoutSource).toContain('new ResizeObserver(updateBottomPlayerHeight)');
 		expect(sectionLayout).toContain('max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom))');
-		expect(layoutSource).toContain('bottom: calc(var(--bottom-player-height) + var(--space-2));');
+		expect(videoPanel).toContain('bottom: calc(var(--bottom-player-height) + var(--space-2));');
+		// The drawer list is positioned from the layout's open-panel class.
+		expect(videoPanel).toContain(":global(.app-shell[data-player-layout='bottom'] .video-queue-panel.queue-drawer-open) .video-panel-queue {");
+		expect(videoPanel).not.toContain(':global(:global(');
 		expect(layoutSource).toMatch(
 			/\.app-shell\[data-player-layout='bottom'\] \.video-queue-panel\.queue-drawer-open \{[^}]*z-index: var\(--z-overlay\);/
 		);
 	});
 
 	test('keeps the bottom video player compact and discovery copy contained', () => {
-		expect(layoutSource).toContain("grid-template-areas: 'art copy source actions queue heading';");
-		expect(layoutSource).toContain(".app-shell[data-player-layout='bottom'] .video-panel-source");
-		expect(layoutSource).toContain('text-overflow: ellipsis;');
-		expect(layoutSource).toContain(".app-shell[data-player-layout='bottom'] .video-radio-hits { display: none; }");
+		expect(videoPanel).toContain("grid-template-areas: 'art copy source actions queue heading';");
+		expect(videoPanel).toContain(":global(.app-shell[data-player-layout='bottom']) .video-panel-source");
+		expect(videoPanel).toContain('text-overflow: ellipsis;');
+		expect(videoPanel).toContain(":global(.app-shell[data-player-layout='bottom']) .video-radio-hits { display: none; }");
 	});
 });
 

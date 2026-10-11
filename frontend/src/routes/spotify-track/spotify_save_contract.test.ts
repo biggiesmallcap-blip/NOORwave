@@ -6,7 +6,10 @@ import { describe, expect, test } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const trackPage = readFileSync(join(here, '[id]', '+page.svelte'), 'utf8');
 const albumPage = readFileSync(join(here, '..', 'spotify-album', '[id]', '+page.svelte'), 'utf8');
-const client = readFileSync(join(here, '..', '..', 'lib', 'api', 'client.ts'), 'utf8');
+// The API surface spans the client and its wire types.
+const client = ['client.ts', 'types.ts']
+	.map((f) => readFileSync(join(here, '..', '..', 'lib', 'api', f), 'utf8'))
+	.join('\n');
 
 describe('Spotify save to library contract', () => {
 	test('posts track and album saves through dedicated API client methods', () => {

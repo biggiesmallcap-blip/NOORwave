@@ -65,14 +65,6 @@ fn mark_attempted(local_id: i64) {
         .insert(local_id);
 }
 
-/// Message-sniff for an expired/invalid TIDAL session. Mirrors
-/// `server::routes::error_looks_like_auth`, which is not visible from the
-/// services layer.
-fn looks_like_auth_error(err: &anyhow::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("401") || message.contains("unauthorized")
-}
-
 /// Count TIDAL-backed tracks that were persisted without full metadata.
 pub fn count_tracks_needing_repair(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
     conn.query_row(
@@ -102,13 +94,13 @@ fn fetch_repair_candidates(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<
 /// there is work to do. Returns immediately after spawning; never blocks the
 /// caller.
 pub async fn run_if_idle(state: SharedState) {
-    let (db, running, tokens, tidal_http, event_tx) = {
+    let (db, running, tokens, tidal_session, event_tx) = {
         let s = state.read().await;
         (
             s.db.clone(),
             s.tidal_repair_running.clone(),
-            s.tidal_tokens.clone(),
-            s.tidal_http_client.clone(),
+            s.tidal.tokens(),
+            s.tidal.clone(),
             s.event_tx.clone(),
         )
     };
@@ -137,11 +129,7 @@ pub async fn run_if_idle(state: SharedState) {
     running.store(true, Ordering::SeqCst);
 
     tokio::spawn(async move {
-        let client = TidalClient::with_http(
-            tidal_http,
-            tokens.access_token.clone(),
-            tokens.country_code.clone(),
-        );
+        let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code);
 
         let candidates = db
             .with_conn(|conn| Ok(fetch_repair_candidates(conn)?))
@@ -180,13 +168,13 @@ pub async fn run_if_idle(state: SharedState) {
                         }
                     }
                 }
-                Err(e) if looks_like_auth_error(&e) => {
-                    // Expired session: every remaining call in this batch would
-                    // fail the same way, so stop burning quota now. The row is
-                    // NOT marked attempted - it failed for token reasons, not
-                    // row reasons - and the whole set retries on the next
-                    // trigger once playback (or the resolver) refreshes the
-                    // session.
+                Err(e) if crate::services::tidal::session::session_unusable(&e) => {
+                    // The client already refreshed once; a remaining auth
+                    // failure means the session needs reconnect, so every
+                    // remaining call would fail the same way. Stop burning
+                    // quota now. The row is NOT marked attempted - it failed
+                    // for token reasons, not row reasons - and the whole set
+                    // retries on the next trigger.
                     warn!(target: "noor.tidal_repair", local_id, tidal_id, error = %e, "TIDAL session expired; aborting sweep until next trigger");
                     break;
                 }

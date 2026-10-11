@@ -3,32 +3,7 @@
 	import type { Track } from '$lib/api/client';
 	import { contextMenu, closeContextMenu } from '$lib/stores/context_menu';
 	import PlayPauseIcon from '$lib/components/ui/PlayPauseIcon.svelte';
-
-	const SHUFFLE_LABELS: Record<string, string> = {
-		off: 'Shuffle off',
-		genre: 'Genre mix',
-		weighted: 'Smart shuffle',
-		true: 'True random'
-	};
-
-	const SHUFFLE_ICONS: Record<string, string> = {
-		off: '⇄',
-		genre: '◆',
-		weighted: '◉',
-		true: '⤮'
-	};
-
-	const REPEAT_LABELS: Record<string, string> = {
-		off: 'Repeat off',
-		all: 'Repeat all',
-		one: 'Repeat one'
-	};
-
-	const REPEAT_ICONS: Record<string, string> = {
-		off: '↻',
-		all: '↺',
-		one: '⊙'
-	};
+	import { REPEAT_ICONS, REPEAT_LABELS, SHUFFLE_ICONS, SHUFFLE_LABELS } from '$lib/player/mode_labels';
 
 	let {
 		layout = 'side',

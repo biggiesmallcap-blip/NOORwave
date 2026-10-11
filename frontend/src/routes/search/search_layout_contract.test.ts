@@ -38,9 +38,12 @@ describe('search layout contracts', () => {
 		expect(source).toContain('loadingMore = false');
 		expect(source).toContain('const localPromise = cachedApi.search(q, INITIAL_SEARCH_PAGE_SIZE, signal)');
 		expect(source).toContain('api.searchTidal(q, INITIAL_SEARCH_PAGE_SIZE, signal, 0, PRIMARY_TIDAL_SEARCH_TIMEOUT_MS)');
-		expect(source).toContain('void localPromise.then((localResults) => {');
-		expect(source).toContain('if (!isCurrentSearch(q, generation, signal)) return');
-		expect(source).toContain('void tracksPromise.then((tidalResults) => {');
+		// The local-first race (hold, merge, stale guard) is behaviour-tested in
+		// $lib/search/primary_search.test.ts; the page hands it both providers.
+		expect(source).toContain('const primary = runPrimarySearch({');
+		expect(source).toContain('local: localPromise,');
+		expect(source).toContain('tidal: tracksPromise,');
+		expect(source).toContain('const stillCurrent = () => isCurrentSearch(q, generation, signal)');
 		expect(source).toContain('secondarySpotifyQueued = true');
 		expect(source).toContain('secondarySpotifyTimer = scheduleSearchIdleTask(() => {');
 		expect(source).toContain('}, SECONDARY_PROVIDER_DELAY_MS)');
@@ -48,20 +51,20 @@ describe('search layout contracts', () => {
 		expect(source).toContain('loadingSpotifyPlaylists = true');
 		expect(source).toContain('timeoutMs: SECONDARY_PROVIDER_TIMEOUT_MS');
 		expect(source).toContain('SPOTIFY_PLAYLIST_SEARCH_TIMEOUT_MS,');
-		expect(source).toContain('void tidalPlaylistPromise.then((playlistResults) => {');
-		expect(source).toContain('void spotifyPlaylistPromise.then((playlistResults) => {');
+		// Each playlist provider settles through settleWhileCurrent (behaviour-tested
+		// in $lib/search/primary_search.test.ts).
+		expect(source).toMatch(/void settleWhileCurrent\(\s*tidalPlaylistPromise,\s*stillCurrent,/);
+		expect(source).toMatch(/void settleWhileCurrent\(\s*spotifyPlaylistPromise,\s*stillCurrent,/);
 		expect(source).toContain('const primaryProviderSearchDone = $derived(');
 		expect(source).toContain('const providerSearchDone = $derived(');
 		expect(source).toContain('{:else if allProviderResultsEmpty && providerSearchDone}');
 	});
 
 	test('search URL query and Spotify playlist links preserve resolver flow', () => {
+		// The href itself is built and behaviour-tested in $lib/search/search_results.
 		expect(source).toContain("const urlQuery = new URLSearchParams(window.location.search).get('q')?.trim()");
 		expect(source).toContain('query = urlQuery');
-		expect(source).toContain('function spotifyPlaylistHref(spotifyId: string): string');
-		expect(source).toContain("const params = new URLSearchParams({ from: 'search' })");
-		expect(source).toContain("if (activeQueryText) params.set('q', activeQueryText)");
-		expect(source).toContain('return `/spotify-playlist/${encodeURIComponent(spotifyId)}?${params.toString()}`');
+		expect(source).toContain('return buildSpotifyPlaylistHref(spotifyId, activeQueryText)');
 		expect(source).toContain('href={spotifyPlaylistHref(playlist.spotifyId)}');
 		expect(source).toContain('onSelect: () => void goto(spotifyPlaylistHref(playlist.spotifyId))');
 		expect(source).not.toContain('href="/spotify-playlist/{playlist.spotifyId}"');
@@ -87,25 +90,17 @@ describe('search layout contracts', () => {
 	});
 
 	test('playlist rail ranks all sources by relevance to the query', () => {
-		expect(source).toContain('function playlistRelevance(title: string | null | undefined, q: string): number');
-		expect(source).toContain('if (t === q) return 1.0');
-		expect(source).toContain('if (t.startsWith(q)) return 0.6');
-		expect(source).toContain('if (t.includes(q)) return 0.3');
-		expect(source).toContain('const rankedPlaylists = $derived.by<PlaylistResultEntry[]>(() => {');
-		expect(source).toContain('return entries.sort((a, b) => b.score - a.score)');
-		expect(source).toContain("kind: 'local' as const, key: `local:${p.id}`");
-		expect(source).toContain("kind: 'tidal' as const, key: `tidal:${p.uuid}`");
-		expect(source).toContain("kind: 'spotify' as const, key: `spotify:${p.spotifyId}`");
+		// Ranking rules are behaviour-tested in $lib/search/search_results.test.ts.
+		expect(source).toContain('rankPlaylists(filteredPlaylists, activeQueryText)');
+		expect(source).not.toContain('function playlistRelevance(');
 	});
 
 	test('focused category filters prefetch one deeper page after the light initial batch', () => {
+		// Which views prefetch is behaviour-tested in $lib/search/search_results.test.ts;
+		// the page owns firing it once per query and mode.
 		expect(source).toContain("let focusedFilterPrefetchKey = $state('')");
 		expect(source).toContain("focusedFilterPrefetchKey = ''");
-		expect(source).toContain('const focusedFilterNeedsPrefetch = $derived.by(() => {');
-		expect(source).toContain("if (filterMode === 'tracks') return results !== null && hasMoreTidal");
-		expect(source).toContain("if (filterMode === 'albums') return results !== null && hasMoreTidal");
-		expect(source).toContain("if (filterMode === 'artists') return results !== null && hasMoreTidal");
-		expect(source).toContain("if (filterMode === 'playlists') return hasMoreTidalPlaylists || hasMoreSpotifyPlaylists");
+		expect(source).toContain('focusedViewNeedsPrefetch({');
 		expect(source).toContain('if (!focusedFilterNeedsPrefetch) return');
 		expect(source).toContain('const key = `${searchGeneration}:${lastQuery}:${filterMode}`');
 		expect(source).toContain('if (focusedFilterPrefetchKey === key) return');
@@ -114,14 +109,11 @@ describe('search layout contracts', () => {
 	});
 
 	test('all-results view caps each section preview while category views keep full lists', () => {
-		expect(source).toContain('const ALL_VIEW_ARTIST_LIMIT = 24');
-		expect(source).toContain('const ALL_VIEW_ALBUM_LIMIT = 24');
-		expect(source).toContain('const ALL_VIEW_TRACK_LIMIT = 10');
-		expect(source).toContain('const ALL_VIEW_PLAYLIST_LIMIT = 12');
-		expect(source).toContain("filterMode === 'all' ? sortedArtists.slice(0, ALL_VIEW_ARTIST_LIMIT) : sortedArtists");
-		expect(source).toContain("filterMode === 'all' ? sortedAlbums.slice(0, ALL_VIEW_ALBUM_LIMIT) : sortedAlbums");
-		expect(source).toContain("filterMode === 'all' ? sortedTracks.slice(0, ALL_VIEW_TRACK_LIMIT) : sortedTracks");
-		expect(source).toContain("filterMode === 'all' ? rankedPlaylists.slice(0, ALL_VIEW_PLAYLIST_LIMIT) : rankedPlaylists");
+		// The caps are behaviour-tested in $lib/search/search_results.test.ts.
+		expect(source).toContain("previewForView(filterMode, sortedArtists, 'artists')");
+		expect(source).toContain("previewForView(filterMode, sortedAlbums, 'albums')");
+		expect(source).toContain("previewForView(filterMode, sortedTracks, 'tracks')");
+		expect(source).toContain("previewForView(filterMode, rankedPlaylists, 'playlists')");
 		expect(source).toContain('{#each visibleArtists as artist (artist.tidal_id)}');
 		expect(source).toContain('{#each visibleAlbums as album (album.tidal_id)}');
 		expect(source).toContain('{#each visibleTracks as track, idx (track.tidal_id)}');
@@ -161,7 +153,6 @@ describe('search layout contracts', () => {
 		// The previous results stay, dimmed, until the new query's first results.
 		expect(source).toContain("const q = query.trim()\n      activeQuery = q\n      loading = true\n      resultsStale = results !== null || audioResults !== null\n      if (!resultsStale) clearVisibleSearchResults()");
 		expect(source).toContain('function takeFreshResults(q: string)');
-		expect(source).toContain('LOCAL_RESULTS_HOLD_MS');
 		expect(source).toContain("lastQuery = ''");
 		expect(source).toContain('vibeTrack = null');
 		expect(source).toContain('underratedTracks = null');

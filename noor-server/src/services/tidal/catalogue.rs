@@ -37,7 +37,7 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
         (
             s.db.clone(),
             s.tidal_http_client.clone(),
-            s.tidal_tokens.clone(),
+            s.tidal.tokens(),
             s.event_tx.clone(),
         )
     };
@@ -45,12 +45,8 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
         return Ok(());
     };
     let ids = db.with_conn(|conn| candidate_ids(conn, 24))?;
-    let client = TidalClient::with_http(
-        http.clone(),
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    )
-    .for_background_work();
+    let client = TidalClient::for_session(state.read().await.tidal.clone(), &tokens.country_code)
+        .for_background_work();
     let mut any_observed = false;
     let mut any_switched = false;
     for id in ids {
@@ -105,8 +101,7 @@ async fn check_candidates(state: &SharedState) -> anyhow::Result<()> {
             }
             Ok(Err(error)) => {
                 let message = error.to_string().to_lowercase();
-                if message.contains("401")
-                    || message.contains("unauthorized")
+                if crate::services::tidal::session::session_unusable(&error)
                     || message.contains("429")
                 {
                     break;

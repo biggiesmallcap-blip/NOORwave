@@ -86,13 +86,26 @@ describe('shell player bar extraction', () => {
 		expect(playerBar).toContain('onwheel={handleVolumeWheel}');
 	});
 
-	test('leaves queue rows in the layout during this slice', () => {
+	test('phone layout drops the desktop compositor transform so fixed chrome tracks the screen', () => {
 		const layout = readFileSync('src/routes/+layout.svelte', 'utf8');
+		const phone = layout.slice(layout.indexOf('@media (max-width: 679px) {'));
 
-		expect(layout).toContain('class="queue-row"');
-		expect(layout).toContain('oncontextmenu={(event) => openQueueRowMenu(item, event)}');
+		expect(layout).toContain('transform: translateZ(0);');
+		expect(phone.slice(0, phone.indexOf('.workspace {'))).toContain('transform: none;');
+	});
+
+	test('renders desktop and mobile queue rows through the shared shell row', () => {
+		const layout = readFileSync('src/routes/+layout.svelte', 'utf8');
+		const row = readFileSync('src/lib/shell/QueueRow.svelte', 'utf8');
+
+		expect(layout).toContain("import QueueRow from '$lib/shell/QueueRow.svelte'");
+		expect(layout.match(/\{@render queueRow\(item, (true|false)\)\}/g)?.length).toBe(2);
+		expect(row).toContain('class="queue-row"');
+		expect(layout).not.toContain('.queue-row {');
+		expect(layout).toContain('onmenu={(event) => openQueueRowMenu(item, event)}');
 		// Every queue row (including pending) plays via play-item, which resolves
 		// pending rows on the way in.
-		expect(layout).toContain('onclick={() => void handleQueueTrackPlay(item)}');
+		expect(layout).toContain('onplay={() => void handleQueueTrackPlay(item)}');
+		expect(row).toContain('onclick={onplay}');
 	});
 });

@@ -107,6 +107,23 @@ export function upscaleTidalArtwork(
 	return rawUrl.replace(TIDAL_ARTWORK_SIZE, `/${safeSize}x${safeSize}.jpg$1`);
 }
 
+/**
+ * The URL to render for `rawUrl` at `size`: the first size in its fallback
+ * order whose URL has not already failed to load, or null when none is left.
+ */
+export function artworkFallbackCandidate(
+	rawUrl: string | null | undefined,
+	size: TidalArtworkSize,
+	hasFailed: (url: string) => boolean,
+): string | null {
+	if (!rawUrl) return null;
+	for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
+		const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
+		if (candidate && !hasFailed(candidate)) return candidate;
+	}
+	return null;
+}
+
 const TIDAL_IMAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**

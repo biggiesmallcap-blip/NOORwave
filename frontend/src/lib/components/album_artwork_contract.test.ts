@@ -52,7 +52,7 @@ describe('album artwork contracts', () => {
 	});
 
 	test('album detail popup routes artwork through TIDAL fallback sizes', () => {
-		expect(albumDetailPopup).toContain('tidalArtworkFallbackSizes');
+		expect(albumDetailPopup).toContain('createArtworkFallback()');
 		expect(albumDetailPopup).toContain('let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));');
 		expect(albumDetailPopup).toContain('onerror={() => markArtworkFailed(popupArtwork)}');
 		expect(albumDetailPopup).not.toContain('src={album.artwork_url}');

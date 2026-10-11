@@ -1,5 +1,5 @@
 //! Serialized, bounded delivery of durable explicit favorite actions.
-use super::{auth, mutations};
+use super::mutations;
 use crate::db::catalogue_favorites as intents;
 use crate::{AppEvent, SharedState};
 use std::time::Duration;
@@ -17,47 +17,29 @@ pub async fn run_if_idle(state: SharedState) {
 }
 
 async fn deliver(state: &SharedState) -> anyhow::Result<()> {
-    let (db, http, mut tokens, events) = {
+    let (db, session, events) = {
         let s = state.read().await;
-        (
-            s.db.clone(),
-            s.http_client.clone(),
-            s.tidal_tokens.clone(),
-            s.event_tx.clone(),
-        )
+        (s.db.clone(), s.tidal.clone(), s.event_tx.clone())
     };
-    if tokens.take().is_none() || !db.with_conn(|c| Ok(intents::enabled(c)?))? {
+    if session.tokens().is_none() || !db.with_conn(|c| Ok(intents::enabled(c)?))? {
         return Ok(());
     }
     // Enforce development isolation before requests, including token refresh.
     if mutations::check_library_writes().is_err() {
         return Ok(());
     }
+    // The session-bound client refreshes and retries once on an auth failure.
     let delivered = deliver_pending(&db, |op| {
-        let db = &db;
-        let http = &http;
+        let session = session.clone();
         async move {
-            let session = state
-                .read()
-                .await
-                .tidal_tokens
-                .clone()
+            let client = session
+                .client()
                 .ok_or_else(|| anyhow::anyhow!("TIDAL disconnected"))?;
-            let result = send(http, &session, &op).await;
-            match result {
-                Err(error)
-                    if error.to_string().contains("401")
-                        || error.to_string().contains("unauthorized") =>
-                {
-                    let session =
-                        crate::server::routes::recover_tidal_session(state, http, &session).await?;
-                    if !db.with_conn(|c| intents::current(c, &op))? {
-                        return Ok(());
-                    }
-                    send(http, &session, &op).await
-                }
-                other => other,
-            }
+            let user_id = session
+                .tokens()
+                .map(|tokens| tokens.user_id)
+                .ok_or_else(|| anyhow::anyhow!("TIDAL disconnected"))?;
+            send(&client, &user_id, &op).await
         }
     })
     .await?;
@@ -103,51 +85,19 @@ where
 }
 
 async fn send(
-    http: &reqwest::Client,
-    session: &auth::TidalTokens,
+    client: &super::client::TidalClient,
+    user_id: &str,
     op: &intents::Operation,
 ) -> anyhow::Result<()> {
     let request = async {
         match (op.entity.as_str(), op.favorite) {
-            ("track", true) => {
-                mutations::add_favorite_track(
-                    http,
-                    &session.access_token,
-                    &session.user_id,
-                    op.tidal_id,
-                    &session.country_code,
-                )
-                .await
-            }
+            ("track", true) => mutations::add_favorite_track(client, user_id, op.tidal_id).await,
             ("track", false) => {
-                mutations::remove_favorite_track(
-                    http,
-                    &session.access_token,
-                    &session.user_id,
-                    op.tidal_id,
-                    &session.country_code,
-                )
-                .await
+                mutations::remove_favorite_track(client, user_id, op.tidal_id).await
             }
-            ("album", true) => {
-                mutations::add_favorite_album(
-                    http,
-                    &session.access_token,
-                    &session.user_id,
-                    op.tidal_id,
-                    &session.country_code,
-                )
-                .await
-            }
+            ("album", true) => mutations::add_favorite_album(client, user_id, op.tidal_id).await,
             ("album", false) => {
-                mutations::remove_favorite_album(
-                    http,
-                    &session.access_token,
-                    &session.user_id,
-                    op.tidal_id,
-                    &session.country_code,
-                )
-                .await
+                mutations::remove_favorite_album(client, user_id, op.tidal_id).await
             }
             _ => anyhow::bail!("Invalid favorite operation"),
         }

@@ -42,6 +42,7 @@ import {
 	position,
 	setPlayerPosition,
 	toggleTrackFavorite,
+	setPlayerStateForTests,
 } from '../src/lib/stores/player';
 
 function streamedTrack(): Track {
@@ -99,14 +100,14 @@ describe('canonical streamed TIDAL playback', () => {
 		apiMock.getTrackAudioFeatures.mockResolvedValue({ features: null });
 		apiMock.replacePlaybackQueue.mockResolvedValue(snapshot(streamedTrack()));
 		apiMock.setTrackFavorite.mockResolvedValue({});
-		currentTrack.set(null);
-		position.set(0);
-		buffered.set(0);
+		setPlayerStateForTests({ currentTrack: null });
+		setPlayerStateForTests({ position: 0 });
+		setPlayerStateForTests({ buffered: 0 });
 	});
 
 	test('uses the canonical queue route and resets playback progress', async () => {
-		position.set(64_000);
-		buffered.set(90_000);
+		setPlayerStateForTests({ position: 64_000 });
+		setPlayerStateForTests({ buffered: 90_000 });
 		await playTidalTrackNow({
 			tidal_id: 777,
 			title: 'Fresh Start',
@@ -129,7 +130,7 @@ describe('canonical streamed TIDAL playback', () => {
 	});
 
 	test('likes the resolved transient row without a synthetic id', async () => {
-		currentTrack.set(streamedTrack());
+		setPlayerStateForTests({ currentTrack: streamedTrack() });
 		await toggleTrackFavorite(98, false);
 		expect(apiMock.setTrackFavorite).toHaveBeenCalledWith(98, true);
 		expect(get(currentTrack)?.is_favorite).toBe(true);
@@ -139,10 +140,10 @@ describe('setPlayerPosition 409 ack handling', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		// Reset any state the SUT touches so each test starts fresh.
-		currentTrack.set(null);
-		position.set(0);
-		buffered.set(0);
-		playerError.set(null);
+		setPlayerStateForTests({ currentTrack: null });
+		setPlayerStateForTests({ position: 0 });
+		setPlayerStateForTests({ buffered: 0 });
+		setPlayerStateForTests({ playerError: null });
 	});
 
 	function buildState(overrides: Record<string, unknown> = {}) {

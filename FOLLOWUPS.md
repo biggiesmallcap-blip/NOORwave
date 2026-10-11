@@ -10,6 +10,16 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### tidal: move stream.rs behind the session-bound transport
+
+Playback stream resolution (playbackinfo, manifests, video streams, downloads)
+still reads the access token and calls `TidalSession::refresh_stale`
+explicitly; ADR-0002 kept it out for timing reasons. Route it through
+`TidalClient::send_authed` so it gets the same one-retry rule, then delete the
+manual recovery branches in server/routes.rs (`resolve_tidal_playback_stream`,
+`resolve_tidal_runtime_stream`, `tidal_video_playback`) and
+server/routes/download_routes.rs (`refresh_access_token`).
+Spawned by: TIDAL session refactor (ADR-0002)
 ### deps: migrate symphonia 0.5 -> 0.6
 
 symphonia 0.6 reshapes the decode API: SampleBuffer, DecoderOptions, the probe
@@ -384,13 +394,6 @@ album batch download, FLAC/MP3, configurable folder, tagging, retry/cancel.
   decode is the bottleneck), (c) confirm a long blocking encode doesn't delay server shutdown.
   (Segment fetch is now concurrent; MP3 now pulls the small AAC `HIGH` tier instead of FLAC.)
 - Spawned by: track download feature, branch `feat/track-download`.
-
-### Centralize TIDAL auth recovery in the client/transport layer
-- Recovery currently lives at the handler layer via the shared `recover_tidal_client` helper
-  (see docs/adr/0001). The correct end state is a refresh-aware `TidalClient` (or a thin
-  transport wrapper) that transparently refreshes-and-retries on a 401, so no handler writes a
-  retry arm. Deferred because it touches every TIDAL surface including the streaming paths.
-- Spawned by: artist-page TIDAL auth-recovery hardening.
 
 ### Cross-platform playlist providers: SoundCloud + YouTube
 - Now that the Spotify (Sportify) search/resolve path is hardened (mirror failover, no

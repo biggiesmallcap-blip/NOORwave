@@ -26,6 +26,7 @@ import {
 	formatTilt,
 	formatTotalDuration,
 	formatTrackDuration,
+	formatQualityTier,
 	getQualityClass,
 } from './format';
 
@@ -333,5 +334,19 @@ describe('saved date labels and ordering use the same UTC instant', () => {
 		expect(savedDateMillis(null)).toBeNull();
 		expect(savedDateMillis('not a date')).toBeNull();
 		expect(formatDateShort('not a date')).toBe('—');
+	});
+});
+
+describe('formatQualityTier', () => {
+	test('names the TIDAL tiers for badges', () => {
+		expect(formatQualityTier('HI_RES_LOSSLESS')).toBe('HiRes Lossless');
+		expect(formatQualityTier('LOSSLESS')).toBe('Lossless');
+		expect(formatQualityTier('HIGH')).toBe('High');
+		expect(formatQualityTier('LOW')).toBe('Low');
+	});
+
+	test('falls back to the spaced raw tier, and empty for none', () => {
+		expect(formatQualityTier('DOLBY_ATMOS')).toBe('DOLBY ATMOS');
+		expect(formatQualityTier(null)).toBe('');
 	});
 });

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 
-const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
+pub(crate) const TIDAL_API_URL: &str = "https://api.tidal.com/v1";
 const TIDAL_ALBUM_TRACKS_PAGE_SIZE: i32 = 100;
 const TIDAL_ALBUM_TRACKS_MAX_PAGES: usize = 20;
 
@@ -135,11 +135,77 @@ mod request_limiter_tests {
     }
 }
 
+/// A non-success answer from the TIDAL API. `Display` keeps the legacy
+/// `TIDAL API error {status}: {body}` text so log lines and any remaining
+/// string checks are unchanged.
+#[derive(Debug)]
+pub struct TidalApiError {
+    pub status: u16,
+    pub sub_status: Option<i64>,
+    pub body: String,
+}
+
+impl TidalApiError {
+    pub fn from_response_parts(status: reqwest::StatusCode, body: String) -> Self {
+        let sub_status = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("subStatus").and_then(serde_json::Value::as_i64));
+        Self {
+            status: status.as_u16(),
+            sub_status,
+            body,
+        }
+    }
+
+    /// CONTEXT.md "Auth failure": HTTP 401 other than subStatus 4005 (asset
+    /// not ready, a playability answer), or subStatus 6001 on any status.
+    pub fn is_auth_failure(&self) -> bool {
+        if self.sub_status == Some(6001) {
+            return true;
+        }
+        self.status == 401 && self.sub_status != Some(4005)
+    }
+}
+
+impl std::fmt::Display for TidalApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match reqwest::StatusCode::from_u16(self.status) {
+            Ok(status) => write!(f, "TIDAL API error {}: {}", status, self.body),
+            Err(_) => write!(f, "TIDAL API error {}: {}", self.status, self.body),
+        }
+    }
+}
+
+impl std::error::Error for TidalApiError {}
+
+/// True when `err` (or anything it wraps) is a TIDAL auth failure.
+pub fn is_auth_failure(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<TidalApiError>()
+            .is_some_and(TidalApiError::is_auth_failure)
+    })
+}
+
+#[derive(Clone)]
+enum ClientAuth {
+    /// A fixed token: tests and the refresher's validation call only.
+    Fixed(String),
+    /// Reads the live token from the TIDAL session and recovers on auth failure.
+    Session(crate::services::tidal::session::TidalSession),
+}
+
+enum SendOutcome {
+    Response(reqwest::Response),
+    AuthFailure(TidalApiError),
+}
+
 #[derive(Clone)]
 pub struct TidalClient {
     http: reqwest::Client,
-    access_token: String,
+    auth: ClientAuth,
     country_code: String,
+    api_base: String,
     request_priority: TidalRequestPriority,
     metadata_store: Option<crate::db::Database>,
 }
@@ -362,8 +428,9 @@ impl TidalClient {
     pub fn with_http(http: reqwest::Client, access_token: String, country_code: String) -> Self {
         Self {
             http,
-            access_token,
+            auth: ClientAuth::Fixed(access_token),
             country_code,
+            api_base: TIDAL_API_URL.to_string(),
             request_priority: TidalRequestPriority::Interactive,
             metadata_store: None,
         }
@@ -380,6 +447,41 @@ impl TidalClient {
         self
     }
 
+    pub(crate) fn for_session(
+        session: crate::services::tidal::session::TidalSession,
+        country_code: &str,
+    ) -> Self {
+        Self {
+            http: session.api_http(),
+            api_base: session.api_base().to_string(),
+            country_code: country_code.to_string(),
+            auth: ClientAuth::Session(session),
+            request_priority: TidalRequestPriority::Interactive,
+            metadata_store: None,
+        }
+    }
+
+    fn access_token(&self) -> Result<String> {
+        match &self.auth {
+            ClientAuth::Fixed(token) => Ok(token.clone()),
+            ClientAuth::Session(session) => session.access_token_for_request(),
+        }
+    }
+
+    /// After an auth failure on `used_token`: refresh through the session and
+    /// return the token to retry with. Fixed-token clients cannot recover.
+    async fn recover_after_auth_failure(&self, used_token: &str) -> Option<Result<String>> {
+        match &self.auth {
+            ClientAuth::Fixed(_) => None,
+            ClientAuth::Session(session) => Some(
+                session
+                    .refresh_stale(used_token)
+                    .await
+                    .map(|tokens| tokens.access_token),
+            ),
+        }
+    }
+
     /// Convenience constructor that builds a fresh HTTP client. Prefer
     /// `with_http` when an `AppState`-level client is available — building a
     /// client per call pays the TLS-pool setup repeatedly.
@@ -388,26 +490,82 @@ impl TidalClient {
         Self::with_http(Self::build_http_client(), access_token, country_code)
     }
 
-    fn auth_header(&self) -> String {
-        format!("Bearer {}", self.access_token)
+    pub(crate) fn country_code(&self) -> &str {
+        &self.country_code
     }
 
-    /// Remove a favorite using this client's authenticated transport. Keeping
-    /// the credentials inside `TidalClient` lets recovery callers retry a
-    /// mutation without unpacking or rebuilding the refreshed session.
+    /// Remove a track from the user's TIDAL favorites.
     pub async fn remove_favorite_track(&self, user_id: &str, track_id: i64) -> Result<()> {
-        super::mutations::remove_favorite_track(
-            &self.http,
-            &self.access_token,
-            user_id,
-            track_id,
-            &self.country_code,
-        )
-        .await
+        super::mutations::remove_favorite_track(self, user_id, track_id).await
+    }
+
+    /// Send a request built by `build(http, api_base, bearer)`. On an auth
+    /// failure a session-bound client refreshes once and resends once. Every
+    /// other answer is returned as-is for the caller to interpret (a 412 on a
+    /// playlist edit means "re-read the ETag"), except a 400/401 that is not an
+    /// auth failure: its body was read to classify it, so it comes back as
+    /// `TidalApiError`.
+    pub(crate) async fn send_authed<F>(&self, build: F) -> Result<reqwest::Response>
+    where
+        F: Fn(&reqwest::Client, &str, &str) -> reqwest::RequestBuilder,
+    {
+        let token = self.access_token()?;
+        let auth_failure = match self.send_once(&build, &token).await? {
+            SendOutcome::Response(resp) => return Ok(resp),
+            SendOutcome::AuthFailure(error) => error,
+        };
+        let fresh = match self.recover_after_auth_failure(&token).await {
+            None => return Err(auth_failure.into()),
+            Some(result) => result?,
+        };
+        match self.send_once(&build, &fresh).await? {
+            SendOutcome::Response(resp) => Ok(resp),
+            SendOutcome::AuthFailure(error) => Err(error.into()),
+        }
+    }
+
+    async fn send_once<F>(&self, build: &F, token: &str) -> Result<SendOutcome>
+    where
+        F: Fn(&reqwest::Client, &str, &str) -> reqwest::RequestBuilder,
+    {
+        crate::services::tidal::backoff::global().check()?;
+        let bearer = format!("Bearer {token}");
+        let resp = build(&self.http, &self.api_base, &bearer).send().await?;
+        let status = resp.status();
+        if !matches!(status.as_u16(), 400 | 401) {
+            return Ok(SendOutcome::Response(resp));
+        }
+        let body = resp.text().await.unwrap_or_default();
+        let error = TidalApiError::from_response_parts(status, body);
+        if error.is_auth_failure() {
+            Ok(SendOutcome::AuthFailure(error))
+        } else {
+            Err(error.into())
+        }
     }
 
     /// Make an authenticated GET request and deserialize the response.
+    /// Authenticated GET; on an auth failure a session-bound client refreshes
+    /// once and retries once. A second failure is returned as-is.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        let token = self.access_token()?;
+        match self.get_json_with_token::<T>(url, &token).await {
+            Err(error) if is_auth_failure(&error) => {
+                match self.recover_after_auth_failure(&token).await {
+                    None => Err(error),
+                    Some(Err(refresh_error)) => Err(refresh_error),
+                    Some(Ok(fresh)) => self.get_json_with_token(url, &fresh).await,
+                }
+            }
+            other => other,
+        }
+    }
+
+    async fn get_json_with_token<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<T> {
         crate::services::tidal::backoff::global().check()?;
 
         let _permits = request_limiter().acquire(self.request_priority).await?;
@@ -420,7 +578,7 @@ impl TidalClient {
         let resp = self
             .http
             .get(url)
-            .header("Authorization", self.auth_header())
+            .header("Authorization", format!("Bearer {token}"))
             .header("Accept-Language", "en-US")
             .send()
             .await
@@ -431,7 +589,7 @@ impl TidalClient {
             let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
             let body = resp.text().await.unwrap_or_default();
             crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-            anyhow::bail!("TIDAL API error {}: {}", status, body);
+            return Err(TidalApiError::from_response_parts(status, body).into());
         }
 
         let body = resp.text().await.context("Failed to read response body")?;
@@ -478,7 +636,7 @@ impl TidalClient {
     fn favorite_url(&self, user_id: &str, kind: &str, limit: i32, offset: i32) -> String {
         format!(
             "{}/users/{}/favorites/{}?countryCode={}&limit={}&offset={}&order=DATE&orderDirection=DESC",
-            TIDAL_API_URL, user_id, kind, self.country_code, limit, offset
+            self.api_base, user_id, kind, self.country_code, limit, offset
         )
     }
 
@@ -534,7 +692,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalPlaylist>> {
         let url = format!(
             "{}/users/{}/playlists?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, user_id, self.country_code, limit, offset
+            self.api_base, user_id, self.country_code, limit, offset
         );
         self.get_json(&url).await
     }
@@ -547,7 +705,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalTrack>> {
         let url = format!(
             "{}/playlists/{}/tracks?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, playlist_uuid, self.country_code, limit, offset
+            self.api_base, playlist_uuid, self.country_code, limit, offset
         );
         self.get_json(&url).await
     }
@@ -560,7 +718,7 @@ impl TidalClient {
     ) -> Result<Vec<TidalPlaylist>> {
         let url = format!(
             "{}/search?query={}&countryCode={}&limit={}&offset={}&types=PLAYLISTS",
-            TIDAL_API_URL,
+            self.api_base,
             urlencoding::encode(query),
             self.country_code,
             limit,
@@ -586,7 +744,7 @@ impl TidalClient {
         let offset = offset.max(0);
         format!(
             "{}/albums/{}/tracks?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, album_id, self.country_code, limit, offset
+            self.api_base, album_id, self.country_code, limit, offset
         )
     }
 
@@ -594,7 +752,7 @@ impl TidalClient {
     pub async fn get_album(&self, album_id: i64) -> Result<TidalAlbum> {
         let url = format!(
             "{}/albums/{}?countryCode={}",
-            TIDAL_API_URL, album_id, self.country_code
+            self.api_base, album_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -648,7 +806,7 @@ impl TidalClient {
     pub async fn get_track(&self, track_id: i64) -> Result<TidalTrack> {
         let url = format!(
             "{}/tracks/{}?countryCode={}",
-            TIDAL_API_URL, track_id, self.country_code
+            self.api_base, track_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -663,7 +821,7 @@ impl TidalClient {
         let filter_param = filter.map(|f| format!("&filter={f}")).unwrap_or_default();
         let url = format!(
             "{}/artists/{}/albums?countryCode={}&limit={}&offset={}{}",
-            TIDAL_API_URL, artist_id, self.country_code, limit, offset, filter_param
+            self.api_base, artist_id, self.country_code, limit, offset, filter_param
         );
         self.get_json(&url).await
     }
@@ -674,7 +832,7 @@ impl TidalClient {
     pub async fn get_artist(&self, artist_id: i64) -> Result<TidalArtist> {
         let url = format!(
             "{}/artists/{}?countryCode={}",
-            TIDAL_API_URL, artist_id, self.country_code
+            self.api_base, artist_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -687,7 +845,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalTrack>> {
         let url = format!(
             "{}/artists/{}/toptracks?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+            self.api_base, artist_id, self.country_code, limit, offset
         );
         self.get_json(&url).await
     }
@@ -710,7 +868,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalArtistVideo>> {
         let url = format!(
             "{}/artists/{}/videos?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+            self.api_base, artist_id, self.country_code, limit, offset
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_artist_videos_page(artist_id, &payload))
@@ -761,7 +919,7 @@ impl TidalClient {
     pub async fn get_artist_bio(&self, artist_id: i64) -> Result<TidalArtistBio> {
         let url = format!(
             "{}/artists/{}/bio?countryCode={}",
-            TIDAL_API_URL, artist_id, self.country_code
+            self.api_base, artist_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -775,7 +933,7 @@ impl TidalClient {
     ) -> Result<TidalPaginatedResponse<TidalArtist>> {
         let url = format!(
             "{}/artists/{}/similar?countryCode={}&limit={}&offset={}",
-            TIDAL_API_URL, artist_id, self.country_code, limit, offset
+            self.api_base, artist_id, self.country_code, limit, offset
         );
         self.get_json(&url).await
     }
@@ -785,7 +943,7 @@ impl TidalClient {
     fn search_catalog_url(&self, query: &str, limit: i32, offset: i32, types: &str) -> String {
         format!(
             "{}/search?query={}&countryCode={}&limit={}&offset={}&types={}",
-            TIDAL_API_URL,
+            self.api_base,
             urlencoding::encode(query),
             self.country_code,
             limit,
@@ -881,7 +1039,7 @@ impl TidalClient {
     ) -> Result<Vec<TidalSearchVideo>> {
         let url = format!(
             "{}/search?query={}&countryCode={}&limit={}&offset={}&types=VIDEOS",
-            TIDAL_API_URL,
+            self.api_base,
             urlencoding::encode(query),
             self.country_code,
             limit,
@@ -905,7 +1063,7 @@ impl TidalClient {
     pub async fn get_video(&self, video_id: i64) -> Result<TidalArtistVideo> {
         let url = format!(
             "{}/videos/{}?countryCode={}",
-            TIDAL_API_URL, video_id, self.country_code
+            self.api_base, video_id, self.country_code
         );
         self.get_json(&url).await
     }
@@ -930,7 +1088,7 @@ impl TidalClient {
     pub async fn get_editorial_top_tracks(&self, limit: i32) -> Result<Vec<TidalSearchTrack>> {
         let url = format!(
             "{}/pages/genre/all/tracks?countryCode={}&limit={}&deviceType=DESKTOP",
-            TIDAL_API_URL, self.country_code, limit
+            self.api_base, self.country_code, limit
         );
         let payload: serde_json::Value = match self.get_json(&url).await {
             Ok(v) => v,
@@ -965,7 +1123,7 @@ impl TidalClient {
     pub async fn get_my_mixes(&self) -> Result<Vec<TidalMix>> {
         let url = format!(
             "{}/pages/my_collection_my_mixes?countryCode={}&deviceType=BROWSER&locale=en_US",
-            TIDAL_API_URL, self.country_code
+            self.api_base, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         let mixes = Self::parse_my_mixes(&payload);
@@ -1028,7 +1186,7 @@ impl TidalClient {
     pub async fn get_my_radio_stations(&self) -> Result<Vec<TidalMix>> {
         let url = format!(
             "{}/pages/for_you?countryCode={}&deviceType=BROWSER&locale=en_US",
-            TIDAL_API_URL, self.country_code
+            self.api_base, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         // Substring match — looser than the literal title so a Tidal rename
@@ -1048,7 +1206,7 @@ impl TidalClient {
         // forcing the user to engage the rail scroll for every reveal.
         let url = format!(
             "{}/pages/home?countryCode={}&deviceType=BROWSER&locale=en_US&limit=12",
-            TIDAL_API_URL, self.country_code
+            self.api_base, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_home_modules(&payload))
@@ -1118,7 +1276,7 @@ impl TidalClient {
     /// (`rows[].modules[]`) is universal across home / charts / moods / genres /
     /// new-releases / mood/{id} / genre/{id}.
     pub async fn get_page_modules(&self, page_path: &str) -> Result<Vec<TidalHomeModule>> {
-        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12)?;
+        let url = Self::build_page_modules_url(&self.api_base, page_path, &self.country_code, 12)?;
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_home_modules(&payload))
     }
@@ -1128,7 +1286,7 @@ impl TidalClient {
     /// expose TIDAL's module-type vocabulary while we firm up which slugs and
     /// shapes we need to handle.
     pub async fn get_page_raw(&self, page_path: &str) -> Result<serde_json::Value> {
-        let url = Self::build_page_modules_url(TIDAL_API_URL, page_path, &self.country_code, 12)?;
+        let url = Self::build_page_modules_url(&self.api_base, page_path, &self.country_code, 12)?;
         self.get_json(&url).await
     }
 
@@ -1216,7 +1374,7 @@ impl TidalClient {
         limit: u32,
     ) -> Result<Vec<TidalHomeItem>> {
         let url =
-            Self::build_page_modules_url(TIDAL_API_URL, more_path, &self.country_code, limit)?;
+            Self::build_page_modules_url(&self.api_base, more_path, &self.country_code, limit)?;
         let payload: serde_json::Value = self.get_json(&url).await?;
         // "show more" endpoints return either a top-level pagedList or a
         // wrapped row/module shape — unwrap whichever we get.
@@ -1430,7 +1588,7 @@ impl TidalClient {
     pub async fn get_mix_tracks(&self, mix_id: &str) -> Result<Vec<TidalTrack>> {
         let url = format!(
             "{}/mixes/{}/items?countryCode={}&limit=100",
-            TIDAL_API_URL, mix_id, self.country_code
+            self.api_base, mix_id, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_mix_track_items(&payload))
@@ -1439,7 +1597,7 @@ impl TidalClient {
     pub async fn get_video_mix_items(&self, mix_id: &str) -> Result<Vec<TidalSearchVideo>> {
         let url = format!(
             "{}/mixes/{}/items?countryCode={}&limit=100&includeTypes=MusicVideo",
-            TIDAL_API_URL, mix_id, self.country_code
+            self.api_base, mix_id, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_mix_video_items(&payload))
@@ -1455,7 +1613,7 @@ impl TidalClient {
     ) -> Result<Vec<TidalSearchVideo>> {
         let url = format!(
             "{}/playlists/{}/items?countryCode={}&limit=100&includeTypes=MusicVideo",
-            TIDAL_API_URL, playlist_uuid, self.country_code
+            self.api_base, playlist_uuid, self.country_code
         );
         let payload: serde_json::Value = self.get_json(&url).await?;
         Ok(Self::parse_mix_video_items(&payload))
@@ -2458,5 +2616,40 @@ mod tests {
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, 1);
+    }
+
+    #[test]
+    fn api_error_classifies_auth_failures_from_status_and_substatus() {
+        let plain_401 = TidalApiError::from_response_parts(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"status":401,"subStatus":11003,"userMessage":"expired"}"#.to_string(),
+        );
+        let asset_not_ready = TidalApiError::from_response_parts(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}"#
+                .to_string(),
+        );
+        let invalid_session = TidalApiError::from_response_parts(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"status":400,"subStatus":6001,"userMessage":"invalid session"}"#.to_string(),
+        );
+        let not_found =
+            TidalApiError::from_response_parts(reqwest::StatusCode::NOT_FOUND, "not found".into());
+        assert!(plain_401.is_auth_failure());
+        assert!(!asset_not_ready.is_auth_failure());
+        assert!(invalid_session.is_auth_failure());
+        assert!(!not_found.is_auth_failure());
+    }
+
+    #[test]
+    fn api_error_display_matches_legacy_text_and_survives_context() {
+        let err =
+            TidalApiError::from_response_parts(reqwest::StatusCode::UNAUTHORIZED, "{}".into());
+        assert_eq!(err.to_string(), "TIDAL API error 401 Unauthorized: {}");
+        let wrapped = anyhow::Error::new(err).context("loading artist");
+        assert!(is_auth_failure(&wrapped));
+        assert!(!is_auth_failure(&anyhow::anyhow!(
+            "TIDAL API error 401 Unauthorized"
+        )));
     }
 }

@@ -114,7 +114,14 @@ describe('artist page layout contracts', () => {
 	});
 
 	test('uses the shared TIDAL discography playable mapper with the artist fallback id', () => {
-		expect(source).toContain("import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';");
+		expect(source).toMatch(
+			/import \{[^}]*\btidalDiscographyTrackToPlayable\b[^}]*\} from '\$lib\/utils\/track'/,
+		);
+		// Owned rows go through the shared library mapper too, so artist and
+		// album ids are never dropped by a hand-built object.
+		expect(source).toContain(
+			'libraryTrackToTidalPlayable(item.track, { artistTidalId: activeTidalArtistId })',
+		);
 		expect(source).toContain('function artistTrackPlayable(track: TidalDiscographyTrack)');
 		expect(source).toContain("tidalDiscographyTrackToPlayable(track, { artistTidalId: activeTidalArtistId })");
 		expect(source).toContain('{@const playable = artistTrackPlayable(track)}');

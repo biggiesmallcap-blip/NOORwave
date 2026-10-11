@@ -654,13 +654,9 @@ fn artwork_from_catalog(
 /// Best-effort throughout: TIDAL not connected, a failed search or a query we
 /// cannot build all leave the item exactly as it was.
 async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
-    let (tokens, tidal_http, db) = {
+    let (tokens, tidal_session, db) = {
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone(),
-            s.tidal_http_client.clone(),
-            s.db.clone(),
-        )
+        (s.tidal.tokens(), s.tidal.clone(), s.db.clone())
     };
     let Some(tokens) = tokens else {
         return;
@@ -690,10 +686,9 @@ async fn resolve_missing_artwork(state: &SharedState, items: &mut [Value]) {
         return;
     }
 
-    let client = crate::services::tidal::client::TidalClient::with_http(
-        tidal_http,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
+    let client = crate::services::tidal::client::TidalClient::for_session(
+        tidal_session.clone(),
+        &tokens.country_code,
     )
     .with_metadata_store(state.read().await.db.clone());
     let cache_cfg = crate::services::tidal::cache::TidalSearchCacheConfig::default();
@@ -1634,14 +1629,12 @@ async fn resolve_recommendation_artist_item(
         && item.get("artwork_url").is_some_and(Value::is_null)
         && let Some(local_artist_id) = item.get("local_artist_id").and_then(Value::as_i64)
         && let Some(tidal_artist_id) = item.get("tidal_artist_id").and_then(Value::as_i64)
-        && let Some(tokens) = s.tidal_tokens.clone()
+        && let Some(client) = s.tidal.client()
     {
-        let http = s.tidal_http_client.clone();
         let db = s.db.clone();
         tokio::spawn(async move {
             crate::services::tidal::artist_photo::ensure_photo_url(
-                http,
-                tokens,
+                client,
                 db,
                 local_artist_id,
                 tidal_artist_id,

@@ -404,7 +404,7 @@ pub async fn prefetch_and_analyze_track(state: &SharedState, track_id: i64) -> R
 
     let (tokens, http_client, db) = {
         let s = state.read().await;
-        let Some(tokens) = s.tidal_tokens.clone() else {
+        let Some(tokens) = s.tidal.tokens() else {
             tracing::info!(track_id, "prescanner skip: no TIDAL tokens");
             return Ok(false);
         };

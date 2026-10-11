@@ -67,11 +67,10 @@ pub struct AppState {
     /// Per-request `TidalClient` instances reuse this via `with_http` to skip
     /// per-call TLS pool setup. Token + country_code are stitched in per-call.
     pub tidal_http_client: reqwest::Client,
-    pub tidal_tokens: Option<services::tidal::auth::TidalTokens>,
-    /// Serializes refresh-token exchange. TIDAL may rotate refresh tokens, so
-    /// concurrent 401 recoveries must wait for the first exchange and then
-    /// reuse its result instead of submitting the same refresh token twice.
-    pub tidal_refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Resolves playback streams. TIDAL in production, scripted in tests.
+    pub stream_source: std::sync::Arc<dyn server::transport::stream::StreamSource>,
+    /// Sole owner of the TIDAL tokens and their lifecycle. See CONTEXT.md.
+    pub tidal: services::tidal::session::TidalSession,
     /// 6h TTL cache for the home Your Mixes shelf. TIDAL builds these on a
     /// daily cadence, so re-fetching on every Home remount was wasted work
     /// (and a visible skeleton flash). Cleared on app restart.
@@ -242,6 +241,9 @@ pub enum AppEvent {
     PlaybackStateChanged,
     LibrarySynced,
     TidalContentSettingsChanged,
+    /// The TIDAL session logged in, logged out, or latched needs-reconnect.
+    /// Clients re-read `/api/tidal/status`.
+    TidalSessionChanged,
     /// Emitted when the radio similarity index (`track_similarity`) finishes
     /// rebuilding, manually or via the auto-rebuild listener. Carries the pair
     /// count so the Settings panel can refresh without polling.
@@ -663,43 +665,14 @@ async fn main() -> Result<()> {
     let (event_tx, _) = broadcast::channel(256);
 
     // Load persisted TIDAL tokens if available
-    let tidal_tokens: Option<services::tidal::auth::TidalTokens> = db
-        .with_conn(|conn| {
-            let result = conn.query_row(
-                "SELECT access_token_enc FROM service_auth WHERE service='tidal'",
-                [],
-                |row| row.get::<_, Vec<u8>>(0),
-            );
-            Ok(match result {
-                Ok(bytes) => {
-                    services::tidal::auth::decode_persisted_tidal_tokens(&master_key, &bytes)
-                        .ok()
-                        .flatten()
-                        .map(|persisted| {
-                            let needs_rewrite = persisted.needs_encrypted_rewrite();
-                            let tokens = persisted.into_tokens();
-                            if needs_rewrite
-                                && let Ok(blob) =
-                                    services::tidal::auth::encode_persisted_tidal_tokens(
-                                        &master_key,
-                                        &tokens,
-                                    )
-                            {
-                                let _ = conn.execute(
-                            "UPDATE service_auth SET access_token_enc = ?1 WHERE service='tidal'",
-                            rusqlite::params![blob],
-                        );
-                            }
-                            tokens
-                        })
-                        .inspect(|t: &services::tidal::auth::TidalTokens| {
-                            info!("Loaded persisted TIDAL tokens for user {}", t.user_id);
-                        })
-                }
-                Err(_) => None,
-            })
-        })
-        .unwrap_or(None);
+    let tidal_store = services::tidal::session::TokenStore::new(db.clone(), master_key.clone());
+    let tidal_tokens = tidal_store.load().unwrap_or_else(|error| {
+        tracing::warn!("Failed to load persisted TIDAL tokens: {error}");
+        None
+    });
+    if let Some(tokens) = &tidal_tokens {
+        info!("Loaded persisted TIDAL tokens for user {}", tokens.user_id);
+    }
 
     // Generate or load the server access token
     let server_token = db.with_conn(db::queries::ensure_server_token)?;
@@ -732,13 +705,27 @@ async fn main() -> Result<()> {
     let dj_analysis_tx = services::audio_analysis::dj_profile::spawn_dj_profile_actor(db.clone());
     info!("DJ profile analysis actor spawned");
 
+    let tidal_http_client = services::tidal::client::TidalClient::build_http_client();
+    let tidal = services::tidal::session::TidalSession::new(
+        services::tidal::session::TidalSessionConfig::production(
+            tidal_http_client.clone(),
+            http_client.clone(),
+            tidal_store,
+            event_tx.clone(),
+        ),
+        tidal_tokens,
+    );
+
+    let stream_source: Arc<dyn server::transport::stream::StreamSource> = Arc::new(
+        server::transport::stream::TidalStreamSource::new(http_client.clone()),
+    );
     let state = Arc::new(RwLock::new(AppState {
         db,
         event_tx,
         http_client,
-        tidal_http_client: services::tidal::client::TidalClient::build_http_client(),
-        tidal_tokens,
-        tidal_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tidal_http_client,
+        stream_source,
+        tidal,
         tidal_mixes_cache: Arc::new(std::sync::Mutex::new(None)),
         tidal_radio_stations_cache: Arc::new(std::sync::Mutex::new(None)),
         home_picks_cache: Arc::new(std::sync::Mutex::new(None)),

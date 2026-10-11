@@ -40,12 +40,9 @@ async fn broadcast_progress(state: &SharedState) {
 /// Refresh the TIDAL access token (reusing the server's refresh+persist path) and
 /// return the new access token, or `None` if refresh failed.
 async fn refresh_access_token(state: &SharedState) -> Option<String> {
-    let (http, tokens) = {
-        let s = state.read().await;
-        (s.http_client.clone(), s.tidal_tokens.clone())
-    };
-    let tokens = tokens?;
-    match super::recover_tidal_session(state, &http, &tokens).await {
+    let session = state.read().await.tidal.clone();
+    let tokens = session.tokens()?;
+    match session.refresh_stale(&tokens.access_token).await {
         Ok(refreshed) => Some(refreshed.access_token),
         Err(e) => {
             tracing::warn!(target = "noor.download", "TIDAL token refresh failed: {e}");
@@ -142,7 +139,7 @@ async fn run_download_worker(state: SharedState) {
                 });
             (
                 s.http_client.clone(),
-                s.tidal_tokens.as_ref().map(|t| t.access_token.clone()),
+                s.tidal.tokens().map(|t| t.access_token),
                 dest,
                 flac_quality,
                 mp3_source,

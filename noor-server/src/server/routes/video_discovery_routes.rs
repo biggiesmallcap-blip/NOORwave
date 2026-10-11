@@ -127,13 +127,9 @@ async fn build_missing_sets(
     state: &SharedState,
     today: chrono::NaiveDate,
 ) -> anyhow::Result<usize> {
-    let (tokens, tidal_http_client, db) = {
+    let (tokens, tidal_session, db) = {
         let s = state.read().await;
-        (
-            s.tidal_tokens.clone(),
-            s.tidal_http_client.clone(),
-            s.db.clone(),
-        )
+        (s.tidal.tokens(), s.tidal.clone(), s.db.clone())
     };
     let tokens = match tokens {
         Some(t) => Some(t),
@@ -167,11 +163,7 @@ async fn build_missing_sets(
         return Ok(0);
     }
 
-    let client = TidalClient::with_http(
-        tidal_http_client,
-        tokens.access_token.clone(),
-        tokens.country_code.clone(),
-    );
+    let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code);
 
     let mut shown_video_ids: HashSet<i64> = HashSet::new();
     let mut artist_exposure: HashMap<String, usize> = HashMap::new();
@@ -811,7 +803,7 @@ pub(super) async fn get_videos_liked(State(state): State<SharedState>) -> Json<V
     let running = s
         .library_video_scan_running
         .load(std::sync::atomic::Ordering::SeqCst);
-    let connected = s.tidal_tokens.is_some();
+    let connected = s.tidal.tokens().is_some();
 
     Json(json!({
         "videos": wall,

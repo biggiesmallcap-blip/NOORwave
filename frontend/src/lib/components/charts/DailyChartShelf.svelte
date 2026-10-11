@@ -7,6 +7,15 @@
 </script>
 
 <script lang="ts">
+	import {
+		audienceLabel,
+		isVideo,
+		matrixHasData,
+		matrixNeedsRefresh,
+		movementLabel,
+		needsMatch,
+		regionHasMatrixData as regionHasMatrixDataIn,
+	} from './chart_rules';
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import {
 		api,
@@ -23,7 +32,7 @@
 	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import Segmented from '$lib/components/ui/Segmented.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
-	import { playTidalTrackNow, playTrackNow, playerError } from '$lib/stores/player';
+	import { playTidalTrackNow, playTrackNow, reportPlayerError } from '$lib/stores/player';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
@@ -188,26 +197,6 @@
 		return () => clearInterval(timer);
 	});
 
-	function todayUtc(): string {
-		return new Date().toISOString().slice(0, 10);
-	}
-
-	function latestChartDate(next: ChartMatrixResponse): string | null {
-		let latest: string | null = null;
-		for (const row of next.rows) {
-			for (const cell of Object.values(row.cells)) {
-				if (cell && (!latest || cell.chart_date > latest)) latest = cell.chart_date;
-			}
-		}
-		return latest;
-	}
-
-	function matrixNeedsRefresh(next: ChartMatrixResponse): boolean {
-		if (!matrixHasData(next)) return true;
-		const latest = latestChartDate(next);
-		return latest !== null && latest < todayUtc();
-	}
-
 	async function refreshMatrix(force = false) {
 		if (matrixRefreshStarted && !force) return;
 		matrixRefreshStarted = true;
@@ -253,17 +242,8 @@
 		}
 	}
 
-	function matrixHasData(next: ChartMatrixResponse | null): boolean {
-		return Boolean(next?.rows.some((row) =>
-			next.providers.some((provider) => Boolean(row.cells[provider.source_key])),
-		));
-	}
-
 	function regionHasMatrixData(region: string): boolean {
-		const row = matrix?.rows.find((item) => item.region === region);
-		return Boolean(
-			row && matrix?.providers.some((provider) => Boolean(row.cells[provider.source_key])),
-		);
+		return regionHasMatrixDataIn(matrix, region);
 	}
 
 	function regionLabel(region: string): string {
@@ -287,14 +267,6 @@
 	}
 
 	// TIDAL matching
-
-	function isVideo(item: ChartItem): boolean {
-		return item.entity_type === 'video';
-	}
-
-	function needsMatch(item: ChartItem): boolean {
-		return !item.tidal_id && !item.local_track_id && !isVideo(item);
-	}
 
 	async function resolveItem(item: ChartItem): Promise<TidalSearchTrack | null> {
 		if (!needsMatch(item)) return null;
@@ -344,7 +316,7 @@
 		}
 		const playable = await playableFor(item);
 		if (!playable) {
-			playerError.set({ message: "Couldn't find that chart entry on TIDAL." });
+			reportPlayerError("Couldn't find that chart entry on TIDAL.");
 			return;
 		}
 		await playTidalTrackNow(playable);
@@ -387,20 +359,6 @@
 		if (hit === null) return 'Not found on TIDAL';
 		if (resolving[chartMatchKey(item.artist, item.title)]) return 'Finding on TIDAL';
 		return '';
-	}
-
-	function audienceLabel(item: { streams: number | null; views: number | null; points: number | null }): string {
-		if (item.streams != null) return `${item.streams.toLocaleString()} streams`;
-		if (item.views != null) return `${item.views.toLocaleString()} views`;
-		if (item.points != null) return `${item.points.toLocaleString()} pts`;
-		return '';
-	}
-
-	function movementLabel(delta: number | null): string {
-		if (delta == null) return '';
-		if (delta === 0) return 'Steady';
-		if (delta < 0) return `Up ${Math.abs(delta)}`;
-		return `Down ${delta}`;
 	}
 
 	function entryMetric(entry: ChartSnapshotEntry): string {

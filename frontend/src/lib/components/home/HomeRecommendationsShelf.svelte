@@ -31,6 +31,16 @@
 	} from '$lib/player/play_recommendations';
 	import { playTrackNow } from '$lib/stores/player';
 	import { rotatingWindow, rotationForPeriod } from '$lib/utils/rotation';
+	import {
+		PANEL_LIMIT,
+		hasItems,
+		hasMoreThanShelf,
+		mergeShelves,
+		paintState as paintStateFor,
+		seededViewState,
+		shelfKey,
+		type ShelfViewState as State
+	} from '$lib/components/home/home_shelves';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import {
 		composeTidalArtQuery,
@@ -44,7 +54,6 @@
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import RecommendationAlbumPopup from '$lib/components/home/RecommendationAlbumPopup.svelte';
 
-	type State = 'hidden' | 'loading' | 'ready' | 'empty' | 'error';
 
 	// Position in the home stack; stagger only. See YourMixesShelf. Each shelf
 	// this component renders steps one slot further down so a batch that lands
@@ -52,7 +61,6 @@
 	let { index = 0 }: { index?: number } = $props();
 
 	const ROTATE_MS = 5500;
-	const PANEL_LIMIT = 20;
 
 	/**
 	 * How often the rail shows a different slice of the shelf.
@@ -75,13 +83,6 @@
 	const VIEW_ROTATION_MS = 2 * 60 * 60 * 1000;
 	const viewRotation = rotationForPeriod(VIEW_ROTATION_MS);
 
-	const hasItems = (list: ProviderRecommendationShelf[]) =>
-		list.some((shelf) => shelf.items.length > 0);
-	// A shelf the server is still building. It is empty right now but more is
-	// coming, so it must never be rendered as "nothing to recommend".
-	const isWarming = (list: ProviderRecommendationShelf[]) =>
-		list.some((shelf) => shelf.status === 'warming');
-
 	// Creating the query is what kicks the request off, and it happens at init
 	// rather than behind the status checks: both statuses are already in the
 	// persisted cache on a warm boot and this is the slow call, so gating it
@@ -101,9 +102,7 @@
 		: [];
 
 	let shelves = $state<ProviderRecommendationShelf[]>(seededShelves);
-	let viewState = $state<State>(
-		seededCanRecommend && hasItems(seededShelves) ? 'ready' : 'hidden'
-	);
+	let viewState = $state<State>(seededViewState(seededCanRecommend, seededShelves));
 	/** False until the status checks answer, so nothing paints for a user with no provider. */
 	let gateOpen = $state(seededCanRecommend);
 	let errorMsg = $state('');
@@ -142,31 +141,9 @@
 		});
 	});
 
-	/**
-	 * Merge an incoming payload over what is on screen, shelf by shelf.
-	 *
-	 * The server publishes one shelf at a time, so mid-rebuild the rails it has
-	 * not reached yet come back empty and warming. Taking that payload wholesale
-	 * would blank rails that are currently full and refill them seconds later -
-	 * the exact flicker this change exists to remove. A warming shelf with no
-	 * items therefore never displaces one that has them; anything else, warming
-	 * or not, is the newer truth and wins.
-	 */
-	function mergeShelves(
-		current: ProviderRecommendationShelf[],
-		next: ProviderRecommendationShelf[]
-	): ProviderRecommendationShelf[] {
-		const byKey = new Map(current.map((shelf) => [shelfKey(shelf), shelf]));
-		return next.map((shelf) => {
-			if (shelf.items.length > 0 || shelf.status !== 'warming') return shelf;
-			return byKey.get(shelfKey(shelf)) ?? shelf;
-		});
-	}
-
 	/** What to render given the shelves in hand. */
 	function paintState(): State {
-		if (hasItems(shelves)) return 'ready';
-		return isWarming(shelves) ? 'loading' : 'empty';
+		return paintStateFor(shelves);
 	}
 
 	async function openGate() {
@@ -211,10 +188,6 @@
 		return () => clearInterval(timer);
 	});
 
-	function shelfKey(shelf: ProviderRecommendationShelf): string {
-		return `${shelf.provider}:${shelf.entity_type ?? 'track'}:${shelf.title}`;
-	}
-
 	function itemEntity(item: ProviderRecommendationItem): string {
 		return recommendationEntity(item);
 	}
@@ -242,11 +215,6 @@
 	 */
 	function shelfItems(shelf: ProviderRecommendationShelf): ProviderRecommendationItem[] {
 		return rotatingWindow(shelf.items, PANEL_LIMIT, viewRotation * PANEL_LIMIT);
-	}
-
-	/** True when the shelf is holding back items the rail is not showing. */
-	function hasMoreThanShelf(shelf: ProviderRecommendationShelf): boolean {
-		return shelf.items.length > PANEL_LIMIT;
 	}
 
 	function currentIndexFor(shelf: ProviderRecommendationShelf): number {

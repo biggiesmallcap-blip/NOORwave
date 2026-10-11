@@ -45,12 +45,7 @@
 	import { buildTidalTrackMenu } from '$lib/player/track_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { canPlayTrack } from '$lib/player/playable';
-	import {
-		tidalArtworkFallbackSizes,
-		upscaleTidalArtwork,
-		type TidalArtworkSize,
-	} from '$lib/utils/artwork';
-	import { tidalDiscographyTrackToPlayable } from '$lib/utils/track';
+	import { libraryTrackToTidalPlayable, tidalDiscographyTrackToPlayable } from '$lib/utils/track';
 	import { cleanArtistBio } from './artist_bio';
 	import { artistCurrentTrackMatchesArtist } from './artist_playback';
 	import {
@@ -62,6 +57,7 @@
 		type PopularTrackItem,
 	} from './artist_discography';
 	import { watchUrl } from '$lib/video/section';
+	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 	import { failedPreviewReleaseLinks } from './artist_release_loading';
 
 	// One artist view, two data sources. A library artist is keyed by local id
@@ -123,7 +119,10 @@
 	let tidalAvailable = $state(false);
 	let tidalReleaseStatus = $state<ArtistReleaseFilterStatuses | undefined>(undefined);
 	let retryReleaseLinks = $derived(failedPreviewReleaseLinks(tidalReleaseStatus));
-	let failedArtworkUrls = $state<Record<string, boolean>>({});
+	// Artwork URL per size, stepping down a size each time one fails to load.
+	const artwork = createArtworkFallback();
+	const artworkCandidate = artwork.candidate;
+	const markArtworkFailed = artwork.markFailed;
 	let tidalLoadSeq = 0;
 
 	// Active TIDAL artist id used for "is this artist currently playing" checks
@@ -254,7 +253,7 @@
 		tidalBio = null;
 		tidalAvailable = false;
 		tidalReleaseStatus = undefined;
-		failedArtworkUrls = {};
+		artwork.reset();
 		bioExpanded = false;
 		if (source.kind === 'local') {
 			const id = source.artistId;
@@ -324,23 +323,6 @@
 	let heroPortraitSrc = $derived(artworkCandidate(heroPortraitUrl, 640));
 	let heroBackdropSrc = $derived(artworkCandidate(heroBackdropUrl, 1280));
 
-	function artworkCandidate(
-		rawUrl: string | null | undefined,
-		size: TidalArtworkSize,
-	): string | null {
-		if (!rawUrl) return null;
-		for (const candidateSize of tidalArtworkFallbackSizes(rawUrl, size)) {
-			const candidate = upscaleTidalArtwork(rawUrl, candidateSize);
-			if (candidate && !failedArtworkUrls[candidate]) return candidate;
-		}
-		return null;
-	}
-
-	function markArtworkFailed(renderedUrl: string | null | undefined) {
-		if (!renderedUrl) return;
-		failedArtworkUrls = { ...failedArtworkUrls, [renderedUrl]: true };
-	}
-
 	// Artist biographies can arrive with TIDAL link and HTML markup.
 	// The helper keeps only readable text.
 	let bioText = $derived(
@@ -374,21 +356,7 @@
 	// queue. Returns null for a pure-local track with no tidal_id.
 	function popularItemPlayable(item: PopularTrackItem): TidalPlayable | null {
 		if (item.kind === 'tidal') return artistTrackPlayable(item.track);
-		const t = item.track;
-		if (t.tidal_id == null || t.tidal_id <= 0) return null;
-		return {
-			tidal_id: t.tidal_id,
-			title: t.title,
-			artist_name: t.artist_name ?? null,
-			album_title: t.album_title ?? null,
-			artwork_url: t.artwork_url ?? null,
-			duration_ms: t.duration_ms ?? null,
-			artist_tidal_id: t.artist_tidal_id ?? activeTidalArtistId,
-			album_tidal_id: t.album_tidal_id ?? null,
-			local_id: t.id,
-			is_in_library: true,
-			is_favorite: t.is_favorite,
-		};
+		return libraryTrackToTidalPlayable(item.track, { artistTidalId: activeTidalArtistId });
 	}
 
 	// Play the Top tracks list in context, starting at the clicked row (the rest

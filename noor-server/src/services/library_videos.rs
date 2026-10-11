@@ -613,13 +613,13 @@ pub fn suppress(conn: &Connection, track_ids: &[i64], tidal_video_id: i64) -> Re
 /// to fetch, so it skips quietly and the next trigger after the user connects
 /// picks the work back up.
 pub async fn run_if_idle(state: SharedState) {
-    let (db, running, tokens, tidal_http) = {
+    let (db, running, tokens, tidal_session) = {
         let s = state.read().await;
         (
             s.db.clone(),
             s.library_video_scan_running.clone(),
-            s.tidal_tokens.clone(),
-            s.tidal_http_client.clone(),
+            s.tidal.tokens(),
+            s.tidal.clone(),
         )
     };
 
@@ -653,11 +653,7 @@ pub async fn run_if_idle(state: SharedState) {
     running.store(true, Ordering::SeqCst);
 
     tokio::spawn(async move {
-        let client = TidalClient::with_http(
-            tidal_http,
-            tokens.access_token.clone(),
-            tokens.country_code.clone(),
-        );
+        let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code);
 
         // Its own connection, not the shared pooled one. A first index is
         // thousands of artists over half an hour; taking the shared connection
