@@ -79,7 +79,7 @@ pub(crate) async fn apply_runtime_ready(
 pub(crate) fn spawn_playback_runtime_listener(
     state: SharedState,
     handle: playback_runtime::PlaybackRuntimeHandle,
-) {
+) -> tokio::task::JoinHandle<()> {
     // Subscribe before scheduling the task: native runtime events can arrive
     // before Tokio first polls it. Replay device metadata if startup Ready
     // was already sent before the handle reached this layer.
@@ -448,6 +448,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                     transport_format,
                 }) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = true;
                         info.exclusive_transport_format = Some(transport_format.clone());
@@ -462,6 +469,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                     device_name,
                 }) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = false;
                         info.exclusive_transport_format = None;
@@ -475,6 +489,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                     device_name,
                 }) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = false;
                         info.exclusive_transport_format = None;
@@ -510,7 +531,8 @@ pub(crate) fn spawn_playback_runtime_listener(
                             }
                         })
                     };
-                    drop(state_guard);
+                    // Sending is synchronous. Keep the validated runtime
+                    // current until its recovery command has been queued.
                     if let Some((runtime, output)) = retry
                         && let Err(error) = runtime.device_swap(
                             output.device,
@@ -530,7 +552,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    })
 }
 
 /// Peek at what would play next without advancing the queue, then send `PrepareNext` to the

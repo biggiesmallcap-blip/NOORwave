@@ -246,7 +246,7 @@ async fn native_output_fault_listener_updates_public_state_without_exclusive_aut
         info.exclusive_transport_format = Some("24-bit".into());
         guard.event_tx.subscribe()
     };
-    spawn_playback_runtime_listener(state.clone(), handle.clone());
+    let _ = spawn_playback_runtime_listener(state.clone(), handle.clone());
     assert!(matches!(
         command_rx.try_recv().unwrap(),
         playback_runtime::PlaybackRuntimeCommand::RequestReady
@@ -324,7 +324,7 @@ async fn generic_runtime_error_listener_clears_activity_and_preserves_queue() {
         guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
         guard.event_tx.subscribe()
     };
-    spawn_playback_runtime_listener(state.clone(), handle.clone());
+    let _ = spawn_playback_runtime_listener(state.clone(), handle.clone());
     assert!(matches!(
         command_rx.try_recv().unwrap(),
         playback_runtime::PlaybackRuntimeCommand::RequestReady
@@ -497,7 +497,7 @@ async fn current_command_error_reaches_real_listener_and_preserves_queue() {
         guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
         guard.event_tx.subscribe()
     };
-    spawn_playback_runtime_listener(state.clone(), handle.clone());
+    let _ = spawn_playback_runtime_listener(state.clone(), handle.clone());
     assert!(matches!(
         command_rx.try_recv().unwrap(),
         playback_runtime::PlaybackRuntimeCommand::RequestReady
@@ -541,6 +541,182 @@ async fn current_command_error_reaches_real_listener_and_preserves_queue() {
             .as_deref(),
         Some("Resume failed: output rejected")
     );
+}
+
+#[tokio::test]
+async fn retired_runtime_exclusive_notifications_cannot_change_replacement_or_retry() {
+    for kind in ["engaged", "failed", "released"] {
+        let (state, _, _, _) = cpal_fault_fixture().await;
+        let (old_tx, old_rx) = std::sync::mpsc::channel();
+        let old = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(old_tx);
+        {
+            let mut guard = state.write().await;
+            guard.playback_runtime.as_mut().unwrap().handle = old.clone();
+            guard
+                .db
+                .with_conn(|conn| {
+                    crate::db::audio_settings::save(
+                        conn,
+                        &crate::db::audio_settings::AudioSettings {
+                            exclusive_mode: true,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(anyhow::Error::from)
+                })
+                .unwrap();
+        }
+        let listener = spawn_playback_runtime_listener(state.clone(), old.clone());
+        assert!(matches!(
+            old_rx.try_recv().unwrap(),
+            playback_runtime::PlaybackRuntimeCommand::RequestReady
+        ));
+        let mut guard = state.write().await;
+        let event = match kind {
+            "engaged" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                device_name: "retired output".into(),
+                transport_format: "old format".into(),
+            },
+            "failed" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
+                device_name: "retired output".into(),
+                reason: "old failure".into(),
+            },
+            _ => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                device_name: "retired output".into(),
+            },
+        };
+        assert!(old.test_publish_event(event));
+        tokio::task::yield_now().await;
+        let (new_tx, new_rx) = std::sync::mpsc::channel();
+        let replacement = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(new_tx);
+        guard.playback_runtime.as_mut().unwrap().handle = replacement;
+        let expected_engaged = kind != "engaged";
+        let info = guard.playback_runtime_info.as_mut().unwrap();
+        info.exclusive_engaged = expected_engaged;
+        info.exclusive_transport_format = expected_engaged.then(|| "current format".into());
+        let mut events = guard.event_tx.subscribe();
+        assert!(
+            old.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited {
+                message: None
+            })
+        );
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), listener)
+            .await
+            .unwrap()
+            .unwrap();
+        let guard = state.read().await;
+        let info = guard.playback_runtime_info.as_ref().unwrap();
+        assert_eq!(
+            info.exclusive_engaged, expected_engaged,
+            "retired {kind} changed current engagement"
+        );
+        assert_eq!(
+            info.exclusive_transport_format.as_deref(),
+            expected_engaged.then_some("current format")
+        );
+        assert!(events.try_recv().is_err(), "retired {kind} reached the UI");
+        assert!(
+            new_rx.try_recv().is_err(),
+            "retired {kind} retried on the replacement runtime"
+        );
+    }
+}
+
+#[tokio::test]
+async fn current_runtime_exclusive_notifications_update_status_and_gate_release_retry() {
+    for (playing, requested) in [(true, true), (false, true), (true, false)] {
+        let (state, _, _, _) = cpal_fault_fixture().await;
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+        let mut events = {
+            let mut guard = state.write().await;
+            guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+            guard
+                .db
+                .with_conn(|conn| {
+                    crate::db::audio_settings::save(
+                        conn,
+                        &crate::db::audio_settings::AudioSettings {
+                            exclusive_mode: requested,
+                            ..Default::default()
+                        },
+                    )?;
+                    conn.execute(
+                        "UPDATE playback_state SET is_playing=?1 WHERE id=1",
+                        rusqlite::params![playing],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            guard.event_tx.subscribe()
+        };
+        let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            playback_runtime::PlaybackRuntimeCommand::RequestReady
+        ));
+        for kind in ["engaged", "failed", "released"] {
+            let event = match kind {
+                "engaged" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                    device_name: "current output".into(),
+                    transport_format: "24-bit PCM".into(),
+                },
+                "failed" => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
+                    device_name: "current output".into(),
+                    reason: "format rejected".into(),
+                },
+                _ => playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                    device_name: "current output".into(),
+                },
+            };
+            assert!(handle.test_publish_event(event));
+            let public = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match (kind, public) {
+                (
+                    "engaged",
+                    AppEvent::AudioExclusiveEngaged {
+                        device,
+                        transport_format,
+                    },
+                ) => {
+                    assert_eq!(device, "current output");
+                    assert_eq!(transport_format, "24-bit PCM");
+                }
+                ("failed", AppEvent::AudioExclusiveFailed { device, reason }) => {
+                    assert_eq!(device, "current output");
+                    assert_eq!(reason, "format rejected");
+                }
+                ("released", AppEvent::AudioExclusiveReleased { device }) => {
+                    assert_eq!(device, "current output")
+                }
+                (_, other) => panic!("wrong notification for {kind}: {other:?}"),
+            }
+            let guard = state.read().await;
+            let info = guard.playback_runtime_info.as_ref().unwrap();
+            assert_eq!(info.exclusive_engaged, kind == "engaged");
+            assert_eq!(
+                info.exclusive_transport_format.as_deref(),
+                (kind == "engaged").then_some("24-bit PCM")
+            );
+            if kind == "released" && playing && requested {
+                assert!(matches!(
+                    command_rx.try_recv().unwrap(),
+                    playback_runtime::PlaybackRuntimeCommand::DeviceSwap {
+                        exclusive: true,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(command_rx.try_recv().is_err());
+            }
+        }
+        listener.abort();
+        assert!(listener.await.unwrap_err().is_cancelled());
+    }
 }
 
 #[tokio::test]
@@ -1505,7 +1681,7 @@ async fn runtime_listener_receives_ready_before_its_task_first_runs() {
         access_token: "test-token".to_string(),
         handle: handle.clone(),
     });
-    spawn_playback_runtime_listener(state.clone(), handle.clone());
+    let _ = spawn_playback_runtime_listener(state.clone(), handle.clone());
     assert!(matches!(
         command_rx.try_recv(),
         Ok(playback_runtime::PlaybackRuntimeCommand::RequestReady)
