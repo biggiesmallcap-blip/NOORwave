@@ -49,7 +49,7 @@
 {#if albums.length > 0}
   <div class="album-carousel">
   <div bind:this={rail} class="albums-row" use:wheelToHorizontal role="group" aria-roledescription="carousel" aria-label="Albums">
-    {#each albums as album (album.id)}
+    {#each albums as album, i (album.id)}
       {@const resolved = album.artwork_url ?? lazyArt[album.id] ?? null}
       <div
         class="album-card"
@@ -70,6 +70,7 @@
             className="album-carousel-art"
             src={resolved}
             size={320}
+            loading={i < 8 ? 'eager' : 'lazy'}
             tint={true}
             fallbackText={album.title.slice(0, 2).toUpperCase()}
             decorative={true}

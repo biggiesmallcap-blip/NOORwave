@@ -252,6 +252,11 @@
 	const initialTopArtists = topArtistsQuery.getSnapshot().data;
 	let topArtists = $state<LibraryTopArtist[]>(initialTopArtists?.artists ?? []);
 	let topArtistsLoading = $state(initialTopArtists === undefined);
+	// "Recently Added" reads its own persisted query rather than the shared
+	// tracks store, which holds whatever sort/scope/search the Songs tab last
+	// loaded (and is empty until that load lands).
+	const recentlyAddedQuery = cachedApi.recentlyAddedTracksQuery(100);
+	let recentlyAddedTracks = $state<Track[]>(recentlyAddedQuery.getSnapshot().data?.tracks ?? []);
 
 	// Keyboard cursor for track list
 	let cursorIndex = $state(-1);
@@ -406,6 +411,9 @@
 			topArtists = state.data.artists ?? [];
 			topArtistsLoading = false;
 		});
+		const unsubscribeRecentlyAdded = recentlyAddedQuery.subscribe((state) => {
+			if (state.data !== undefined) recentlyAddedTracks = state.data.tracks;
+		});
 		void loadTopArtists();
 		void loadDecadeChips();
 		const unsubscribeWs = wsMessages.subscribe((messages) => {
@@ -414,6 +422,7 @@
 			if (latest.type === 'library_synced') {
 				void loadCatalogueStatus();
 				void loadTopArtists();
+				void recentlyAddedQuery.refresh().catch(() => undefined);
 			}
 			if (latest.type === 'listen_history_updated') {
 				void loadRecentTracks();
@@ -422,6 +431,7 @@
 		return () => {
 			unsubscribeWs();
 			unsubscribeTopArtists();
+			unsubscribeRecentlyAdded();
 			// Leaving the route invalidates its search and track-list work.
 			librarySearch.dispose();
 			cancelTrackListRequests();
@@ -1340,7 +1350,7 @@
 	let recentAlbums = $derived.by<HomeAlbumCard[]>(() => {
 		const albumDateMap = new Map<number, { card: HomeAlbumCard; date: string }>();
 
-		for (const track of $tracks) {
+		for (const track of recentlyAddedTracks) {
 			if (!track.album_id || !track.date_added) continue;
 			const existing = albumDateMap.get(track.album_id);
 			if (!existing || (savedDateMillis(track.date_added) ?? -Infinity) > (savedDateMillis(existing.date) ?? -Infinity)) {

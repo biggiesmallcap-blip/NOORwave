@@ -281,6 +281,17 @@ export const cachedApi = {
 			options,
 		);
 	},
+	// The Library landing's "Recently Added" source: newest library tracks,
+	// independent of the shared tracks store (which holds whatever sort, scope
+	// or search the Songs tab last loaded). Same key as the Songs tab's default
+	// first page, so both share one persisted entry.
+	recentlyAddedTracksQuery(limit = 100) {
+		return query<{ tracks: Track[]; total: number }>(
+			cacheKeys.tracks('date_added', 'desc', limit, 0, true, false),
+			() => api.getTracks('date_added', 'desc', limit, 0, true, false),
+			mediumOptions,
+		);
+	},
 	getHistory(limit = 50, offset = 0) {
 		const options = offset === 0 ? volatileOptions : shortOptions;
 		return fetchCached<{ tracks: Track[]; total: number }>(
