@@ -909,6 +909,181 @@ async fn superseded_output_notifications_cannot_change_current_status_or_retry()
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exclusive_release_database_wait_does_not_block_output_retirement() {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let (db, mut events) = {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+        guard
+            .playback_runtime_info
+            .as_mut()
+            .unwrap()
+            .exclusive_engaged = true;
+        guard
+            .playback_runtime_info
+            .as_mut()
+            .unwrap()
+            .exclusive_transport_format = Some("current format".into());
+        guard
+            .db
+            .with_conn(|conn| {
+                crate::db::audio_settings::save(
+                    conn,
+                    &crate::db::audio_settings::AudioSettings {
+                        exclusive_mode: true,
+                        ..Default::default()
+                    },
+                )?;
+                conn.execute("UPDATE playback_state SET is_playing=1 WHERE id=1", [])?;
+                Ok(())
+            })
+            .unwrap();
+        (guard.db.clone(), guard.event_tx.subscribe())
+    };
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::RequestReady
+    ));
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        db.with_conn(|_| {
+            held_tx.send(()).unwrap();
+            // A failing assertion must not leave the listener blocked at teardown.
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            Ok(())
+        })
+        .unwrap()
+    });
+    held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+            output_identity: handle.test_exclusive_event_identity(),
+            device_name: "retiring output".into(),
+        }
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.try_read().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // The listener now holds AppState and waits for the database. Publication
+    // must remain possible before that wait finishes.
+    let (published_tx, published_rx) = std::sync::mpsc::channel();
+    let publisher_handle = handle.clone();
+    let publisher = std::thread::spawn(move || {
+        publisher_handle.test_replace_exclusive_event_identity();
+        published_tx.send(()).unwrap();
+    });
+    let published_while_database_held = published_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    publisher.join().unwrap();
+    assert!(
+        published_while_database_held,
+        "database wait blocked output retirement"
+    );
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Paused {
+            track_id: Some(1)
+        })
+    );
+    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, AppEvent::PlaybackStateChanged),
+        "retired release reached the UI: {event:?}"
+    );
+    let guard = state.read().await;
+    let info = guard.playback_runtime_info.as_ref().unwrap();
+    assert!(info.exclusive_engaged);
+    assert_eq!(
+        info.exclusive_transport_format.as_deref(),
+        Some("current format")
+    );
+    assert!(events.try_recv().is_err());
+    assert!(
+        command_rx.try_recv().is_err(),
+        "retired release queued recovery"
+    );
+    drop(guard);
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn exclusive_release_database_error_publishes_status_without_recovery() {
+    for table in ["server_config", "playback_state"] {
+        let (state, _, _, _) = cpal_fault_fixture().await;
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+        let mut events = {
+            let mut guard = state.write().await;
+            guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+            let info = guard.playback_runtime_info.as_mut().unwrap();
+            info.exclusive_engaged = true;
+            info.exclusive_transport_format = Some("24-bit PCM".into());
+            guard
+                .db
+                .with_conn(|conn| {
+                    crate::db::audio_settings::save(
+                        conn,
+                        &crate::db::audio_settings::AudioSettings {
+                            exclusive_mode: true,
+                            ..Default::default()
+                        },
+                    )?;
+                    // Corrupt only this isolated fixture to exercise both reads.
+                    conn.execute_batch(match table {
+                        "server_config" => "DROP TABLE server_config",
+                        _ => "DROP TABLE playback_state",
+                    })?;
+                    Ok(())
+                })
+                .unwrap();
+            guard.event_tx.subscribe()
+        };
+        let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            playback_runtime::PlaybackRuntimeCommand::RequestReady
+        ));
+        assert!(handle.test_publish_event(
+            playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                output_identity: handle.test_exclusive_event_identity(),
+                device_name: "current output".into(),
+            }
+        ));
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, AppEvent::AudioExclusiveReleased { device } if device == "current output")
+        );
+        let guard = state.read().await;
+        let info = guard.playback_runtime_info.as_ref().unwrap();
+        assert!(!info.exclusive_engaged);
+        assert!(info.exclusive_transport_format.is_none());
+        assert!(
+            command_rx.try_recv().is_err(),
+            "failed {table} read queued recovery"
+        );
+        assert!(events.try_recv().is_err());
+        drop(guard);
+        listener.abort();
+        assert!(listener.await.unwrap_err().is_cancelled());
+    }
+}
+
 #[tokio::test]
 async fn runtime_exit_discards_dead_handle_and_pauses_without_changing_queue() {
     let db = fresh_migrated_db();

@@ -494,6 +494,32 @@ pub(crate) fn spawn_playback_runtime_listener(
                     {
                         continue;
                     }
+                    // Reject old releases cheaply, but never hold the output
+                    // publication mutex while waiting for SQLite. The actor
+                    // must remain able to retire an output during that wait.
+                    let is_current_output = {
+                        let identity_guard = handle.lock_exclusive_event_identity();
+                        Arc::ptr_eq(&identity_guard, &output_identity)
+                    };
+                    if !is_current_output {
+                        continue;
+                    }
+                    let retry = state_guard
+                        .db
+                        .with_conn(|conn| {
+                            let settings = crate::db::audio_settings::load(conn)?;
+                            let is_playing = player::load_state(conn)?.is_playing;
+                            Ok(
+                                should_retry_exclusive_release(is_playing, settings.exclusive_mode)
+                                    .then(|| {
+                                        runtime_output_settings_from_audio_settings(&settings)
+                                    }),
+                            )
+                        })
+                        .ok()
+                        .flatten();
+                    // Publication may have superseded this release during the
+                    // database wait. Validate again before any visible change.
                     let identity_guard = handle.lock_exclusive_event_identity();
                     if !Arc::ptr_eq(&identity_guard, &output_identity) {
                         continue;
@@ -505,38 +531,10 @@ pub(crate) fn spawn_playback_runtime_listener(
                     let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
                         device: device_name,
                     });
-                    let retry = {
-                        let settings = state_guard
-                            .db
-                            .with_conn(|conn| {
-                                crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
-                            })
-                            .ok();
-                        let is_playing = state_guard
-                            .db
-                            .with_conn(|conn| player::load_state(conn).map(|s| s.is_playing))
-                            .unwrap_or(false);
-                        let runtime = state_guard
-                            .playback_runtime
-                            .as_ref()
-                            .map(|runtime| runtime.handle.clone());
-                        settings.and_then(|settings| {
-                            if should_retry_exclusive_release(is_playing, settings.exclusive_mode) {
-                                runtime.map(|runtime| {
-                                    (
-                                        runtime,
-                                        runtime_output_settings_from_audio_settings(&settings),
-                                    )
-                                })
-                            } else {
-                                None
-                            }
-                        })
-                    };
                     // Sending is synchronous. Keep the validated runtime
                     // current until its recovery command has been queued.
-                    if let Some((runtime, output)) = retry
-                        && let Err(error) = runtime.recover_released_exclusive_output(
+                    if let Some(output) = retry
+                        && let Err(error) = handle.recover_released_exclusive_output(
                             Arc::clone(&output_identity),
                             output.device,
                             output.exclusive_mode,
