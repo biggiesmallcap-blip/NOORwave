@@ -254,6 +254,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
 }
 
 struct PlaybackRuntimeLoopState {
+    requested_generation: Option<u64>,
     handoff_elapsed_source: Arc<Mutex<Arc<AtomicU64>>>,
     device_name: String,
     device_sample_rate: u32,
@@ -377,6 +378,7 @@ fn run_runtime_loop(
     let mut output_sample_format = supported.sample_format();
 
     let mut state = PlaybackRuntimeLoopState {
+        requested_generation: None,
         handoff_elapsed_source,
         device_name,
         device_sample_rate: output_config.sample_rate,

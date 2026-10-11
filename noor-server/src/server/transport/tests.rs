@@ -424,6 +424,126 @@ async fn generic_runtime_error_waiting_for_lock_cannot_pause_replacement_runtime
 }
 
 #[tokio::test]
+async fn command_error_waiting_for_lock_rejects_new_generation_and_same_job_restart() {
+    for replacement in ["generation", "decoder"] {
+        let (state, handle, _, _) = cpal_fault_fixture().await;
+        let identity = handle.playback_source_identity();
+        let guard = state.write().await;
+        let task_state = state.clone();
+        let task_handle = handle.clone();
+        let consumer = tokio::spawn(async move {
+            handle_runtime_command_error(
+                &task_state,
+                &task_handle,
+                Some(0),
+                &identity,
+                "old command failed",
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        if replacement == "generation" {
+            guard
+                .playback_generation
+                .store(1, std::sync::atomic::Ordering::Release);
+        } else {
+            handle.test_replace_playback_source();
+        }
+        let mut events = guard.event_tx.subscribe();
+        drop(guard);
+        assert!(
+            !consumer.await.unwrap(),
+            "stale {replacement} command error was applied"
+        );
+        let guard = state.read().await;
+        assert!(
+            guard
+                .db
+                .with_conn(player::load_snapshot)
+                .unwrap()
+                .state
+                .is_playing
+        );
+        assert!(
+            guard
+                .audio_active
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .unwrap()
+                .last_error
+                .is_none()
+        );
+        assert!(events.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn current_command_error_reaches_real_listener_and_preserves_queue() {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let before = state
+        .read()
+        .await
+        .db
+        .with_conn(player::load_snapshot)
+        .unwrap();
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut events = {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+        guard.event_tx.subscribe()
+    };
+    spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::RequestReady
+    ));
+    handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::CommandError {
+        generation: Some(0),
+        source_identity: handle.playback_source_identity(),
+        message: "Resume failed: output rejected".into(),
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(events.recv().await.unwrap(), AppEvent::PlaybackStateChanged) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let guard = state.read().await;
+    let after = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert!(!after.state.is_playing);
+    assert_eq!(
+        after.state.current_queue_item_id,
+        before.state.current_queue_item_id
+    );
+    assert_eq!(
+        after.queue.iter().map(|row| row.id).collect::<Vec<_>>(),
+        before.queue.iter().map(|row| row.id).collect::<Vec<_>>()
+    );
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("Resume failed: output rejected")
+    );
+}
+
+#[tokio::test]
 async fn runtime_exit_discards_dead_handle_and_pauses_without_changing_queue() {
     let db = fresh_migrated_db();
     seed_basic_tracks(&db);

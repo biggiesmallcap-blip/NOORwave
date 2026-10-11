@@ -3,7 +3,10 @@ use crate::db::audio_settings::ExclusiveLatencyMode;
 use crate::playback::dj_lookahead::DjMediaRef;
 use crate::playback::gapless::GaplessPlan;
 use crate::playback::player::{PlaybackSourceKind, PreparedPlaybackJob, PreparedTransitionProgram};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64},
+};
 
 #[derive(Debug, Clone)]
 pub enum PlaybackRuntimeCommand {
@@ -247,6 +250,13 @@ pub enum PlaybackRuntimeEvent {
         message: String,
     },
     Error {
+        message: String,
+    },
+    /// Command failure from one generation and decoder, rather than the
+    /// entire runtime. Public notifications omit these internal identities.
+    CommandError {
+        generation: Option<u64>,
+        source_identity: Arc<AtomicU64>,
         message: String,
     },
     /// Internal identity travels across the second queue to the HTTP listener.

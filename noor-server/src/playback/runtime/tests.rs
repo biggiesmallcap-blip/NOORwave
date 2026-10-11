@@ -4269,7 +4269,7 @@ fn report_runtime_command_error_emits_error_event() {
     );
 
     match event_rx.try_recv().expect("error event should be emitted") {
-        PlaybackRuntimeEvent::Error { message } => {
+        PlaybackRuntimeEvent::CommandError { message, .. } => {
             assert!(message.contains("Play failed"));
             assert!(message.contains("output device rejected stream"));
         }
@@ -4325,8 +4325,37 @@ fn command_failure_hard_pauses_every_deck_before_reporting_error() {
     }
     assert!(matches!(
         event_rx.try_recv().unwrap(),
-        PlaybackRuntimeEvent::Error { .. }
+        PlaybackRuntimeEvent::CommandError { .. }
     ));
+}
+
+#[test]
+fn command_error_keeps_generation_and_reader_identity_after_engine_teardown() {
+    let mut state = test_runtime_loop_state();
+    state.requested_generation = Some(7);
+    let engine = test_engine_with_shared(17, 7);
+    let source = Arc::clone(&engine.shared.handoff_elapsed_samples);
+    *state.handoff_elapsed_source.lock().unwrap() = Arc::clone(&source);
+    state.engine = Some(engine);
+    stop_all_engines(&mut state);
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    fail_runtime_command(
+        &mut state,
+        &event_tx,
+        "Play",
+        anyhow::anyhow!("cold start failed"),
+    );
+    match event_rx.try_recv().unwrap() {
+        PlaybackRuntimeEvent::CommandError {
+            generation,
+            source_identity,
+            ..
+        } => {
+            assert_eq!(generation, Some(7));
+            assert!(Arc::ptr_eq(&source_identity, &source));
+        }
+        other => panic!("expected command identity, got {other:?}"),
+    }
 }
 
 #[test]
@@ -4893,6 +4922,7 @@ fn stall_tracker_ignores_paused_finished_drained_engine() {
 
 fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {
     PlaybackRuntimeLoopState {
+        requested_generation: None,
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
         device_name: "test".to_string(),
         device_sample_rate: 48_000,
@@ -5372,7 +5402,7 @@ fn missing_output_device_swap_pauses_actual_decks_and_reports_error() {
         assert_eq!(data, [0.0; 8]);
     }
     match event_rx.try_recv().expect("user-visible failure") {
-        PlaybackRuntimeEvent::Error { message } => {
+        PlaybackRuntimeEvent::CommandError { message, .. } => {
             assert!(message.contains("output is unavailable"))
         }
         other => panic!("expected output error, got {other:?}"),
@@ -5533,7 +5563,7 @@ fn runtime_recovery_composes_after_command_error_and_panic() {
     assert!(state.engine.is_none(), "engine slot cleared after error");
     assert!(state.next_engine.is_none(), "next slot cleared after error");
     match event_rx.try_recv().expect("error event") {
-        PlaybackRuntimeEvent::Error { message } => {
+        PlaybackRuntimeEvent::CommandError { message, .. } => {
             assert!(message.contains("Play failed"));
         }
         other => panic!("expected error event, got {other:?}"),

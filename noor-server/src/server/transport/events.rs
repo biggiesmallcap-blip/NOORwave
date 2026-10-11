@@ -173,6 +173,20 @@ pub(crate) fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::Error { message }) => {
                     handle_runtime_error_from(&state, Some(&handle), &message).await;
                 }
+                Ok(playback_runtime::PlaybackRuntimeEvent::CommandError {
+                    generation,
+                    source_identity,
+                    message,
+                }) => {
+                    handle_runtime_command_error(
+                        &state,
+                        &handle,
+                        generation,
+                        &source_identity,
+                        &message,
+                    )
+                    .await;
+                }
                 Ok(fault @ playback_runtime::PlaybackRuntimeEvent::OutputFault { .. }) => {
                     handle_output_fault(&state, &handle, fault).await;
                 }
@@ -1677,9 +1691,34 @@ pub(crate) async fn handle_runtime_error(state: SharedState, message: &str) {
     handle_runtime_error_from(&state, None, message).await;
 }
 
+pub(crate) async fn handle_runtime_command_error(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    generation: Option<u64>,
+    source_identity: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    message: &str,
+) -> bool {
+    handle_runtime_error_checked(
+        state,
+        Some(handle),
+        Some((generation, source_identity)),
+        message,
+    )
+    .await
+}
+
 pub(crate) async fn handle_runtime_error_from(
     state: &SharedState,
     expected_handle: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    message: &str,
+) -> bool {
+    handle_runtime_error_checked(state, expected_handle, None, message).await
+}
+
+async fn handle_runtime_error_checked(
+    state: &SharedState,
+    expected_handle: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    command_context: Option<(Option<u64>, &std::sync::Arc<std::sync::atomic::AtomicU64>)>,
     message: &str,
 ) -> bool {
     let completed = {
@@ -1693,6 +1732,21 @@ pub(crate) async fn handle_runtime_error_from(
                 .is_some_and(|runtime| runtime.handle.is_same_runtime(expected))
         }) {
             return false;
+        }
+        // Actor publication also uses this reader lock. Keep its identity
+        // stable through the validated DB/UI mutation, then release before
+        // any asynchronous scrobble work. The audio callback never uses it.
+        let source_guard = command_context
+            .and_then(|_| expected_handle.map(|handle| handle.lock_playback_source_identity()));
+        if let Some((generation, source_identity)) = command_context {
+            if generation
+                .is_some_and(|generation| current_playback_generation(&state_guard) != generation)
+                || source_guard
+                    .as_ref()
+                    .is_none_or(|current| !std::sync::Arc::ptr_eq(current, source_identity))
+            {
+                return false;
+            }
         }
         let paused = match state_guard.db.with_conn(player::pause) {
             Ok(_) => true,

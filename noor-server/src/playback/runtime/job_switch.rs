@@ -19,6 +19,8 @@ pub(super) fn transition_to_job(
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
     force_restart: bool,
 ) -> Result<()> {
+    // Retain identity even when a failed cold start removes every engine.
+    state.requested_generation = Some(job.generation);
     let entry_output_rate = state.device_sample_rate;
     // No-op when state.engine is already playing the requested track. This
     // happens after a crossfade swap: promote_next_to_active emitted Finished
