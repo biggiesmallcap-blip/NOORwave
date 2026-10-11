@@ -1363,6 +1363,11 @@ pub(crate) fn estimate_total_samples_from_duration_ms(
 }
 
 #[cfg(test)]
+pub(crate) fn test_measure_allocations<T>(work: impl FnOnce() -> T) -> (T, (u64, u64)) {
+    tests::measure_allocations(work)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn render_and_drain(
@@ -1387,6 +1392,24 @@ mod tests {
 
     #[global_allocator]
     static TEST_ALLOCATOR: CallbackTestAllocator = CallbackTestAllocator;
+
+    pub(super) fn measure_allocations<T>(work: impl FnOnce() -> T) -> (T, (u64, u64)) {
+        struct RestoreCounts((bool, u64, u64));
+        impl Drop for RestoreCounts {
+            fn drop(&mut self) {
+                ALLOCATION_COUNTS.with(|counts| counts.set(self.0));
+            }
+        }
+        let restore = RestoreCounts(ALLOCATION_COUNTS.with(|counts| {
+            let previous = counts.get();
+            counts.set((true, 0, 0));
+            previous
+        }));
+        let result = work();
+        let (_, allocations, frees) = ALLOCATION_COUNTS.with(Cell::get);
+        drop(restore);
+        (result, (allocations, frees))
+    }
 
     // Delegate unchanged to System; count only on the measuring test thread.
     unsafe impl GlobalAlloc for CallbackTestAllocator {

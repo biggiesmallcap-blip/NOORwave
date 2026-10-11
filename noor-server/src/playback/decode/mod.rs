@@ -1121,6 +1121,114 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn resampled_http_wav_reaches_finished_pcm_buffer() {
+        use crate::playback::player::ResolvedStream;
+        use crate::services::tidal::stream::{StreamInfo, StreamRequest};
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicU32, AtomicU64};
+
+        let samples: Vec<i16> = (0..4099)
+            .map(|frame| ((frame as f32 * 0.03).sin() * 12_000.0) as i16)
+            .collect();
+        let data_len = (samples.len() * 2) as u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&88_200u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for sample in &samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/resampler.wav", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("WAV fixture accept failed: {error}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).unwrap();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len()).unwrap();
+            socket.write_all(&wav).unwrap();
+        });
+        let mut job = PreparedPlaybackJob::test_fixture(1, 7);
+        job.source = PlaybackSourceRequest::TidalStream(StreamRequest::new(1, "LOSSLESS"));
+        job.resolved_stream = Some(ResolvedStream {
+            info: StreamInfo {
+                url,
+                segment_urls: vec![],
+                segment_offsets_ms: vec![],
+                track_id: 1,
+                audio_quality: "LOSSLESS".into(),
+                codec: "wav".into(),
+                sample_rate: Some(44_100),
+                bit_depth: Some(16),
+            },
+            resolved_at: Instant::now(),
+        });
+        let (command_tx, _command_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(PlaybackSharedState::new(
+            1,
+            7,
+            job.source_kind(),
+            GaplessPlan::disabled(),
+            48_000,
+            2,
+            None,
+            command_tx,
+            Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        let config = PlaybackRuntimeConfig::new(reqwest::Client::new(), "test", None);
+        let result = decode_and_buffer_job(config, job, shared.clone(), 48_000, 2);
+        server.join().unwrap();
+        result.unwrap();
+        let stereo: Vec<f32> = samples
+            .iter()
+            .flat_map(|sample| {
+                let sample = *sample as f32 / 32_768.0;
+                [sample, sample]
+            })
+            .collect();
+        let mut expected = StreamResampler::new(44_100, 48_000, 2).unwrap();
+        let mut expected_samples = expected.process(&stereo);
+        expected_samples.extend(expected.flush());
+        let guard = shared.buffer.lock().unwrap();
+        assert!(guard.finished);
+        assert!(guard.samples.iter().any(|sample| sample.abs() > 0.1));
+        assert_eq!(guard.samples, expected_samples);
+        assert_eq!(
+            shared.total_samples.load(Ordering::Acquire),
+            guard.samples.len() as u64
+        );
+    }
+
     fn test_track(track_id: i64) -> Track {
         Track {
             id: track_id,
