@@ -1,6 +1,7 @@
-import { writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
 import { type Track, type Album, type Artist } from '$lib/api/client';
 import { cachedApi } from '$lib/cache/api_queries';
+import { createLatestRequestGate } from '$lib/search/latest_request';
 import { createPersistedStore, oneOf } from './persisted';
 import { createSelection } from './selection';
 
@@ -9,8 +10,27 @@ export const albums = writable<Album[]>([]);
 export const artists = writable<Artist[]>([]);
 export const totalTracks = writable(0);
 export const totalAlbums = writable(0);
-export const isLoading = writable(false);
-export const isLoadingMore = writable(false);
+// Albums/artists still share these flags; the track list owns its own so an
+// album load finishing cannot clear a track load (or the reverse).
+const browseLoading = writable(false);
+const browseLoadingMore = writable(false);
+const trackListLoading = writable(false);
+const trackListLoadingMore = writable(false);
+const trackListErrorState = writable<{ error: unknown; append: boolean } | null>(null);
+export const isLoading = derived(
+	[browseLoading, trackListLoading],
+	([browse, trackList]) => browse || trackList,
+);
+export const isLoadingMore = derived(
+	[browseLoadingMore, trackListLoadingMore],
+	([browse, trackList]) => browse || trackList,
+);
+// The newest track-list failure, null while loading and after success, so a
+// failure never reads as an empty library. append=false means the requested
+// query itself failed, so the rows still in $tracks belong to an older query
+// and must not be presented as its result; append=true means only a later
+// page failed and the loaded rows are still this query's.
+export const trackListError = { subscribe: trackListErrorState.subscribe };
 
 export const sortBy = writable('date_added');
 export const sortDir = writable<'asc' | 'desc'>('desc');
@@ -38,42 +58,154 @@ export const lastSelectedTrackId = trackSelection.lastId;
 export const lastSelectedAlbumId = albumSelection.lastId;
 
 const PAGE_SIZE = 100;
-let currentTrackListLikedOnly = false;
-// The scope of the newest track-list request, set before it resolves so a
-// caller can tell whether $tracks already is (or is becoming) the list it wants.
-let requestedTrackListLikedOnly: boolean | null = null;
 
-export function requestedTracksLikedOnly(): boolean | null {
-	return requestedTrackListLikedOnly;
+interface TrackListQuery {
+	sort: string;
+	dir: string;
+	likedOnly: boolean;
 }
 
-export async function loadTracks(
+interface TrackListPage extends TrackListQuery {
+	limit: number;
+	offset: number;
+}
+
+function sameTrackListQuery(a: TrackListQuery | null, b: TrackListQuery): boolean {
+	return a !== null && a.sort === b.sort && a.dir === b.dir && a.likedOnly === b.likedOnly;
+}
+
+// One owner for the track list: only the newest first-page request (a query)
+// may write rows, totals, loading or error state, and a page appends only to
+// the query it was requested for. Responses are not cancelled at the source
+// because cachedApi coalesces them for other callers; stale ones are just not
+// applied.
+const trackListGate = createLatestRequestGate();
+let trackListToken = trackListGate.begin().token;
+// The query whose rows $tracks holds. Its likedOnly decides favorite
+// reconciliation, so it changes only when a response is applied.
+let appliedTrackListQuery: TrackListQuery | null = null;
+// The newest query asked for, set before it resolves so a caller can tell
+// whether $tracks already is (or is becoming) the list it wants.
+let requestedTrackListQuery: TrackListQuery | null = null;
+let pendingTrackListPage: { offset: number; promise: Promise<void> } | null = null;
+let failedTrackListPage: TrackListPage | null = null;
+// True from the moment a first page is requested until one succeeds. While
+// set, $tracks is not the requested list (still loading, failed, or abandoned
+// on unmount): pages are refused so they cannot mix into stale rows, and a
+// return visit reloads instead of trusting the rows held.
+let firstPageOutstanding = false;
+
+export function trackListRequestMatches(sort: string, dir: string, likedOnly: boolean): boolean {
+	return sameTrackListQuery(requestedTrackListQuery, { sort, dir, likedOnly });
+}
+
+/** Whether the latest first-page request never completed (see firstPageOutstanding). */
+export function trackListNeedsReload(): boolean {
+	return firstPageOutstanding;
+}
+
+export function loadTracks(
 	sort = 'date_added',
 	dir = 'desc',
 	limit = PAGE_SIZE,
 	offset = 0,
 	likedOnly = false,
-) {
-	if (offset === 0) requestedTrackListLikedOnly = likedOnly;
-	if (offset === 0) isLoading.set(true);
-	else isLoadingMore.set(true);
+): Promise<void> {
+	const page = { sort, dir, likedOnly, limit, offset };
+	return offset === 0 ? loadTrackListQuery(page) : loadTrackListPage(page);
+}
+
+async function loadTrackListQuery(page: TrackListPage) {
+	const { token } = trackListGate.begin();
+	trackListToken = token;
+	pendingTrackListPage = null;
+	failedTrackListPage = null;
+	requestedTrackListQuery = { sort: page.sort, dir: page.dir, likedOnly: page.likedOnly };
+	firstPageOutstanding = true;
+	trackListErrorState.set(null);
+	trackListLoadingMore.set(false);
+	trackListLoading.set(true);
 	try {
-		// favoriteOnly stays true so the legacy "library tracks" semantics are unchanged
-		// for the Tracks tab; likedOnly takes precedence server-side.
-		const data = await cachedApi.getTracks(sort, dir, limit, offset, true, likedOnly);
-		currentTrackListLikedOnly = likedOnly;
-		if (offset === 0) {
-			tracks.set(data.tracks);
-		} else {
-			tracks.update((t) => [...t, ...data.tracks]);
-		}
+		const data = await fetchTrackListPage(page);
+		if (!trackListGate.isCurrent(token)) return;
+		appliedTrackListQuery = requestedTrackListQuery;
+		firstPageOutstanding = false;
+		tracks.set(data.tracks);
 		totalTracks.set(data.total);
 	} catch (e) {
+		if (!trackListGate.isCurrent(token)) return;
 		console.error('Failed to load tracks:', e);
+		failedTrackListPage = page;
+		trackListErrorState.set({ error: e ?? new Error('Track list request failed'), append: false });
 	} finally {
-		isLoading.set(false);
-		isLoadingMore.set(false);
+		if (trackListGate.isCurrent(token)) trackListLoading.set(false);
 	}
+}
+
+function loadTrackListPage(page: TrackListPage): Promise<void> {
+	const token = trackListToken;
+	// A page belongs to the rows on screen: never while their query's first page
+	// is loading or failed, and never for a sort/scope other than theirs.
+	if (!trackListGate.isCurrent(token) || firstPageOutstanding) return Promise.resolve();
+	if (!sameTrackListQuery(appliedTrackListQuery, page)) return Promise.resolve();
+	if (pendingTrackListPage) {
+		return pendingTrackListPage.offset === page.offset ? pendingTrackListPage.promise : Promise.resolve();
+	}
+	failedTrackListPage = null;
+	trackListErrorState.set(null);
+	trackListLoadingMore.set(true);
+	const promise = (async () => {
+		try {
+			const data = await fetchTrackListPage(page);
+			if (!trackListGate.isCurrent(token)) return;
+			tracks.update((list) => {
+				// Optimistic likes shift offsets; a row already shown must not be
+				// inserted twice (rows are keyed by id).
+				const seen = new Set(list.map((t) => t.id));
+				return [...list, ...data.tracks.filter((t) => !seen.has(t.id))];
+			});
+			totalTracks.set(data.total);
+		} catch (e) {
+			if (!trackListGate.isCurrent(token)) return;
+			console.error('Failed to load more tracks:', e);
+			failedTrackListPage = page;
+			trackListErrorState.set({ error: e ?? new Error('Track list request failed'), append: true });
+		} finally {
+			if (trackListGate.isCurrent(token)) {
+				pendingTrackListPage = null;
+				trackListLoadingMore.set(false);
+			}
+		}
+	})();
+	pendingTrackListPage = { offset: page.offset, promise };
+	return promise;
+}
+
+function fetchTrackListPage(page: TrackListPage) {
+	// favoriteOnly stays true so the legacy "library tracks" semantics are unchanged
+	// for the Tracks tab; likedOnly takes precedence server-side.
+	return cachedApi.getTracks(page.sort, page.dir, page.limit, page.offset, true, page.likedOnly);
+}
+
+/** Re-run the track-list request that failed (first page or a later page). */
+export function retryTrackList(): Promise<void> {
+	const page = failedTrackListPage;
+	if (!page) return Promise.resolve();
+	return page.offset === 0 ? loadTrackListQuery(page) : loadTrackListPage(page);
+}
+
+/** Drop in-flight track-list work, e.g. when the library route unmounts. */
+export function cancelTrackListRequests() {
+	trackListGate.invalidate();
+	trackListToken = trackListGate.begin().token;
+	pendingTrackListPage = null;
+	failedTrackListPage = null;
+	// An unfinished or failed first page leaves no query loaded, so the next
+	// visit reloads; a completed list stays for scroll restoration.
+	requestedTrackListQuery = firstPageOutstanding ? null : appliedTrackListQuery;
+	trackListErrorState.set(null);
+	trackListLoading.set(false);
+	trackListLoadingMore.set(false);
 }
 
 export async function loadAlbums(
@@ -83,8 +215,8 @@ export async function loadAlbums(
 	offset = 0,
 	decade: number | null = null,
 ) {
-	if (offset === 0) isLoading.set(true);
-	else isLoadingMore.set(true);
+	if (offset === 0) browseLoading.set(true);
+	else browseLoadingMore.set(true);
 	try {
 		const data = await cachedApi.getAlbums(sort, dir, limit, offset, true, decade);
 		if (offset === 0) {
@@ -96,14 +228,14 @@ export async function loadAlbums(
 	} catch (e) {
 		console.error('Failed to load albums:', e);
 	} finally {
-		isLoading.set(false);
-		isLoadingMore.set(false);
+		browseLoading.set(false);
+		browseLoadingMore.set(false);
 	}
 }
 
 export async function loadArtists(sort = 'name', dir = 'asc', limit = PAGE_SIZE, offset = 0) {
-	if (offset === 0) isLoading.set(true);
-	else isLoadingMore.set(true);
+	if (offset === 0) browseLoading.set(true);
+	else browseLoadingMore.set(true);
 	try {
 		const data = await cachedApi.getArtists(sort, dir, limit, offset);
 		if (offset === 0) {
@@ -114,8 +246,8 @@ export async function loadArtists(sort = 'name', dir = 'asc', limit = PAGE_SIZE,
 	} catch (e) {
 		console.error('Failed to load artists:', e);
 	} finally {
-		isLoading.set(false);
-		isLoadingMore.set(false);
+		browseLoading.set(false);
+		browseLoadingMore.set(false);
 	}
 }
 
@@ -139,7 +271,7 @@ export function updateLibraryTrackFavorite(trackId: number, isFavorite: boolean,
 		const idx = list.findIndex((t) => t.id === trackId);
 		if (idx !== -1) {
 			if (!isFavorite) {
-				if (currentTrackListLikedOnly) {
+				if (appliedTrackListQuery?.likedOnly) {
 					removed = true;
 					return list.filter((t) => t.id !== trackId);
 				}

@@ -55,12 +55,26 @@ pub(super) async fn start_audio_analysis(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    // Reset cancel flag and mark as running before spawning
+    // Claim the run before touching shared flags: a duplicate start must not
+    // spawn a second worker or reset the running scan's cancel flag.
+    if running
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-    running.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mode_for_spawn = mode.clone();
     tokio::spawn(async move {
+        // Owned by the worker so every exit (rejected path, finished scan,
+        // panic) clears the flag; status must not report a dead worker as running.
+        let _running = AudioAnalysisRunningGuard(running);
         match mode_for_spawn.as_str() {
             "preview" => {
                 scanner::run_preview_scan(state, tx, cancel).await;
@@ -82,20 +96,29 @@ pub(super) async fn start_audio_analysis(
             }
             _ => {}
         }
-        running.store(false, std::sync::atomic::Ordering::Relaxed);
     });
 
     Ok(Json(json!({ "status": "started", "mode": mode })))
 }
 
+/// Clears `audio_analysis_running` on drop, mirroring `TidalSyncRunningGuard`.
+struct AudioAnalysisRunningGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for AudioAnalysisRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub(super) async fn stop_audio_analysis(
     State(state): State<SharedState>,
 ) -> Result<Json<Value>, StatusCode> {
+    // Only ask the scan to stop. The worker keeps owning the run (and the
+    // running flag, via its guard) until it actually exits, so status stays
+    // truthful and a restart cannot reset the cancel flag it is still reading.
     let s = state.read().await;
     s.audio_analysis_cancel
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    s.audio_analysis_running
-        .store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(Json(json!({ "status": "stopped" })))
 }
 
