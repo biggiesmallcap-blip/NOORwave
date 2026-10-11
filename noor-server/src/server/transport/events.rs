@@ -640,8 +640,12 @@ pub(crate) fn spawn_playback_runtime_listener(
                 }) => {
                     // Pre-decode the next track so the transition is gapless.
                     let next_state = state.clone();
+                    let emitting_runtime = handle.clone();
                     tokio::spawn(async move {
-                        if let Err(err) = handle_near_end(next_state, track_id, generation).await {
+                        if let Err(err) =
+                            handle_near_end(next_state, track_id, generation, emitting_runtime)
+                                .await
+                        {
                             warn!("Failed to pre-buffer next track: {err:?}");
                         }
                     });
@@ -737,17 +741,36 @@ pub(crate) fn spawn_playback_runtime_listener(
     })
 }
 
+fn near_end_runtime_is_current(
+    state: &crate::AppState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    track_id: i64,
+    generation: u64,
+) -> bool {
+    state
+        .playback_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+        && current_playback_generation(state) == generation
+        && state
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id)
+            == Some(track_id)
+}
+
 /// Peek at what would play next without advancing the queue, then send `PrepareNext` to the
 /// runtime so it can pre-decode the track and swap it in gaplessly when the current one ends.
 pub(crate) async fn handle_near_end(
     state: SharedState,
     current_track_id: i64,
     generation: u64,
+    handle: playback_runtime::PlaybackRuntimeHandle,
 ) -> anyhow::Result<bool> {
     let mut skipped = false;
     let mut result = Ok(false);
     for _ in 0..PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
-        match prepare_near_end_once(state.clone(), current_track_id, generation).await {
+        match prepare_near_end_once(state.clone(), current_track_id, generation, &handle).await {
             Ok(NearEndPreparationOutcome::SkippedUnavailable) => {
                 skipped = true;
                 result = Ok(true);
@@ -776,19 +799,11 @@ pub(crate) async fn prepare_near_end_once(
     state: SharedState,
     current_track_id: i64,
     generation: u64,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
 ) -> anyhow::Result<NearEndPreparationOutcome> {
-    let (next_track, expected_pair, runtime_handle, crossfade_ms) = {
+    let (next_track, expected_pair, crossfade_ms) = {
         let state_guard = state.read().await;
-
-        // Guard: only proceed if the current track is still the one that fired NearEnd.
-        let active_id = state_guard
-            .playback_runtime_info
-            .as_ref()
-            .and_then(|info| info.active_track_id);
-        if active_id != Some(current_track_id) {
-            return Ok(NearEndPreparationOutcome::Idle);
-        }
-        if current_playback_generation(&state_guard) != generation {
+        if !near_end_runtime_is_current(&state_guard, handle, current_track_id, generation) {
             return Ok(NearEndPreparationOutcome::Idle);
         }
 
@@ -800,10 +815,6 @@ pub(crate) async fn prepare_near_end_once(
                 crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
             ))
         })?;
-        let handle = state_guard
-            .playback_runtime
-            .as_ref()
-            .map(|r| r.handle.clone());
         let crossfade = state_guard.db.with_conn(|conn| {
             conn.query_row(
                 "SELECT crossfade_ms FROM playback_state WHERE id = 1",
@@ -813,10 +824,10 @@ pub(crate) async fn prepare_near_end_once(
             .map_err(anyhow::Error::from)
         })?;
 
-        (next, pair, handle, crossfade)
+        (next, pair, crossfade)
     };
 
-    let (Some(next), Some(handle)) = (next_track, runtime_handle) else {
+    let Some(next) = next_track else {
         return Ok(NearEndPreparationOutcome::Idle);
     };
     if matches!(
@@ -827,13 +838,20 @@ pub(crate) async fn prepare_near_end_once(
         return Ok(NearEndPreparationOutcome::Idle);
     }
     let prebuffer_key = crate::NextPrebufferKey {
+        runtime_identity: handle.runtime_identity(),
         current_track_id,
         next_track_id: next.id,
         generation,
     };
     {
         let mut state_guard = state.write().await;
-        if !claim_next_prebuffer_slot(&mut state_guard.next_prebuffer_inflight, prebuffer_key) {
+        if !near_end_runtime_is_current(&state_guard, handle, current_track_id, generation) {
+            return Ok(NearEndPreparationOutcome::Idle);
+        }
+        if !claim_next_prebuffer_slot(
+            &mut state_guard.next_prebuffer_inflight,
+            prebuffer_key.clone(),
+        ) {
             return Ok(NearEndPreparationOutcome::Idle);
         }
     }
@@ -844,7 +862,7 @@ pub(crate) async fn prepare_near_end_once(
         generation,
         expected_pair,
         next,
-        handle,
+        handle.clone(),
         crossfade_ms,
     )
     .await;
@@ -870,6 +888,9 @@ pub(crate) async fn handle_near_end_prebuffer_next(
     handle: playback_runtime::PlaybackRuntimeHandle,
     crossfade_ms: i32,
 ) -> anyhow::Result<bool> {
+    if !near_end_runtime_is_current(&*state.read().await, &handle, current_track_id, generation) {
+        return Ok(false);
+    }
     // Resolve the stream URL for the next track (we need a live access token).
     let user_quality = current_user_audio_quality(&state).await;
     let stream_request = match player::build_tidal_stream_request(&next, user_quality.clone()) {
@@ -920,6 +941,9 @@ pub(crate) async fn handle_near_end_prebuffer_next(
 
     {
         let state_guard = state.read().await;
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
         let runtime_token = state_guard
             .playback_runtime
             .as_ref()
@@ -964,6 +988,9 @@ pub(crate) async fn handle_near_end_prebuffer_next(
     // rebuild the output device at the new rate before PrepareNext.
     {
         let state_guard = state.read().await;
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
         if let (Some(stream), Some(info)) =
             (stream_info.as_ref(), &state_guard.playback_runtime_info)
         {
@@ -1043,6 +1070,9 @@ pub(crate) async fn handle_near_end_prebuffer_next(
     .with_generation(generation);
     let (job, lookahead_start) = {
         let state_guard = state.read().await;
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
         let channels = state_guard
             .playback_runtime_info
             .as_ref()
@@ -1072,37 +1102,39 @@ pub(crate) async fn handle_near_end_prebuffer_next(
 
     {
         let state_guard = state.read().await;
-        let active_id = state_guard
-            .playback_runtime_info
-            .as_ref()
-            .and_then(|info| info.active_track_id);
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
         let db_current = state_guard
             .db
             .with_conn(player::current_track_id)
             .unwrap_or(None);
-        if active_id != Some(current_track_id) || db_current != Some(current_track_id) {
-            return Ok(false);
-        }
-        if current_playback_generation(&state_guard) != generation {
+        if db_current != Some(current_track_id) {
             return Ok(false);
         }
     }
-
-    if job.prepared_transition.is_some()
-        && let Some(start) = lookahead_start
     {
-        let _ = start.dispatch(&handle);
+        let mut state_guard = state.write().await;
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
+        if job.prepared_transition.is_some()
+            && let Some(start) = lookahead_start.as_ref()
+        {
+            let _ = start.dispatch(&handle);
+        }
+        handle.prepare_next(job)?;
+        if let Some(ref si) = stream_info {
+            state_guard.pending_stream_display = Some(crate::StreamDisplayInfo {
+                audio_quality: si.audio_quality.clone(),
+                sample_rate: si.sample_rate,
+                bit_depth: si.bit_depth,
+            });
+        }
+    }
+    if lookahead_start.is_some() {
         queue_missing_dj_profiles_after_pair_change(state.clone(), "prepared_next_transition")
             .await;
-    }
-    let _ = handle.prepare_next(job);
-    if let Some(ref si) = stream_info {
-        let mut state_guard = state.write().await;
-        state_guard.pending_stream_display = Some(crate::StreamDisplayInfo {
-            audio_quality: si.audio_quality.clone(),
-            sample_rate: si.sample_rate,
-            bit_depth: si.bit_depth,
-        });
     }
     info!("Pre-buffering next track: {} (id {})", next.title, next.id);
     Ok(false)
@@ -1112,7 +1144,7 @@ pub(crate) fn claim_next_prebuffer_slot(
     slot: &mut Option<crate::NextPrebufferKey>,
     key: crate::NextPrebufferKey,
 ) -> bool {
-    if *slot == Some(key) {
+    if slot.as_ref() == Some(&key) {
         return false;
     }
     *slot = Some(key);
@@ -1123,7 +1155,7 @@ pub(crate) fn release_next_prebuffer_slot(
     slot: &mut Option<crate::NextPrebufferKey>,
     key: crate::NextPrebufferKey,
 ) {
-    if *slot == Some(key) {
+    if slot.as_ref() == Some(&key) {
         *slot = None;
     }
 }

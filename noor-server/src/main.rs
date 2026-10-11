@@ -42,12 +42,24 @@ pub struct StreamDisplayInfo {
     pub bit_depth: Option<i32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct NextPrebufferKey {
+    pub runtime_identity: Arc<AtomicBool>,
     pub current_track_id: i64,
     pub next_track_id: i64,
     pub generation: u64,
 }
+
+impl PartialEq for NextPrebufferKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.runtime_identity, &other.runtime_identity)
+            && self.current_track_id == other.current_track_id
+            && self.next_track_id == other.next_track_id
+            && self.generation == other.generation
+    }
+}
+
+impl Eq for NextPrebufferKey {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DropPreviewRuntimeState {

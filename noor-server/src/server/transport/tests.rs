@@ -2745,25 +2745,449 @@ async fn runtime_track_error_advances_to_next_library_track() {
 
 #[test]
 fn next_prebuffer_slot_suppresses_duplicate_pair_only() {
+    let runtime_identity = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let key = crate::NextPrebufferKey {
+        runtime_identity: runtime_identity.clone(),
         current_track_id: 1,
         next_track_id: 2,
         generation: 3,
     };
     let replacement = crate::NextPrebufferKey {
+        runtime_identity,
         current_track_id: 1,
         next_track_id: 4,
         generation: 3,
     };
     let mut slot = None;
 
-    assert!(claim_next_prebuffer_slot(&mut slot, key));
-    assert!(!claim_next_prebuffer_slot(&mut slot, key));
-    assert!(claim_next_prebuffer_slot(&mut slot, replacement));
+    assert!(claim_next_prebuffer_slot(&mut slot, key.clone()));
+    assert!(!claim_next_prebuffer_slot(&mut slot, key.clone()));
+    assert!(claim_next_prebuffer_slot(&mut slot, replacement.clone()));
     release_next_prebuffer_slot(&mut slot, key);
-    assert_eq!(slot, Some(replacement));
+    assert_eq!(slot, Some(replacement.clone()));
     release_next_prebuffer_slot(&mut slot, replacement);
     assert_eq!(slot, None);
+}
+
+struct NearEndStreamGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    reject: bool,
+}
+
+#[async_trait::async_trait]
+impl super::stream::StreamSource for NearEndStreamGate {
+    async fn resolve(
+        &self,
+        _token: &str,
+        request: &crate::services::tidal::stream::StreamRequest,
+    ) -> Result<
+        crate::services::tidal::stream::StreamInfo,
+        crate::services::tidal::stream::StreamResolveError,
+    > {
+        self.entered.notify_one();
+        self.release.notified().await;
+        if self.reject {
+            Err(
+                crate::services::tidal::stream::StreamResolveError::StreamRejected {
+                    message: "track-specific rejection".into(),
+                },
+            )
+        } else {
+            Ok(super::stream::test_stream_info(request.track_id))
+        }
+    }
+}
+
+struct NearEndRuntimeProbe {
+    handle: playback_runtime::PlaybackRuntimeHandle,
+    commands: std::sync::mpsc::Receiver<playback_runtime::PlaybackRuntimeCommand>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl NearEndRuntimeProbe {
+    fn new() -> Self {
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let (observed_tx, commands) = std::sync::mpsc::channel();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+                match command_rx.recv_timeout(Duration::from_millis(20)) {
+                    Ok(playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                        respond_to,
+                        ..
+                    }) => {
+                        let _ = respond_to.send(playback_runtime::PlaybackTrackStatus::None);
+                    }
+                    Ok(playback_runtime::PlaybackRuntimeCommand::RequestReady) => {}
+                    Ok(command) => {
+                        let _ = observed_tx.send(command);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        });
+        Self {
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+            commands,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for NearEndRuntimeProbe {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+async fn near_end_fixture(
+    reject: bool,
+) -> (
+    crate::SharedState,
+    NearEndRuntimeProbe,
+    Arc<NearEndStreamGate>,
+) {
+    static NEXT_TIDAL_ID: std::sync::atomic::AtomicI64 =
+        std::sync::atomic::AtomicI64::new(9_400_002);
+    let tidal_id = NEXT_TIDAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let probe = NearEndRuntimeProbe::new();
+    let source = Arc::new(NearEndStreamGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        reject,
+    });
+    {
+        let mut guard = state.write().await;
+        guard
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE tracks SET tidal_id=?1, source='tidal' WHERE id=2",
+                    [tidal_id],
+                )?;
+                player::enqueue_track(conn, 2, "test")?;
+                Ok(())
+            })
+            .unwrap();
+        guard.stream_source = source.clone();
+        guard.playback_runtime.as_mut().unwrap().handle = probe.handle.clone();
+        guard
+            .tidal
+            .set_tokens_for_test(Some(crate::services::tidal::auth::TidalTokens {
+                access_token: "test".into(),
+                refresh_token: "test-refresh".into(),
+                token_type: "Bearer".into(),
+                expires_in: 3600,
+                user_id: "test-user".into(),
+                country_code: "US".into(),
+                auth_flow: Some("pkce".into()),
+            }));
+    }
+    (state, probe, source)
+}
+
+#[tokio::test]
+async fn near_end_resolution_cannot_dispatch_to_replaced_runtime_or_publish_its_metadata() {
+    let (state, old, source) = near_end_fixture(false).await;
+    let pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, old.handle.clone()));
+    tokio::time::timeout(Duration::from_secs(2), source.entered.notified())
+        .await
+        .unwrap();
+    let replacement = NearEndRuntimeProbe::new();
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = replacement.handle.clone();
+        guard.pending_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "replacement quality".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+    }
+    source.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            old.commands.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "old resolution dispatched a command after runtime replacement"
+    );
+    assert!(matches!(
+        replacement.commands.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        state
+            .read()
+            .await
+            .pending_stream_display
+            .as_ref()
+            .unwrap()
+            .audio_quality,
+        "replacement quality"
+    );
+}
+
+#[tokio::test]
+async fn near_end_retired_listener_cannot_resolve_for_replacement_runtime() {
+    let (state, old, source) = near_end_fixture(false).await;
+    let mut guard = state.write().await;
+    let listener = spawn_playback_runtime_listener(state.clone(), old.handle.clone());
+    assert!(
+        old.handle
+            .test_publish_event(playback_runtime::PlaybackRuntimeEvent::NearEnd {
+                track_id: 1,
+                generation: 0,
+            })
+    );
+    tokio::task::yield_now().await;
+    let replacement = NearEndRuntimeProbe::new();
+    guard.playback_runtime.as_mut().unwrap().handle = replacement.handle.clone();
+    drop(guard);
+    let resolved =
+        tokio::time::timeout(Duration::from_millis(300), source.entered.notified()).await;
+    source.release.notify_one();
+    assert!(
+        old.handle
+            .test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited { message: None })
+    );
+    tokio::time::timeout(Duration::from_secs(2), listener)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        resolved.is_err(),
+        "retired listener started replacement prebuffer resolution"
+    );
+    assert!(state.read().await.next_prebuffer_inflight.is_none());
+}
+
+#[tokio::test]
+async fn near_end_old_completion_preserves_replacement_slot_and_current_preparation() {
+    let (state, old, source) = near_end_fixture(false).await;
+    let old_pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, old.handle.clone()));
+    tokio::time::timeout(Duration::from_secs(2), source.entered.notified())
+        .await
+        .unwrap();
+    let old_slot = state.read().await.next_prebuffer_inflight.clone().unwrap();
+    let replacement = NearEndRuntimeProbe::new();
+    let new_source = Arc::new(NearEndStreamGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        reject: false,
+    });
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = replacement.handle.clone();
+        guard.stream_source = new_source.clone();
+    }
+    let new_pending = tokio::spawn(handle_near_end(
+        state.clone(),
+        1,
+        0,
+        replacement.handle.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), new_source.entered.notified())
+        .await
+        .unwrap();
+    let new_slot = state.read().await.next_prebuffer_inflight.clone().unwrap();
+    assert_ne!(old_slot, new_slot);
+    source.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), old_pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state.read().await.next_prebuffer_inflight,
+        Some(new_slot),
+        "old completion cleared replacement's preparation slot"
+    );
+    assert!(matches!(
+        old.commands.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    new_source.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), new_pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(replacement.commands.recv_timeout(Duration::from_millis(200)).unwrap(), playback_runtime::PlaybackRuntimeCommand::PrepareNext(job) if job.track_id() == 2 && job.generation == 0)
+    );
+    let guard = state.read().await;
+    assert!(guard.next_prebuffer_inflight.is_none());
+    assert_eq!(
+        guard.pending_stream_display.as_ref().unwrap().audio_quality,
+        "LOSSLESS"
+    );
+}
+
+#[tokio::test]
+async fn near_end_failed_dispatch_does_not_publish_pending_metadata_and_releases_slot() {
+    let (state, mut probe, source) = near_end_fixture(false).await;
+    let pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, probe.handle.clone()));
+    tokio::time::timeout(Duration::from_secs(2), source.entered.notified())
+        .await
+        .unwrap();
+    probe.stop.store(true, std::sync::atomic::Ordering::Release);
+    probe.thread.take().unwrap().join().unwrap();
+    source.release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    let guard = state.read().await;
+    assert!(guard.next_prebuffer_inflight.is_none());
+    assert!(guard.pending_stream_display.is_none());
+}
+
+#[tokio::test]
+async fn near_end_cancelled_task_slot_retains_identity_and_allows_replacement() {
+    let (state, old, source) = near_end_fixture(false).await;
+    let identity = Arc::downgrade(&old.handle.runtime_identity());
+    let pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, old.handle.clone()));
+    tokio::time::timeout(Duration::from_secs(2), source.entered.notified())
+        .await
+        .unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    let replacement = NearEndRuntimeProbe::new();
+    let new_source = Arc::new(NearEndStreamGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        reject: false,
+    });
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = replacement.handle.clone();
+        guard.stream_source = new_source.clone();
+    }
+    drop(old);
+    assert!(
+        identity.upgrade().is_some(),
+        "cancelled task's slot lost its runtime identity"
+    );
+    let pending = tokio::spawn(handle_near_end(
+        state.clone(),
+        1,
+        0,
+        replacement.handle.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), new_source.entered.notified())
+        .await
+        .unwrap();
+    assert!(
+        identity.upgrade().is_none(),
+        "replacement did not take ownership of the slot"
+    );
+    new_source.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(replacement.commands.recv_timeout(Duration::from_millis(200)).unwrap(), playback_runtime::PlaybackRuntimeCommand::PrepareNext(job) if job.track_id() == 2)
+    );
+}
+
+#[tokio::test]
+async fn near_end_replaced_runtime_rejection_cannot_remove_current_queue_row() {
+    let (state, old, source) = near_end_fixture(true).await;
+    let before = state
+        .read()
+        .await
+        .db
+        .with_conn(player::load_snapshot)
+        .unwrap();
+    let pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, old.handle.clone()));
+    tokio::time::timeout(Duration::from_secs(2), source.entered.notified())
+        .await
+        .unwrap();
+    let replacement = NearEndRuntimeProbe::new();
+    state
+        .write()
+        .await
+        .playback_runtime
+        .as_mut()
+        .unwrap()
+        .handle = replacement.handle.clone();
+    source.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let after = state
+        .read()
+        .await
+        .db
+        .with_conn(player::load_snapshot)
+        .unwrap();
+    assert_eq!(
+        after.state.current_queue_item_id,
+        before.state.current_queue_item_id
+    );
+    assert_eq!(
+        after.queue.iter().map(|row| row.id).collect::<Vec<_>>(),
+        before.queue.iter().map(|row| row.id).collect::<Vec<_>>()
+    );
+    assert!(after.state.is_playing);
+}
+
+#[tokio::test]
+async fn near_end_current_runtime_rejection_skips_only_upcoming_row() {
+    let (state, probe, source) = near_end_fixture(true).await;
+    let before = state
+        .read()
+        .await
+        .db
+        .with_conn(player::load_snapshot)
+        .unwrap();
+    let pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, probe.handle.clone()));
+    tokio::time::timeout(Duration::from_secs(2), source.entered.notified())
+        .await
+        .unwrap();
+    source.release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+    let guard = state.read().await;
+    let after = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert_eq!(
+        after.state.current_queue_item_id,
+        before.state.current_queue_item_id
+    );
+    assert_eq!(after.queue.len(), 1);
+    assert_eq!(after.queue[0].track.id, 1);
+    assert!(after.state.is_playing);
+    assert!(guard.next_prebuffer_inflight.is_none());
+    assert!(matches!(
+        probe.commands.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
 }
 
 #[test]

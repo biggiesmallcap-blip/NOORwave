@@ -238,6 +238,12 @@ impl PlaybackRuntimeHandle {
         Arc::ptr_eq(&self.healthy, &other.healthy)
     }
 
+    pub(crate) fn runtime_identity(&self) -> Arc<AtomicBool> {
+        // A slot can outlive a cancelled task. Retain its identity so another
+        // runtime cannot reuse the allocation while that slot still exists.
+        Arc::clone(&self.healthy)
+    }
+
     /// Segment-aware seek. Single entry point for all seek requests; the
     /// runtime decides between in-buffer fast path, forced-restart segment
     /// seek, or rejection. The `allow_segment_seek` flag opts in to the

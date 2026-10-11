@@ -141,7 +141,9 @@ pub(crate) fn spawn_dj_pair_preparation(
             // Use the established peek/prebuffer path from track start. Keep
             // network resolution away from the runtime event listener.
             if prepare_attempts < 3 && Instant::now() >= next_prepare_attempt {
-                match handle_near_end(state.clone(), track_id, playback_generation).await {
+                match handle_near_end(state.clone(), track_id, playback_generation, handle.clone())
+                    .await
+                {
                     Ok(false) => {} // Already prepared or another preparation owns the slot.
                     result => {
                         prepare_attempts += 1;
