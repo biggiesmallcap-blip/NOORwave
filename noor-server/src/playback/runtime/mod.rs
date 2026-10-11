@@ -315,6 +315,21 @@ fn receive_runtime_command(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     wait: Duration,
 ) -> std::result::Result<PlaybackRuntimeCommand, mpsc::RecvTimeoutError> {
+    // Reconcile a failed output before accepting Resume. The diagnostic lives
+    // on its stream, so replacement streams cannot inherit an old fault.
+    for engine in [
+        state.engine.as_ref(),
+        state.next_engine.as_ref(),
+        state.fading_out_engine.as_ref(),
+        state.drop_preview_engine.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(command) = engine.take_output_error() {
+            return Ok(command);
+        }
+    }
     // A queued seek must retire its old callback mailbox before those values
     // become actor commands. Once dispatched, subsequent controls retain FIFO.
     match command_rx.try_recv() {

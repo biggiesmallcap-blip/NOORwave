@@ -1390,6 +1390,35 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn cpal_first_fatal_callback_defers_owned_error_without_allocator_use() {
+        let shared = test_shared_state();
+        let live = Arc::new(AtomicBool::new(true));
+        let callback = crate::playback::output::cpal_shared::CpalCallbackState::new(live);
+        let error = cpal::Error::with_message(
+            cpal::ErrorKind::DeviceNotAvailable,
+            String::from("driver diagnostic retained for runtime"),
+        );
+        ALLOCATION_COUNTS.with(|counts| counts.set((true, 0, 0)));
+        crate::playback::output::cpal_shared::emit_cpal_stream_error(&shared, &callback, error);
+        let (_, allocations, frees) = ALLOCATION_COUNTS.with(|counts| {
+            let result = counts.get();
+            counts.set((false, 0, 0));
+            result
+        });
+        assert_eq!(
+            (allocations, frees),
+            (0, 0),
+            "fatal callback used the allocator"
+        );
+        match callback.take_command(&shared).unwrap() {
+            PlaybackRuntimeCommand::CpalOutputError { message, .. } => {
+                assert!(message.contains("driver diagnostic retained for runtime"));
+            }
+            other => panic!("expected retained diagnostic, got {other:?}"),
+        }
+    }
+
     fn test_shared_state() -> Arc<PlaybackSharedState> {
         let (command_tx, _) = mpsc::channel();
         Arc::new(PlaybackSharedState::new(

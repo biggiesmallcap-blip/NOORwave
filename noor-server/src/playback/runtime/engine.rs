@@ -16,7 +16,11 @@ use std::thread::{self, JoinHandle};
 use tracing::{error, warn};
 
 enum OutputStream {
-    Cpal { _stream: CpalOutputStream },
+    Cpal {
+        _stream: CpalOutputStream,
+    },
+    #[cfg(test)]
+    FaultMailbox(Arc<crate::playback::output::cpal_shared::CpalCallbackState>),
 }
 
 pub(super) struct SwapPauseGuard {
@@ -90,6 +94,22 @@ pub(super) fn require_decoded_output_rate(
 }
 
 impl PlaybackEngine {
+    pub(super) fn take_output_error(&self) -> Option<PlaybackRuntimeCommand> {
+        match self.stream.as_ref()? {
+            OutputStream::Cpal { _stream } => _stream.take_error(&self.shared),
+            #[cfg(test)]
+            OutputStream::FaultMailbox(callback) => callback.take_command(&self.shared),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_attach_fault_mailbox(
+        &mut self,
+        callback: Arc<crate::playback::output::cpal_shared::CpalCallbackState>,
+    ) {
+        self.stream = Some(OutputStream::FaultMailbox(callback));
+    }
+
     #[cfg(test)]
     pub(super) fn test_with_shared(
         track_id: i64,

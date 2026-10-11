@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
@@ -71,6 +71,56 @@ pub(crate) fn output_rate_fallback_config(
 pub(crate) struct RetiringOutputStream<T> {
     stream: Option<T>,
     live: Arc<AtomicBool>,
+    callback: Arc<CpalCallbackState>,
+}
+
+/// The stream owner retains the diagnostic until native teardown has joined
+/// callbacks. Only the first fatal producer writes; consumers never wait.
+pub(crate) struct CpalCallbackState {
+    live: Arc<AtomicBool>,
+    claimed: AtomicBool,
+    delivered: AtomicBool,
+    error: OnceLock<cpal::Error>,
+}
+
+impl CpalCallbackState {
+    pub(crate) fn new(live: Arc<AtomicBool>) -> Self {
+        Self {
+            live,
+            claimed: AtomicBool::new(false),
+            delivered: AtomicBool::new(false),
+            error: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn take_command(
+        &self,
+        shared: &PlaybackSharedState,
+    ) -> Option<PlaybackRuntimeCommand> {
+        if !self.live.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire) {
+            return None;
+        }
+        let error = self.error.get()?;
+        if self.delivered.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        Some(PlaybackRuntimeCommand::CpalOutputError {
+            track_id: shared.track_id,
+            generation: shared.generation,
+            decoder_stop: shared.stop_flag(),
+            output_live: Arc::clone(&self.live),
+            message: format!("Playback output stream error: {error}"),
+        })
+    }
+}
+
+impl<T> RetiringOutputStream<T> {
+    pub(crate) fn take_error(
+        &self,
+        shared: &PlaybackSharedState,
+    ) -> Option<PlaybackRuntimeCommand> {
+        self.callback.take_command(shared)
+    }
 }
 
 pub(crate) type CpalOutputStream = RetiringOutputStream<Stream>;
@@ -84,10 +134,10 @@ impl<T> Drop for RetiringOutputStream<T> {
 
 pub(crate) fn emit_cpal_stream_error(
     shared: &PlaybackSharedState,
-    output_live: &Arc<AtomicBool>,
+    callback: &CpalCallbackState,
     err: cpal::Error,
 ) {
-    if !output_live.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire) {
+    if !callback.live.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire) {
         return;
     }
     let notice = match err.kind() {
@@ -104,15 +154,15 @@ pub(crate) fn emit_cpal_stream_error(
             .fetch_or(notice, Ordering::Relaxed);
         return;
     }
-    let _ = shared
-        .command_tx
-        .send(PlaybackRuntimeCommand::CpalOutputError {
-            track_id: shared.track_id,
-            generation: shared.generation,
-            decoder_stop: shared.stop_flag(),
-            output_live: Arc::clone(output_live),
-            message: format!("Playback output stream error: {err}"),
-        });
+    if callback
+        .claimed
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        // The claim gives this producer sole access to initialization. Moving
+        // the owned diagnostic neither formats nor frees its payload here.
+        let _ = callback.error.set(err);
+    }
 }
 
 fn build_output_stream(
@@ -124,16 +174,18 @@ fn build_output_stream(
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<CpalOutputStream> {
     let live = Arc::new(AtomicBool::new(true));
+    let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
     // Guard build failures too: callbacks queued before a failed native open
     // must not be mistaken for errors from its fallback on the same decoder.
     let mut output = RetiringOutputStream {
         stream: None,
         live: Arc::clone(&live),
+        callback: Arc::clone(&callback),
     };
     let stream = match output_sample_format {
         SampleFormat::F32 => {
             let error_shared = Arc::clone(&shared);
-            let error_live = Arc::clone(&live);
+            let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
                 move |data: &mut [f32], _| write_output_f32(data, &shared, &command_tx, &event_tx),
@@ -143,7 +195,7 @@ fn build_output_stream(
         }
         SampleFormat::F64 => {
             let error_shared = Arc::clone(&shared);
-            let error_live = Arc::clone(&live);
+            let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
                 move |data: &mut [f64], _| write_output_f64(data, &shared, &command_tx, &event_tx),
@@ -153,7 +205,7 @@ fn build_output_stream(
         }
         SampleFormat::I24 => {
             let error_shared = Arc::clone(&shared);
-            let error_live = Arc::clone(&live);
+            let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
                 move |data: &mut [cpal::I24], _| {
@@ -165,7 +217,7 @@ fn build_output_stream(
         }
         SampleFormat::I16 => {
             let error_shared = Arc::clone(&shared);
-            let error_live = Arc::clone(&live);
+            let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
                 move |data: &mut [i16], _| write_output_i16(data, &shared, &command_tx, &event_tx),
@@ -175,7 +227,7 @@ fn build_output_stream(
         }
         SampleFormat::I32 => {
             let error_shared = Arc::clone(&shared);
-            let error_live = Arc::clone(&live);
+            let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
                 move |data: &mut [i32], _| write_output_i32(data, &shared, &command_tx, &event_tx),
@@ -185,7 +237,7 @@ fn build_output_stream(
         }
         SampleFormat::U16 => {
             let error_shared = Arc::clone(&shared);
-            let error_live = Arc::clone(&live);
+            let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
                 move |data: &mut [u16], _| write_output_u16(data, &shared, &command_tx, &event_tx),
@@ -304,16 +356,18 @@ mod tests {
     }
 
     #[test]
-    fn cpal_error_callback_queues_identity_for_runtime_reconciliation() {
+    fn cpal_error_callback_retains_identity_for_runtime_reconciliation() {
         let (command_tx, command_rx) = mpsc::channel();
         let shared = shared(command_tx);
         let live = Arc::new(AtomicBool::new(true));
+        let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
         emit_cpal_stream_error(
             &shared,
-            &live,
+            &callback,
             cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
         );
-        match command_rx.try_recv().unwrap() {
+        assert!(command_rx.try_recv().is_err());
+        match callback.take_command(&shared).unwrap() {
             PlaybackRuntimeCommand::CpalOutputError {
                 track_id,
                 generation,
@@ -328,6 +382,7 @@ mod tests {
             }
             other => panic!("expected native fault command, got {other:?}"),
         }
+        assert!(callback.take_command(&shared).is_none());
     }
 
     #[test]
@@ -335,19 +390,21 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel();
         let shared = shared(command_tx);
         let live = Arc::new(AtomicBool::new(false));
+        let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
         emit_cpal_stream_error(
             &shared,
-            &live,
+            &callback,
             cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
         );
         live.store(true, Ordering::Release);
         shared.stopped.store(true, Ordering::Release);
         emit_cpal_stream_error(
             &shared,
-            &live,
+            &callback,
             cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
         );
         assert!(command_rx.try_recv().is_err());
+        assert!(callback.take_command(&shared).is_none());
     }
 
     #[test]
@@ -360,7 +417,8 @@ mod tests {
             let (command_tx, command_rx) = mpsc::channel();
             let shared = shared(command_tx);
             let live = Arc::new(AtomicBool::new(true));
-            emit_cpal_stream_error(&shared, &live, cpal::Error::new(kind));
+            let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
+            emit_cpal_stream_error(&shared, &callback, cpal::Error::new(kind));
             assert!(
                 command_rx.try_recv().is_err(),
                 "recoverable notice {kind:?} stopped playback"
@@ -372,24 +430,71 @@ mod tests {
 
     #[test]
     fn output_drop_retires_identity_before_native_destructor() {
-        struct NativeDropProbe(Arc<AtomicBool>);
+        struct NativeDropProbe(Arc<AtomicBool>, std::sync::Weak<CpalCallbackState>);
         impl Drop for NativeDropProbe {
             fn drop(&mut self) {
                 assert!(!self.0.load(Ordering::Acquire));
+                let callback = self
+                    .1
+                    .upgrade()
+                    .expect("owner retains diagnostics through teardown");
+                assert_eq!(
+                    callback.error.get().unwrap().message(),
+                    Some("retained through join")
+                );
             }
         }
         let live = Arc::new(AtomicBool::new(true));
+        let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
+        let (command_tx, _) = mpsc::channel();
+        emit_cpal_stream_error(
+            &shared(command_tx),
+            &callback,
+            cpal::Error::with_message(cpal::ErrorKind::DeviceNotAvailable, "retained through join"),
+        );
         drop(RetiringOutputStream {
-            stream: Some(NativeDropProbe(Arc::clone(&live))),
+            stream: Some(NativeDropProbe(
+                Arc::clone(&live),
+                Arc::downgrade(&callback),
+            )),
+            callback,
             live,
         });
     }
 
     #[test]
+    fn fatal_diagnostic_is_delivered_once_and_not_inherited_by_replacement() {
+        let (command_tx, _) = mpsc::channel();
+        let shared = shared(command_tx);
+        let live = Arc::new(AtomicBool::new(true));
+        let callback = CpalCallbackState::new(Arc::clone(&live));
+        for message in ["first diagnostic", "duplicate diagnostic"] {
+            emit_cpal_stream_error(
+                &shared,
+                &callback,
+                cpal::Error::with_message(cpal::ErrorKind::DeviceNotAvailable, message),
+            );
+        }
+        match callback.take_command(&shared).unwrap() {
+            PlaybackRuntimeCommand::CpalOutputError { message, .. } => {
+                assert!(message.contains("first diagnostic"))
+            }
+            other => panic!("expected fault, got {other:?}"),
+        }
+        assert!(callback.take_command(&shared).is_none());
+        let replacement = CpalCallbackState::new(Arc::new(AtomicBool::new(true)));
+        assert!(replacement.take_command(&shared).is_none());
+        live.store(false, Ordering::Release);
+        assert!(callback.take_command(&shared).is_none());
+    }
+
+    #[test]
     fn failed_output_build_guard_retires_callback_identity() {
         let live = Arc::new(AtomicBool::new(true));
+        let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
         let output: RetiringOutputStream<Stream> = RetiringOutputStream {
             stream: None,
+            callback,
             live: Arc::clone(&live),
         };
         drop(output);

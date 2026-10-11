@@ -4924,6 +4924,68 @@ fn cpal_output_fault_hard_pauses_graph_without_finishing_queue() {
 }
 
 #[test]
+fn cpal_callback_fault_reaches_runtime_before_queued_resume() {
+    use crate::playback::output::cpal_shared::{CpalCallbackState, emit_cpal_stream_error};
+    let mut state = test_runtime_loop_state();
+    let mut engine = test_engine_with_shared(1, 7);
+    let live = Arc::new(AtomicBool::new(true));
+    let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
+    engine.test_attach_fault_mailbox(Arc::clone(&callback));
+    emit_cpal_stream_error(
+        &engine.shared,
+        &callback,
+        cpal::Error::with_message(
+            cpal::ErrorKind::DeviceNotAvailable,
+            "native driver disconnected",
+        ),
+    );
+    state.engine = Some(engine);
+    let (command_tx, command_rx) = mpsc::channel();
+    command_tx.send(PlaybackRuntimeCommand::Resume).unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    match receive_runtime_command(&state, &command_rx, &command_tx, &event_tx, Duration::ZERO)
+        .unwrap()
+    {
+        PlaybackRuntimeCommand::CpalOutputError {
+            track_id,
+            generation,
+            decoder_stop,
+            output_live,
+            message,
+        } => {
+            assert!(message.contains("native driver disconnected"));
+            assert!(Arc::ptr_eq(&output_live, &live));
+            handle_cpal_output_error(
+                &mut state,
+                &event_tx,
+                track_id,
+                generation,
+                decoder_stop,
+                output_live,
+                message,
+            );
+        }
+        other => panic!("fault must precede Resume, got {other:?}"),
+    }
+    assert!(state.user_paused);
+    assert!(state.engine.as_ref().unwrap().output_faulted);
+    assert!(matches!(
+        event_rx.try_recv().unwrap(),
+        PlaybackRuntimeEvent::OutputFault { .. }
+    ));
+    assert!(matches!(
+        receive_runtime_command(&state, &command_rx, &command_tx, &event_tx, Duration::ZERO)
+            .unwrap(),
+        PlaybackRuntimeCommand::Resume
+    ));
+    assert!(
+        callback
+            .take_command(&state.engine.as_ref().unwrap().shared)
+            .is_none()
+    );
+}
+
+#[test]
 fn delayed_cpal_output_fault_does_not_pause_replacement_or_new_output() {
     let mut state = test_runtime_loop_state();
     let retired = test_engine_with_shared(1, 7);
