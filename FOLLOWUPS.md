@@ -10,6 +10,18 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### remote: browser reconnect timer loses its receiver
+
+Source: the Library loading browser regression, before its WebSocket fixture was
+connected, raised `TypeError: Illegal invocation` from `ReconnectScheduler.next`.
+Affected surfaces: `frontend/src/lib/remote/connection.ts` and
+`frontend/src/lib/api/ws.ts`. The scheduler invokes stored native `setTimeout`
+and `clearTimeout` functions as instance methods, which Edge rejects, preventing
+reconnect after a socket closes. This is outside the Library rendering change.
+Next check: reproduce a socket close in Edge, wrap the native timer defaults in
+receiver-safe closures, and verify reconnect and cancellation in a browser.
+Spawned by: Library blank-on-entry follow-up to PR #351.
+
 ### tidal: move stream.rs behind the session-bound transport
 
 Playback stream resolution (playbackinfo, manifests, video streams, downloads)
