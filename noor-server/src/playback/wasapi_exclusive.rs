@@ -105,6 +105,7 @@ fn wait_for_device_event(
         let wait_ms = remaining
             .as_millis()
             .clamp(1, u128::from(DEVICE_EVENT_CANCEL_POLL_MS)) as u32;
+        let slice_started = Instant::now();
         let result = wait(wait_ms);
         if shutdown.load(Ordering::SeqCst) || force_release.load(Ordering::Acquire) {
             return DeviceEventWait::Cancelled;
@@ -114,7 +115,16 @@ fn wait_for_device_event(
             // wasapi 0.25 maps every non-signaled Win32 result, including
             // WAIT_FAILED, to EventTimeout. Preserve the total device-loss
             // deadline instead of treating one cancellation slice as failure.
-            Err(WasapiError::EventTimeout) => {}
+            Err(WasapiError::EventTimeout) => {
+                // A failed Win32 wait can return immediately with this same
+                // error. Pace its unused slice without guessing the cause.
+                let unused_slice = Duration::from_millis(u64::from(wait_ms))
+                    .saturating_sub(slice_started.elapsed())
+                    .min(timeout.saturating_sub(started.elapsed()));
+                if !unused_slice.is_zero() {
+                    thread::sleep(unused_slice);
+                }
+            }
             Err(_) => return DeviceEventWait::Failed,
         }
     }
@@ -2065,6 +2075,20 @@ mod tests {
                 DeviceEventWait::Cancelled,
             );
         }
+    }
+
+    #[test]
+    fn exclusive_device_wait_paces_immediate_timeout_results() {
+        let shutdown = AtomicBool::new(false);
+        let force_release = AtomicBool::new(false);
+        let mut calls = 0;
+        let result =
+            wait_for_device_event(&shutdown, &force_release, Duration::from_millis(35), |_| {
+                calls += 1;
+                Err(WasapiError::EventTimeout)
+            });
+        assert_eq!(result, DeviceEventWait::TimedOut);
+        assert!(calls <= 8, "immediate event timeouts spun {calls} times");
     }
 
     #[test]
