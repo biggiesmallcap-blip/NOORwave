@@ -171,7 +171,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Error { message }) => {
-                    handle_runtime_error(state.clone(), &message).await;
+                    handle_runtime_error_from(&state, Some(&handle), &message).await;
                 }
                 Ok(fault @ playback_runtime::PlaybackRuntimeEvent::OutputFault { .. }) => {
                     handle_output_fault(&state, &handle, fault).await;
@@ -1674,8 +1674,33 @@ pub(crate) async fn handle_output_fault(
 }
 
 pub(crate) async fn handle_runtime_error(state: SharedState, message: &str) {
-    {
+    handle_runtime_error_from(&state, None, message).await;
+}
+
+pub(crate) async fn handle_runtime_error_from(
+    state: &SharedState,
+    expected_handle: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    message: &str,
+) -> bool {
+    let completed = {
         let mut state_guard = state.write().await;
+        // Runtime replacement and its DB/UI state share this lock. Checking
+        // before acquiring it would allow a retired error to pause a new row.
+        if expected_handle.is_some_and(|expected| {
+            !state_guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.handle.is_same_runtime(expected))
+        }) {
+            return false;
+        }
+        let paused = match state_guard.db.with_conn(player::pause) {
+            Ok(_) => true,
+            Err(error) => {
+                warn!("Failed to persist runtime-error pause: {error}");
+                false
+            }
+        };
         state_guard
             .audio_active
             .store(false, std::sync::atomic::Ordering::Release);
@@ -1683,25 +1708,35 @@ pub(crate) async fn handle_runtime_error(state: SharedState, message: &str) {
             info.last_error = Some(message.to_string());
             info.active_track_id = None;
         }
-    }
-    report_playback_failure(&state, message);
-
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard.db.with_conn(player::pause).ok()
+        let outcome = if paused {
+            flush_active_listen_session_locked(
+                &mut state_guard,
+                chrono::Utc::now(),
+                player::ListenSessionEndReason::Stopped,
+            )
+            .map_err(|error| warn!("Failed to flush runtime-error listen session: {error}"))
+            .ok()
+        } else {
+            None
+        };
+        if let Some(track_id) = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.flushed_track_id)
+        {
+            let _ = state_guard
+                .event_tx
+                .send(AppEvent::ListenHistoryUpdated { track_id });
+        }
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackFailed {
+            message: message.to_string(),
+        });
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        outcome.and_then(|outcome| outcome.scrobble_completed)
     };
-
-    if let Some(snapshot) = snapshot {
-        sync_session_after_snapshot(
-            &state,
-            &snapshot,
-            Some(player::ListenSessionEndReason::Stopped),
-        )
-        .await;
+    if let Some(payload) = completed {
+        crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
     }
-
-    let state_guard = state.read().await;
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    true
 }
 
 pub(crate) async fn handle_runtime_exit(

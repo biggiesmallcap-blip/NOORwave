@@ -382,6 +382,48 @@ async fn generic_runtime_error_listener_clears_activity_and_preserves_queue() {
 }
 
 #[tokio::test]
+async fn generic_runtime_error_waiting_for_lock_cannot_pause_replacement_runtime() {
+    let (state, handle, _, _) = cpal_fault_fixture().await;
+    let mut guard = state.write().await;
+    let before = guard.db.with_conn(player::load_snapshot).unwrap();
+    let task_state = state.clone();
+    let consumer = tokio::spawn(async move {
+        handle_runtime_error_from(&task_state, Some(&handle), "retired runtime failed").await
+    });
+    tokio::task::yield_now().await;
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    guard.playback_runtime.as_mut().unwrap().handle =
+        playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut events = guard.event_tx.subscribe();
+    drop(guard);
+    assert!(
+        !consumer.await.unwrap(),
+        "retired runtime error was applied"
+    );
+    let guard = state.read().await;
+    let after = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert!(after.state.is_playing);
+    assert_eq!(
+        after.state.current_queue_item_id,
+        before.state.current_queue_item_id
+    );
+    assert!(
+        guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .is_none()
+    );
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn runtime_exit_discards_dead_handle_and_pauses_without_changing_queue() {
     let db = fresh_migrated_db();
     seed_basic_tracks(&db);
