@@ -161,6 +161,220 @@ async fn cpal_fault_fixture() -> (
     )
 }
 
+async fn assert_retired_runtime_activity_event(kind: &str) {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut guard = state.write().await;
+    guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+    guard
+        .audio_active
+        .store(false, std::sync::atomic::Ordering::Release);
+    guard.playback_runtime_info.as_mut().unwrap().last_error = Some("replacement status".into());
+    guard.pending_stream_display = Some(crate::StreamDisplayInfo {
+        audio_quality: "replacement quality".into(),
+        sample_rate: Some(96_000),
+        bit_depth: Some(24),
+    });
+    let mut session = player::ActiveListenSession::start(
+        1,
+        chrono::Utc::now(),
+        crate::db::models::ListenSource::Manual,
+        None,
+    );
+    if kind == "recovered" {
+        session.pause(chrono::Utc::now());
+    }
+    let resumed_at = session.resumed_at;
+    let accumulated_ms = session.accumulated_ms;
+    guard.active_listen_session = Some(session);
+    let mut events = guard.event_tx.subscribe();
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::RequestReady
+    ));
+    let event = match kind {
+        "started" => playback_runtime::PlaybackRuntimeEvent::Started {
+            track_id: 1,
+            generation: 0,
+            source: player::PlaybackSourceKind::TidalStream,
+        },
+        "stalled" => playback_runtime::PlaybackRuntimeEvent::Stalled { track_id: 1 },
+        _ => playback_runtime::PlaybackRuntimeEvent::StallRecovered { track_id: 1 },
+    };
+    assert!(handle.test_publish_event(event));
+    tokio::task::yield_now().await;
+    let (replacement_tx, _replacement_rx) = std::sync::mpsc::channel();
+    guard.playback_runtime.as_mut().unwrap().handle =
+        playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(replacement_tx);
+    drop(guard);
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Exited { message: None })
+    );
+    tokio::time::timeout(Duration::from_secs(2), listener)
+        .await
+        .unwrap()
+        .unwrap();
+    let guard = state.read().await;
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire),
+        "retired start marked replacement audible"
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("replacement status")
+    );
+    assert_eq!(
+        guard.pending_stream_display.as_ref().unwrap().audio_quality,
+        "replacement quality"
+    );
+    assert!(guard.current_stream_display.is_none());
+    let session = guard.active_listen_session.as_ref().unwrap();
+    assert_eq!(
+        session.resumed_at, resumed_at,
+        "retired event changed replacement listen timer"
+    );
+    assert_eq!(session.accumulated_ms, accumulated_ms);
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        command_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn retired_runtime_started_cannot_activate_replacement_with_same_generation() {
+    assert_retired_runtime_activity_event("started").await;
+}
+
+#[tokio::test]
+async fn retired_runtime_stalled_cannot_pause_replacement_listen_timer() {
+    assert_retired_runtime_activity_event("stalled").await;
+}
+
+#[tokio::test]
+async fn retired_runtime_stall_recovered_cannot_resume_replacement_listen_timer() {
+    assert_retired_runtime_activity_event("recovered").await;
+}
+
+#[tokio::test]
+async fn current_runtime_start_and_stall_events_update_public_activity() {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut events = {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+        guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Release);
+        guard.playback_runtime_info.as_mut().unwrap().last_error = Some("old error".into());
+        guard.pending_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "HI_RES_LOSSLESS".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        guard.active_listen_session = Some(player::ActiveListenSession::start(
+            1,
+            chrono::Utc::now(),
+            crate::db::models::ListenSource::Manual,
+            None,
+        ));
+        guard.event_tx.subscribe()
+    };
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::RequestReady
+    ));
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Started {
+            track_id: 1,
+            generation: 0,
+            source: player::PlaybackSourceKind::TidalStream,
+        })
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        AppEvent::TrackChanged { track_id: 1 }
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        AppEvent::PlaybackStateChanged
+    ));
+    {
+        let guard = state.read().await;
+        assert!(
+            guard
+                .audio_active
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .unwrap()
+                .last_error
+                .is_none()
+        );
+        assert!(guard.pending_stream_display.is_none());
+        assert_eq!(
+            guard.current_stream_display.as_ref().unwrap().audio_quality,
+            "HI_RES_LOSSLESS"
+        );
+    }
+    for resumed in [false, true] {
+        let event = if resumed {
+            playback_runtime::PlaybackRuntimeEvent::StallRecovered { track_id: 1 }
+        } else {
+            playback_runtime::PlaybackRuntimeEvent::Stalled { track_id: 1 }
+        };
+        assert!(handle.test_publish_event(event));
+        // The next public output notification is an ordered listener barrier.
+        assert!(handle.test_publish_event(
+            playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                output_identity: handle.test_exclusive_event_identity(),
+                device_name: "current output".into(),
+                transport_format: "test format".into(),
+            }
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            AppEvent::AudioExclusiveEngaged { .. }
+        ));
+        assert_eq!(
+            state
+                .read()
+                .await
+                .active_listen_session
+                .as_ref()
+                .unwrap()
+                .resumed_at
+                .is_some(),
+            resumed
+        );
+    }
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+}
+
 fn cpal_fault_event(
     stop: &Arc<std::sync::atomic::AtomicBool>,
     live: &Arc<std::sync::atomic::AtomicBool>,

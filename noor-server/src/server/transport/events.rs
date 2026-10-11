@@ -437,12 +437,16 @@ pub(crate) fn spawn_playback_runtime_listener(
                     generation,
                     ..
                 }) => {
-                    // Read the persisted queue anchor before taking the global
-                    // write lock. A briefly busy SQLite connection must not
-                    // block pause, resume, queue, or runtime-health updates.
+                    // Capture the queue anchor before the write lock, then
+                    // revalidate runtime and generation after that await.
                     let history_row = {
                         let state_guard = state.read().await;
-                        if current_playback_generation(&state_guard) != generation {
+                        if current_playback_generation(&state_guard) != generation
+                            || !state_guard
+                                .playback_runtime
+                                .as_ref()
+                                .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                        {
                             continue;
                         }
                         state_guard
@@ -467,7 +471,12 @@ pub(crate) fn spawn_playback_runtime_listener(
                             .flatten()
                     };
                     let mut state_guard = state.write().await;
-                    if current_playback_generation(&state_guard) != generation {
+                    if current_playback_generation(&state_guard) != generation
+                        || !state_guard
+                            .playback_runtime
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
                         continue;
                     }
                     // CPAL buffer threshold crossed. Samples are actually flowing now.
@@ -494,8 +503,6 @@ pub(crate) fn spawn_playback_runtime_listener(
                             generation,
                         );
                     }
-                    drop(state_guard);
-                    let state_guard = state.read().await;
                     let _ = state_guard
                         .event_tx
                         .send(AppEvent::TrackChanged { track_id });
@@ -529,6 +536,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                     // (observed: 2795 s recorded on a 334 s track). Playback
                     // recovery itself is the watchdog's force-advance.
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     let now = chrono::Utc::now();
                     if let Some(session) = state_guard.active_listen_session.as_mut()
                         && session.track_id == track_id
@@ -538,6 +552,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::StallRecovered { track_id }) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     let now = chrono::Utc::now();
                     if let Some(session) = state_guard.active_listen_session.as_mut()
                         && session.track_id == track_id
