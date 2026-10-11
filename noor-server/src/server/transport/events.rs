@@ -35,6 +35,191 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
+type ExclusiveRecoveryResult =
+    Result<anyhow::Result<Option<super::settings::RuntimeOutputSettings>>, tokio::task::JoinError>;
+
+struct ExclusiveRecoveryRequest {
+    identity: Arc<()>,
+    device_name: String,
+    db: crate::db::Database,
+}
+
+struct PendingExclusiveRecovery {
+    request: ExclusiveRecoveryRequest,
+    task: tokio::task::JoinHandle<anyhow::Result<Option<super::settings::RuntimeOutputSettings>>>,
+}
+
+#[derive(Default)]
+struct ExclusiveRecoveryQueue {
+    active: Option<PendingExclusiveRecovery>,
+    latest: Option<ExclusiveRecoveryRequest>,
+}
+
+impl ExclusiveRecoveryQueue {
+    fn start(request: ExclusiveRecoveryRequest) -> PendingExclusiveRecovery {
+        let db = request.db.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            db.with_conn(|conn| {
+                let settings = crate::db::audio_settings::load(conn)?;
+                let is_playing = player::load_state(conn)?.is_playing;
+                Ok(
+                    should_retry_exclusive_release(is_playing, settings.exclusive_mode)
+                        .then(|| runtime_output_settings_from_audio_settings(&settings)),
+                )
+            })
+        });
+        PendingExclusiveRecovery { request, task }
+    }
+
+    fn request(&mut self, request: ExclusiveRecoveryRequest) {
+        if let Some(active) = &self.active {
+            if !Arc::ptr_eq(&active.request.identity, &request.identity) {
+                // A started blocking read cannot be cancelled reliably. Keep
+                // one active lookup and only the newest later request.
+                self.latest = Some(request);
+            }
+        } else {
+            self.active = Some(Self::start(request));
+        }
+    }
+
+    async fn completed(&mut self) -> Option<(ExclusiveRecoveryRequest, ExclusiveRecoveryResult)> {
+        let result = match self.active.as_mut() {
+            Some(active) => (&mut active.task).await,
+            None => std::future::pending().await,
+        };
+        let finished = self.active.take()?;
+        if let Some(latest) = self.latest.take() {
+            self.active = Some(Self::start(latest));
+        }
+        Some((finished.request, result))
+    }
+}
+
+impl Drop for ExclusiveRecoveryQueue {
+    fn drop(&mut self) {
+        if let Some(active) = &self.active {
+            // Prevent queued pool work from starting after listener shutdown.
+            // A read that has already started still finishes without effects.
+            active.task.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod exclusive_recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn recovery_burst_keeps_one_lookup_and_only_the_latest_request() {
+        let db = crate::db::Database::open_in_memory().expect("database");
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            locked_db.with_conn(|_| {
+                locked_tx.send(()).expect("lock signal");
+                let _ = unlock_rx.recv_timeout(Duration::from_secs(5));
+                Ok(())
+            })
+        });
+        locked_rx.recv().expect("database locked");
+        let first = Arc::new(());
+        let request = |identity| ExclusiveRecoveryRequest {
+            identity,
+            device_name: "test output".to_string(),
+            db: db.clone(),
+        };
+        let mut recovery = ExclusiveRecoveryQueue::default();
+        recovery.request(request(first.clone()));
+        let first_task = recovery.active.as_ref().expect("active").task.id();
+        let mut latest = first.clone();
+        for _ in 0..1_000 {
+            latest = Arc::new(());
+            recovery.request(request(latest.clone()));
+            recovery.request(request(first.clone()));
+        }
+        assert_eq!(
+            recovery.active.as_ref().expect("active").task.id(),
+            first_task
+        );
+        assert!(Arc::ptr_eq(
+            &recovery.latest.as_ref().expect("latest").identity,
+            &latest
+        ));
+        unlock_tx.send(()).expect("unlock");
+        holder
+            .join()
+            .expect("database holder")
+            .expect("database read");
+        let (completed, _) = recovery.completed().await.expect("first completion");
+        assert!(Arc::ptr_eq(&completed.identity, &first));
+        assert!(recovery.latest.is_none());
+        assert!(Arc::ptr_eq(
+            &recovery
+                .active
+                .as_ref()
+                .expect("next active")
+                .request
+                .identity,
+            &latest
+        ));
+        let (completed, _) = recovery.completed().await.expect("latest completion");
+        assert!(Arc::ptr_eq(&completed.identity, &latest));
+        assert!(recovery.active.is_none());
+    }
+}
+
+async fn apply_exclusive_recovery(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    request: ExclusiveRecoveryRequest,
+    result: ExclusiveRecoveryResult,
+) {
+    let retry = match result {
+        Ok(result) => result.ok().flatten(),
+        Err(error) => {
+            warn!("Exclusive recovery settings task failed: {error}");
+            None
+        }
+    };
+    let mut state_guard = state.write().await;
+    if !state_guard
+        .playback_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+    {
+        return;
+    }
+    let identity_guard = handle.lock_exclusive_event_identity();
+    if !Arc::ptr_eq(&identity_guard, &request.identity) {
+        return;
+    }
+    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+        info.exclusive_engaged = false;
+        info.exclusive_transport_format = None;
+    }
+    let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
+        device: request.device_name,
+    });
+    let recovery_result = retry.map(|output| {
+        handle.recover_released_exclusive_output(
+            request.identity,
+            output.device,
+            output.exclusive_mode,
+            output.sample_rate_follow,
+            None,
+            output.exclusive_release_grace_secs,
+            output.exclusive_latency_mode,
+        )
+    });
+    drop(identity_guard);
+    drop(state_guard);
+    if let Some(Err(error)) = recovery_result {
+        warn!("Failed to recover released WASAPI exclusive stream: {error}");
+    }
+}
+
 pub(crate) async fn apply_runtime_ready(
     state: &SharedState,
     handle: &playback_runtime::PlaybackRuntimeHandle,
@@ -89,8 +274,18 @@ pub(crate) fn spawn_playback_runtime_listener(
         warn!("Could not request runtime device metadata: {error}");
     }
     tokio::spawn(async move {
+        let mut recovery = ExclusiveRecoveryQueue::default();
         loop {
-            match rx.recv().await {
+            let event = tokio::select! {
+                completed = recovery.completed(), if recovery.active.is_some() => {
+                    if let Some((request, result)) = completed {
+                        apply_exclusive_recovery(&state, &handle, request, result).await;
+                    }
+                    continue;
+                }
+                event = rx.recv() => event,
+            };
+            match event {
                 Ok(playback_runtime::PlaybackRuntimeEvent::Finished {
                     track_id,
                     generation,
@@ -506,67 +701,11 @@ pub(crate) fn spawn_playback_runtime_listener(
                     }
                     let db = state_guard.db.clone();
                     drop(state_guard);
-                    // SQLite may wait for another connection user. Keep that
-                    // wait off the async executor and outside AppState.
-                    let retry = match tokio::task::spawn_blocking(move || {
-                        db.with_conn(|conn| {
-                            let settings = crate::db::audio_settings::load(conn)?;
-                            let is_playing = player::load_state(conn)?.is_playing;
-                            Ok(
-                                should_retry_exclusive_release(is_playing, settings.exclusive_mode)
-                                    .then(|| {
-                                        runtime_output_settings_from_audio_settings(&settings)
-                                    }),
-                            )
-                        })
-                    })
-                    .await
-                    {
-                        Ok(result) => result.ok().flatten(),
-                        Err(error) => {
-                            warn!("Exclusive recovery settings task failed: {error}");
-                            None
-                        }
-                    };
-                    let mut state_guard = state.write().await;
-                    if !state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
-                    {
-                        continue;
-                    }
-                    // Publication may have superseded this release during the
-                    // database wait. Validate again before any visible change.
-                    let identity_guard = handle.lock_exclusive_event_identity();
-                    if !Arc::ptr_eq(&identity_guard, &output_identity) {
-                        continue;
-                    }
-                    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-                        info.exclusive_engaged = false;
-                        info.exclusive_transport_format = None;
-                    }
-                    let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
-                        device: device_name,
+                    recovery.request(ExclusiveRecoveryRequest {
+                        identity: output_identity,
+                        device_name,
+                        db,
                     });
-                    // Sending is synchronous. Keep the validated runtime
-                    // current until its recovery command has been queued.
-                    let recovery_result = retry.map(|output| {
-                        handle.recover_released_exclusive_output(
-                            Arc::clone(&output_identity),
-                            output.device,
-                            output.exclusive_mode,
-                            output.sample_rate_follow,
-                            None,
-                            output.exclusive_release_grace_secs,
-                            output.exclusive_latency_mode,
-                        )
-                    });
-                    drop(identity_guard);
-                    drop(state_guard);
-                    if let Some(Err(error)) = recovery_result {
-                        warn!("Failed to recover released WASAPI exclusive stream: {error}");
-                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!("Playback runtime listener lagged by {skipped} events");

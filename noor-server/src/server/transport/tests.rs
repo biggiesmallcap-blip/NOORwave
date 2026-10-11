@@ -916,6 +916,82 @@ async fn exclusive_release_database_wait_does_not_block_output_retirement() {
     }
 }
 
+#[tokio::test]
+async fn exclusive_recovery_wait_does_not_delay_new_output_notifications() {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let (db, mut events) = {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+        (guard.db.clone(), guard.event_tx.subscribe())
+    };
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::RequestReady
+    ));
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        db.with_conn(|_| {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            Ok(())
+        })
+        .unwrap()
+    });
+    held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+            output_identity: handle.test_exclusive_event_identity(),
+            device_name: "old output".into(),
+        }
+    ));
+    tokio::task::yield_now().await;
+    handle.test_replace_exclusive_event_identity();
+    assert!(handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+            output_identity: handle.test_exclusive_event_identity(),
+            device_name: "new output".into(),
+            transport_format: "new format".into(),
+        }
+    ));
+    let notification = tokio::time::timeout(Duration::from_millis(500), events.recv()).await;
+    listener.abort();
+    let stopped = tokio::time::timeout(Duration::from_millis(500), listener).await;
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let notification = notification
+        .expect("database lookup delayed the newer output notification")
+        .unwrap();
+    assert!(
+        matches!(notification, AppEvent::AudioExclusiveEngaged { ref device, .. } if device == "new output")
+    );
+    let guard = state.read().await;
+    let info = guard.playback_runtime_info.as_ref().unwrap();
+    assert!(info.exclusive_engaged);
+    assert_eq!(
+        info.exclusive_transport_format.as_deref(),
+        Some("new format")
+    );
+    drop(guard);
+    assert!(
+        stopped
+            .expect("database lookup delayed listener shutdown")
+            .unwrap_err()
+            .is_cancelled()
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        command_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+}
+
 async fn assert_exclusive_release_database_wait(retire_runtime: bool) {
     let (state, _, _, _) = cpal_fault_fixture().await;
     let (command_tx, command_rx) = std::sync::mpsc::channel();
