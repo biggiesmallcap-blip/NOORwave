@@ -1676,6 +1676,9 @@ pub(crate) async fn handle_output_fault(
 pub(crate) async fn handle_runtime_error(state: SharedState, message: &str) {
     {
         let mut state_guard = state.write().await;
+        state_guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Release);
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.last_error = Some(message.to_string());
             info.active_track_id = None;

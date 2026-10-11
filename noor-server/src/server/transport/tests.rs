@@ -309,6 +309,79 @@ async fn native_output_fault_listener_updates_public_state_without_exclusive_aut
 }
 
 #[tokio::test]
+async fn generic_runtime_error_listener_clears_activity_and_preserves_queue() {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let before = state
+        .read()
+        .await
+        .db
+        .with_conn(player::load_snapshot)
+        .unwrap();
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut events = {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+        guard.event_tx.subscribe()
+    };
+    spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::RequestReady
+    ));
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Error {
+            message: "The selected output is unavailable".into(),
+        })
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut failure_seen = false;
+        let mut state_changed = false;
+        loop {
+            match events.recv().await.unwrap() {
+                AppEvent::PlaybackFailed { message } => {
+                    assert_eq!(message, "The selected output is unavailable");
+                    failure_seen = true;
+                }
+                AppEvent::PlaybackStateChanged => state_changed = true,
+                _ => {}
+            }
+            if failure_seen && state_changed {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let guard = state.read().await;
+    let after = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert!(!after.state.is_playing);
+    assert_eq!(
+        after.state.current_queue_item_id,
+        before.state.current_queue_item_id
+    );
+    assert_eq!(
+        after.queue.iter().map(|row| row.id).collect::<Vec<_>>(),
+        before.queue.iter().map(|row| row.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("The selected output is unavailable")
+    );
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire),
+        "paused output failure still reported audio activity"
+    );
+}
+
+#[tokio::test]
 async fn runtime_exit_discards_dead_handle_and_pauses_without_changing_queue() {
     let db = fresh_migrated_db();
     seed_basic_tracks(&db);
