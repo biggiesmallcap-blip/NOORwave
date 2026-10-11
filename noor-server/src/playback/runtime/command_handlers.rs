@@ -799,8 +799,9 @@ pub(super) fn handle_resume(
                     ) {
                         stop_all_engines(state);
                         state.exclusive_sink.clear();
-                        report_runtime_command_error(event_tx, "Resume", error);
+                        fail_runtime_command(state, event_tx, "Resume", error);
                         let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
+                        return ControlFlow::Continue(());
                     }
                 }
             }
@@ -828,7 +829,7 @@ pub(super) fn handle_resume(
             )
         }) {
             state.user_paused = true;
-            report_runtime_command_error(event_tx, "Resume", error);
+            fail_runtime_command(state, event_tx, "Resume", error);
             return ControlFlow::Continue(());
         }
     }
@@ -840,14 +841,16 @@ pub(super) fn handle_resume(
                 });
             }
             Err(error) => {
-                report_runtime_command_error(event_tx, "Resume", error);
+                fail_runtime_command(state, event_tx, "Resume", error);
+                return ControlFlow::Continue(());
             }
         }
     }
     if let Some(engine) = state.fading_out_engine.as_mut()
         && let Err(error) = engine.resume()
     {
-        report_runtime_command_error(event_tx, "Resume", error);
+        fail_runtime_command(state, event_tx, "Resume", error);
+        return ControlFlow::Continue(());
     }
     if let Some(engine) = state
         .drop_preview_engine
@@ -855,7 +858,8 @@ pub(super) fn handle_resume(
         .filter(|engine| !engine.shared.paused.load(Ordering::SeqCst))
         && let Err(error) = engine.resume()
     {
-        report_runtime_command_error(event_tx, "Resume", error);
+        fail_runtime_command(state, event_tx, "Resume", error);
+        return ControlFlow::Continue(());
     }
     ControlFlow::Continue(())
 }
@@ -1197,7 +1201,8 @@ pub(super) fn handle_device_swap(
         Some(d) => d,
         None => {
             pause_all_decks_for_rejected_output(state);
-            report_runtime_command_error(
+            fail_runtime_command(
+                state,
                 event_tx,
                 "DeviceSwap",
                 anyhow!(
@@ -1211,7 +1216,8 @@ pub(super) fn handle_device_swap(
         Ok(s) => s,
         Err(err) => {
             pause_all_decks_for_rejected_output(state);
-            report_runtime_command_error(
+            fail_runtime_command(
+                state,
                 event_tx,
                 "DeviceSwap",
                 anyhow!("Could not read the selected output configuration: {err}"),
@@ -1231,7 +1237,8 @@ pub(super) fn handle_device_swap(
         // Runtime Error pauses the route's transport state. Pause the actual
         // decks too, while retaining the previous endpoint for a later Resume.
         pause_all_decks_for_rejected_output(state);
-        report_runtime_command_error(
+        fail_runtime_command(
+            state,
             event_tx,
             "DeviceSwap",
             anyhow!(
@@ -1292,6 +1299,7 @@ pub(super) fn handle_device_swap(
     // ExclusiveModeFailed event), so a hard error here is rare -
     // typically only a cpal shared build failure.
     let mut swap_failed = false;
+    let mut swap_errors = Vec::new();
     if exclusive {
         #[cfg(target_os = "windows")]
         {
@@ -1323,7 +1331,7 @@ pub(super) fn handle_device_swap(
                         event_tx,
                     ) {
                         swap_failed = true;
-                        report_runtime_command_error(event_tx, "DeviceSwap", error);
+                        swap_errors.push(error);
                     }
                 }
             }
@@ -1360,13 +1368,16 @@ pub(super) fn handle_device_swap(
                         engine_slot.track_id
                     );
                     swap_failed = true;
-                    report_runtime_command_error(event_tx, "DeviceSwap", err);
+                    swap_errors.push(err);
                 }
             }
         }
     }
 
     if swap_failed {
+        for error in swap_errors {
+            fail_runtime_command(state, event_tx, "DeviceSwap", error);
+        }
         warn!("DeviceSwap: one or more engines failed to swap; output may be partial");
         stop_all_engines(state);
         #[cfg(target_os = "windows")]

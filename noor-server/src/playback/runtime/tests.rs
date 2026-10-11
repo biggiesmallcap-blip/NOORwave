@@ -4259,8 +4259,10 @@ fn get_buffered_ms_returns_zero_for_invalid_device_config() {
 #[test]
 fn report_runtime_command_error_emits_error_event() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    let mut state = test_runtime_loop_state();
 
-    report_runtime_command_error(
+    fail_runtime_command(
+        &mut state,
         &event_tx,
         "Play",
         anyhow::anyhow!("output device rejected stream"),
@@ -4273,6 +4275,58 @@ fn report_runtime_command_error_emits_error_event() {
         }
         other => panic!("expected error event, got {other:?}"),
     }
+}
+
+#[test]
+fn command_failure_hard_pauses_every_deck_before_reporting_error() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(1, 7));
+    state.next_engine = Some(test_engine_with_shared(2, 7));
+    state.fading_out_engine = Some(test_engine_with_shared(3, 7));
+    state.drop_preview_engine = Some(test_engine_with_shared(4, 7));
+    for engine in [
+        &state.engine,
+        &state.next_engine,
+        &state.fading_out_engine,
+        &state.drop_preview_engine,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        engine
+            .shared
+            .append_decoded_samples(&[0.25, -0.25, 0.5, -0.5])
+            .unwrap();
+        engine.shared.position_samples.store(96, Ordering::Relaxed);
+        engine.shared.begin_fade_out();
+    }
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    fail_runtime_command(
+        &mut state,
+        &event_tx,
+        "Resume",
+        anyhow::anyhow!("overlapping output failed"),
+    );
+    assert!(state.user_paused, "command failure must latch pause intent");
+    for engine in [
+        &state.engine,
+        &state.next_engine,
+        &state.fading_out_engine,
+        &state.drop_preview_engine,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(engine.shared.paused.load(Ordering::SeqCst));
+        assert!(!engine.shared.pause_fade_armed.load(Ordering::Relaxed));
+        assert!(!engine.shared.stopped.load(Ordering::Acquire));
+        assert_eq!(engine.shared.position_samples.load(Ordering::Relaxed), 96);
+        assert_eq!(engine.shared.buffer.lock().unwrap().samples.len(), 4);
+    }
+    assert!(matches!(
+        event_rx.try_recv().unwrap(),
+        PlaybackRuntimeEvent::Error { .. }
+    ));
 }
 
 #[test]
@@ -5455,7 +5509,7 @@ fn handle_panic_in_runtime_loop_clears_state_and_emits_error() {
 #[test]
 fn runtime_recovery_composes_after_command_error_and_panic() {
     // Composition-level integration test for Phase B/C resilience: prove
-    // that the runtime's recovery primitives (report_runtime_command_error,
+    // that the runtime's recovery primitives (fail_runtime_command,
     // stop_all_engines, handle_panic_in_runtime_loop) compose so the
     // runtime stays responsive across a command-error AND a panic in the
     // same session. A future plan will extract dispatch_command from
@@ -5469,7 +5523,12 @@ fn runtime_recovery_composes_after_command_error_and_panic() {
 
     // 1. Simulate a Play command that returned Err: report the error and
     //    tear down engines (same sequence as run_runtime_loop's Play arm).
-    report_runtime_command_error(&event_tx, "Play", anyhow::anyhow!("transition failed"));
+    fail_runtime_command(
+        &mut state,
+        &event_tx,
+        "Play",
+        anyhow::anyhow!("transition failed"),
+    );
     stop_all_engines(&mut state);
     assert!(state.engine.is_none(), "engine slot cleared after error");
     assert!(state.next_engine.is_none(), "next slot cleared after error");

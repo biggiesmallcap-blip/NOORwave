@@ -549,7 +549,7 @@ fn run_runtime_loop(
                         stop_all_engines(&mut state);
                         #[cfg(target_os = "windows")]
                         state.exclusive_sink.clear();
-                        report_runtime_command_error(&event_tx, "Play", error);
+                        fail_runtime_command(&mut state, &event_tx, "Play", error);
                         let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
                     }
                 }
@@ -573,7 +573,7 @@ fn run_runtime_loop(
                         stop_all_engines(&mut state);
                         #[cfg(target_os = "windows")]
                         state.exclusive_sink.clear();
-                        report_runtime_command_error(&event_tx, "Switch", error);
+                        fail_runtime_command(&mut state, &event_tx, "Switch", error);
                         let _ = event_tx.send(PlaybackRuntimeEvent::Stopped);
                     }
                 }
@@ -726,19 +726,19 @@ fn run_runtime_loop(
                                 });
                             }
                             Err(error) => {
-                                report_runtime_command_error(&event_tx, "Pause", error);
+                                fail_runtime_command(&mut state, &event_tx, "Pause", error);
                             }
                         }
                     }
                     if let Some(engine) = state.fading_out_engine.as_mut()
                         && let Err(error) = engine.pause()
                     {
-                        report_runtime_command_error(&event_tx, "Pause", error);
+                        fail_runtime_command(&mut state, &event_tx, "Pause", error);
                     }
                     if let Some(engine) = state.drop_preview_engine.as_mut()
                         && let Err(error) = engine.pause()
                     {
-                        report_runtime_command_error(&event_tx, "Pause", error);
+                        fail_runtime_command(&mut state, &event_tx, "Pause", error);
                     }
                     // Instrumentation only (slice C0): correlate an explicit user
                     // pause with the render thread's idle-release timing in the logs.
