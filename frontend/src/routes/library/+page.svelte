@@ -18,7 +18,7 @@
 	import {
 		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
-		loadTracks, loadAlbums, trackListRequestMatches, trackListError, retryTrackList, cancelTrackListRequests,
+		loadTracks, loadAlbums, trackListRequestMatches, trackListNeedsReload, trackListError, retryTrackList, cancelTrackListRequests,
 		selectedTrackIds, selectedAlbumIds,
 		lastSelectedTrackId, lastSelectedAlbumId,
 		selectTrackIds, selectAlbumIds, clearSelection,
@@ -390,8 +390,10 @@
 		// still hold every page the user scrolled through; reloading page 1 here
 		// would discard that depth and strand the snapshot's scroll restore at the
 		// bottom of the first page. A fresh visit starts empty and loads normally.
+		// Rows from a refresh that failed or was abandoned on leave are stale, so
+		// those reload too.
 		if (get(albums).length === 0) void loadAlbums(albumSortField, albumSortDir);
-		if (get(tracks).length === 0) void loadTracks();
+		if (get(tracks).length === 0 || trackListNeedsReload()) void loadTracks();
 		void loadCatalogueStatus();
 		void loadBatchMeta();
 		void loadRecentTracks();

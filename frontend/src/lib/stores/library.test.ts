@@ -18,6 +18,7 @@ import {
 	retryTrackList,
 	totalTracks,
 	trackListError,
+	trackListNeedsReload,
 	trackListRequestMatches,
 	tracks,
 	updateLibraryTrackFavorite,
@@ -261,9 +262,11 @@ describe('track list request ownership', () => {
 		expect(trackListRequestMatches('date_added', 'desc', true)).toBe(true);
 		cancelTrackListRequests();
 		expect(get(isLoading)).toBe(false);
-		// The requested scope falls back to the rows held, so a return visit reloads.
+		// The unfinished request is not forgotten: no query counts as loaded, so a
+		// return visit reloads instead of trusting the rows held.
 		expect(trackListRequestMatches('date_added', 'desc', true)).toBe(false);
-		expect(trackListRequestMatches('date_added', 'desc', false)).toBe(true);
+		expect(trackListRequestMatches('date_added', 'desc', false)).toBe(false);
+		expect(trackListNeedsReload()).toBe(true);
 
 		pending[1].resolve({ tracks: [track({ id: 9 })], total: 1 });
 		await liked;
@@ -271,5 +274,76 @@ describe('track list request ownership', () => {
 		// Library semantics still own reconciliation for the rows on screen.
 		updateLibraryTrackFavorite(1, false);
 		expect(get(tracks)).toEqual([expect.objectContaining({ id: 1, is_favorite: false })]);
+	});
+
+	test('cancelling after a completed load keeps the list for scroll restoration', async () => {
+		const pending = queueTrackResponses();
+		const first = loadTracks('date_added', 'desc', 100, 0, true);
+		pending[0].resolve({ tracks: [track({ id: 1 })], total: 1 });
+		await first;
+
+		cancelTrackListRequests();
+		expect(trackListRequestMatches('date_added', 'desc', true)).toBe(true);
+		expect(trackListNeedsReload()).toBe(false);
+	});
+
+	test('pages are refused while a refresh of the same query has failed', async () => {
+		const pending = queueTrackResponses();
+		const first = loadTracks('date_added', 'desc', 1, 0, false);
+		pending[0].resolve({ tracks: [track({ id: 1 })], total: 3 });
+		await first;
+
+		const refresh = loadTracks('date_added', 'desc', 1, 0, false);
+		pending[1].reject(new Error('refresh failed'));
+		await refresh;
+
+		await loadTracks('date_added', 'desc', 1, 1, false);
+		expect(cachedApiMock.getTracks).toHaveBeenCalledTimes(2);
+		expect(get(tracks).map((t) => t.id)).toEqual([1]);
+		expect(get(trackListError)).toEqual({ error: new Error('refresh failed'), append: false });
+
+		const retry = retryTrackList();
+		expect(cachedApiMock.getTracks).toHaveBeenLastCalledWith('date_added', 'desc', 1, 0, true, false);
+		pending[2].resolve({ tracks: [track({ id: 4 })], total: 3 });
+		await retry;
+		expect(get(tracks).map((t) => t.id)).toEqual([4]);
+	});
+
+	test('leaving after a failed refresh makes the next visit reload', async () => {
+		const pending = queueTrackResponses();
+		const first = loadTracks('date_added', 'desc', 100, 0, true);
+		pending[0].resolve({ tracks: [track({ id: 1 })], total: 1 });
+		await first;
+
+		const refresh = loadTracks('date_added', 'desc', 100, 0, true);
+		pending[1].reject(new Error('refresh failed'));
+		await refresh;
+		cancelTrackListRequests();
+
+		expect(trackListRequestMatches('date_added', 'desc', true)).toBe(false);
+		expect(trackListNeedsReload()).toBe(true);
+	});
+
+	test('leaving during a same-query refresh makes the next visit reload', async () => {
+		const pending = queueTrackResponses();
+		const first = loadTracks('date_added', 'desc', 100, 0, true);
+		pending[0].resolve({ tracks: [track({ id: 1 })], total: 1 });
+		await first;
+
+		const refresh = loadTracks('date_added', 'desc', 100, 0, true);
+		cancelTrackListRequests();
+		expect(trackListRequestMatches('date_added', 'desc', true)).toBe(false);
+		expect(trackListNeedsReload()).toBe(true);
+
+		pending[1].resolve({ tracks: [track({ id: 2 })], total: 1 });
+		await refresh;
+		expect(get(tracks).map((t) => t.id)).toEqual([1]);
+
+		// The reload a return visit makes clears the marker once it lands.
+		const reload = loadTracks('date_added', 'desc', 100, 0, true);
+		pending[2].resolve({ tracks: [track({ id: 2 })], total: 1 });
+		await reload;
+		expect(trackListNeedsReload()).toBe(false);
+		expect(trackListRequestMatches('date_added', 'desc', true)).toBe(true);
 	});
 });

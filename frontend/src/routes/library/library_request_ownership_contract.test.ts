@@ -29,6 +29,10 @@ describe('library route request ownership wiring', () => {
 		expect(source).toContain('$trackListError && !$trackListError.append');
 	});
 
+	test('a return visit reloads rows from a failed or abandoned refresh', () => {
+		expect(source).toContain('if (get(tracks).length === 0 || trackListNeedsReload()) void loadTracks();');
+	});
+
 	test('Songs reloads when its rows belong to another sort or scope', () => {
 		expect(source).toContain('if (trackListRequestMatches($sortBy, $sortDir, likedOnly)) return;');
 	});

@@ -1,4 +1,4 @@
-import { derived, get, writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
 import { type Track, type Album, type Artist } from '$lib/api/client';
 import { cachedApi } from '$lib/cache/api_queries';
 import { createLatestRequestGate } from '$lib/search/latest_request';
@@ -89,9 +89,19 @@ let appliedTrackListQuery: TrackListQuery | null = null;
 let requestedTrackListQuery: TrackListQuery | null = null;
 let pendingTrackListPage: { offset: number; promise: Promise<void> } | null = null;
 let failedTrackListPage: TrackListPage | null = null;
+// True from the moment a first page is requested until one succeeds. While
+// set, $tracks is not the requested list (still loading, failed, or abandoned
+// on unmount): pages are refused so they cannot mix into stale rows, and a
+// return visit reloads instead of trusting the rows held.
+let firstPageOutstanding = false;
 
 export function trackListRequestMatches(sort: string, dir: string, likedOnly: boolean): boolean {
 	return sameTrackListQuery(requestedTrackListQuery, { sort, dir, likedOnly });
+}
+
+/** Whether the latest first-page request never completed (see firstPageOutstanding). */
+export function trackListNeedsReload(): boolean {
+	return firstPageOutstanding;
 }
 
 export function loadTracks(
@@ -111,6 +121,7 @@ async function loadTrackListQuery(page: TrackListPage) {
 	pendingTrackListPage = null;
 	failedTrackListPage = null;
 	requestedTrackListQuery = { sort: page.sort, dir: page.dir, likedOnly: page.likedOnly };
+	firstPageOutstanding = true;
 	trackListErrorState.set(null);
 	trackListLoadingMore.set(false);
 	trackListLoading.set(true);
@@ -118,6 +129,7 @@ async function loadTrackListQuery(page: TrackListPage) {
 		const data = await fetchTrackListPage(page);
 		if (!trackListGate.isCurrent(token)) return;
 		appliedTrackListQuery = requestedTrackListQuery;
+		firstPageOutstanding = false;
 		tracks.set(data.tracks);
 		totalTracks.set(data.total);
 	} catch (e) {
@@ -132,9 +144,9 @@ async function loadTrackListQuery(page: TrackListPage) {
 
 function loadTrackListPage(page: TrackListPage): Promise<void> {
 	const token = trackListToken;
-	// A page belongs to the rows on screen: never while a new query is loading,
-	// and never for a sort/scope other than the one those rows came from.
-	if (!trackListGate.isCurrent(token) || get(trackListLoading)) return Promise.resolve();
+	// A page belongs to the rows on screen: never while their query's first page
+	// is loading or failed, and never for a sort/scope other than theirs.
+	if (!trackListGate.isCurrent(token) || firstPageOutstanding) return Promise.resolve();
 	if (!sameTrackListQuery(appliedTrackListQuery, page)) return Promise.resolve();
 	if (pendingTrackListPage) {
 		return pendingTrackListPage.offset === page.offset ? pendingTrackListPage.promise : Promise.resolve();
@@ -188,7 +200,9 @@ export function cancelTrackListRequests() {
 	trackListToken = trackListGate.begin().token;
 	pendingTrackListPage = null;
 	failedTrackListPage = null;
-	requestedTrackListQuery = appliedTrackListQuery;
+	// An unfinished or failed first page leaves no query loaded, so the next
+	// visit reloads; a completed list stays for scroll restoration.
+	requestedTrackListQuery = firstPageOutstanding ? null : appliedTrackListQuery;
 	trackListErrorState.set(null);
 	trackListLoading.set(false);
 	trackListLoadingMore.set(false);
