@@ -3190,6 +3190,108 @@ async fn near_end_current_runtime_rejection_skips_only_upcoming_row() {
     ));
 }
 
+async fn assert_near_end_rate_metadata(
+    rate: Option<i32>,
+    bit_depth: Option<i32>,
+    exclusive: bool,
+    prepares: bool,
+) {
+    let (state, probe, _) = near_end_fixture(false).await;
+    {
+        let mut guard = state.write().await;
+        let tidal_id = guard
+            .db
+            .with_conn(|conn| {
+                crate::db::audio_settings::save(
+                    conn,
+                    &crate::db::audio_settings::AudioSettings {
+                        sample_rate_follow: true,
+                        exclusive_mode: exclusive,
+                        ..Default::default()
+                    },
+                )?;
+                Ok(
+                    conn.query_row("SELECT tidal_id FROM tracks WHERE id=2", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        let mut stream = super::stream::test_stream_info(tidal_id);
+        stream.sample_rate = rate;
+        stream.bit_depth = bit_depth;
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "LOSSLESS".into(),
+            sample_rate: Some(48_000),
+            bit_depth: Some(16),
+        });
+        guard.stream_source = super::stream::ScriptedStreamSource::new(vec![Ok(stream)]);
+    }
+    handle_near_end(state.clone(), 1, 0, probe.handle.clone())
+        .await
+        .unwrap();
+    if prepares {
+        let command = probe
+            .commands
+            .recv_timeout(Duration::from_millis(200))
+            .unwrap();
+        assert!(
+            matches!(command, playback_runtime::PlaybackRuntimeCommand::PrepareNext(job) if job.track_id() == 2),
+            "prebuffer retuned output from raw metadata instead of preparing at the existing format"
+        );
+        assert_eq!(
+            state
+                .read()
+                .await
+                .pending_stream_display
+                .as_ref()
+                .unwrap()
+                .sample_rate,
+            rate.filter(|rate| *rate > 0)
+        );
+    } else {
+        assert!(
+            matches!(
+                probe.commands.recv_timeout(Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "format change must wait for track start"
+        );
+        assert!(state.read().await.pending_stream_display.is_none());
+    }
+    assert!(state.read().await.next_prebuffer_inflight.is_none());
+}
+
+#[tokio::test]
+async fn near_end_invalid_rate_negative_cannot_retune_output_or_publish_a_source_rate() {
+    for exclusive in [false, true] {
+        assert_near_end_rate_metadata(Some(-1), Some(16), exclusive, true).await;
+    }
+}
+
+#[tokio::test]
+async fn near_end_invalid_rate_zero_cannot_retune_output_or_publish_a_source_rate() {
+    for exclusive in [false, true] {
+        assert_near_end_rate_metadata(Some(0), Some(16), exclusive, true).await;
+    }
+}
+
+#[tokio::test]
+async fn near_end_rate_follow_preserves_valid_format_change_and_matching_rate_policy() {
+    for exclusive in [false, true] {
+        assert_near_end_rate_metadata(Some(44_100), Some(16), exclusive, false).await;
+        assert_near_end_rate_metadata(Some(48_000), Some(16), exclusive, true).await;
+    }
+}
+
+#[tokio::test]
+async fn near_end_unknown_rate_still_defers_known_exclusive_bit_depth_changes() {
+    for rate in [None, Some(0), Some(-1), Some(48_000)] {
+        assert_near_end_rate_metadata(rate, Some(24), true, false).await;
+        assert_near_end_rate_metadata(rate, Some(24), false, true).await;
+    }
+}
+
 #[test]
 fn exclusive_sample_rate_follow_skips_prebuffer_on_rate_change() {
     assert!(should_skip_prebuffer_for_sample_rate_follow_format_change(

@@ -984,8 +984,8 @@ pub(crate) async fn handle_near_end_prebuffer_next(
         }
     }
 
-    // If sample_rate_follow is enabled and the next track's rate differs from current,
-    // rebuild the output device at the new rate before PrepareNext.
+    // Native format changes belong at track start. Prebuffering must leave
+    // the outgoing stream's format alone, including when rate metadata is absent.
     {
         let state_guard = state.read().await;
         if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
@@ -1002,8 +1002,8 @@ pub(crate) async fn handle_near_end_prebuffer_next(
                 .ok();
             if let Some(settings) = audio_settings
                 && settings.sample_rate_follow
-                && let Some(next_rate) = stream.sample_rate
             {
+                let next_rate = stream.sample_rate.filter(|rate| *rate > 0);
                 let current_rate = info.sample_rate;
                 let current_bit_depth = state_guard
                     .current_stream_display
@@ -1013,7 +1013,7 @@ pub(crate) async fn handle_near_end_prebuffer_next(
                     settings.exclusive_mode,
                     settings.sample_rate_follow,
                     current_rate,
-                    Some(next_rate),
+                    next_rate,
                     current_bit_depth,
                     stream.bit_depth,
                 ) {
@@ -1024,33 +1024,18 @@ pub(crate) async fn handle_near_end_prebuffer_next(
                         .bit_depth
                         .map(|depth| depth.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
+                    let next_rate_label = next_rate
+                        .map(|rate| rate.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
                     info!(
                         "Skipping pre-buffer for next track {}: sample-rate-follow will switch native format from {} Hz/{} bit to {} Hz/{} bit at track start",
-                        next.id, current_rate, current_depth_label, next_rate, next_depth_label
+                        next.id,
+                        current_rate,
+                        current_depth_label,
+                        next_rate_label,
+                        next_depth_label
                     );
                     return Ok(false);
-                }
-                if next_rate as u32 != current_rate {
-                    let device_sel = match settings.output_device {
-                        Some(device_id) => {
-                            playback_runtime::OutputDeviceSelection::Named(device_id)
-                        }
-                        None => playback_runtime::OutputDeviceSelection::Default,
-                    };
-                    // StreamInfo.sample_rate is Option<i32>; cast is safe (fits in u32).
-                    if let Err(e) = handle.device_swap(
-                        device_sel,
-                        settings.exclusive_mode,
-                        settings.sample_rate_follow,
-                        Some(next_rate as u32),
-                        settings.exclusive_release_grace_secs,
-                        settings.exclusive_latency_mode,
-                    ) {
-                        warn!(
-                            "Failed to rebuild stream for next track {} at {} Hz: {e}",
-                            next.id, next_rate
-                        );
-                    }
                 }
             }
         }
@@ -1127,7 +1112,7 @@ pub(crate) async fn handle_near_end_prebuffer_next(
         if let Some(ref si) = stream_info {
             state_guard.pending_stream_display = Some(crate::StreamDisplayInfo {
                 audio_quality: si.audio_quality.clone(),
-                sample_rate: si.sample_rate,
+                sample_rate: si.sample_rate.filter(|rate| *rate > 0),
                 bit_depth: si.bit_depth,
             });
         }

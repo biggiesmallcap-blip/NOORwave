@@ -34,4 +34,6 @@ Already-started stream requests may finish; their stale results cannot produce p
 
 Next format check: the existing sample-rate-follow policy skips prebuffering when a valid upcoming rate changes, in shared and exclusive modes. The later device-swap branch therefore requires invalid zero/negative metadata to differ from the current rate without that policy rejecting preparation. Its raw signed-to-unsigned cast needs a separate regression and fix. This task leaves that branch unchanged.
 
+Resolved by the subsequent task documented in the [prebuffer format metadata handoff](prebuffer-format-metadata-handoff-2026-10-12.md). That task removes the prebuffer-specific device swap, handles absent rates in the existing format-change policy, and reports invalid pending rates as unknown.
+
 Audible desktop gapless transitions, rapid device switching, hotplug, non-Windows compilation, and release-mode performance remain unverified. No installed app or user database was modified. Version remains 1.0.5. Follow-ups added: none.
