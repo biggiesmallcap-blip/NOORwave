@@ -971,8 +971,8 @@ pub(crate) fn decode_and_buffer_job(
                 }
             }
 
-            // Flush any residual samples held in the resampler at end-of-stream
-            // so the final fraction of a chunk doesn't get truncated.
+            // Drain the filter's delayed frames as well as residual input.
+            // EOF on a full input chunk still has a tail to deliver.
             if let Some(r) = resampler.as_mut() {
                 let tail = r.flush();
                 if !tail.is_empty() {
@@ -1123,14 +1123,21 @@ mod tests {
 
     #[test]
     fn resampled_http_wav_reaches_finished_pcm_buffer() {
+        for frames in [1, 1024, 1025, 4096, 4099] {
+            decode_resampled_http_wav(frames);
+        }
+    }
+
+    fn decode_resampled_http_wav(frames: usize) {
         use crate::playback::player::ResolvedStream;
         use crate::services::tidal::stream::{StreamInfo, StreamRequest};
         use std::io::{Read, Write};
         use std::sync::atomic::{AtomicU32, AtomicU64};
 
-        let samples: Vec<i16> = (0..4099)
+        let mut samples: Vec<i16> = (0..frames)
             .map(|frame| ((frame as f32 * 0.03).sin() * 12_000.0) as i16)
             .collect();
+        samples[frames - 1] = 16_000;
         let data_len = (samples.len() * 2) as u32;
         let mut wav = Vec::new();
         wav.extend_from_slice(b"RIFF");
@@ -1221,6 +1228,10 @@ mod tests {
         expected_samples.extend(expected.flush());
         let guard = shared.buffer.lock().unwrap();
         assert!(guard.finished);
+        assert_eq!(
+            guard.samples.len(),
+            (frames * 48_000 + 44_100 / 2) / 44_100 * 2
+        );
         assert!(guard.samples.iter().any(|sample| sample.abs() > 0.1));
         assert_eq!(guard.samples, expected_samples);
         assert_eq!(

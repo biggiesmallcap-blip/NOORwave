@@ -63,6 +63,8 @@ pub(crate) struct StreamResampler {
     pub(crate) out_rate: u32,
     residual: Vec<Vec<f32>>,
     output_scratch: Vec<Vec<f32>>,
+    input_frames: usize,
+    output_frames: usize,
 }
 
 impl StreamResampler {
@@ -100,6 +102,8 @@ impl StreamResampler {
                 .map(|_| Vec::with_capacity(Self::CHUNK_SIZE_IN))
                 .collect(),
             output_scratch,
+            input_frames: 0,
+            output_frames: 0,
         })
     }
 
@@ -107,6 +111,9 @@ impl StreamResampler {
         if interleaved.is_empty() {
             return Vec::new();
         }
+        self.input_frames = self
+            .input_frames
+            .saturating_add(interleaved.len() / self.channels);
         let chunks =
             (self.residual[0].len() + interleaved.len() / self.channels) / self.chunk_size_in;
         // This wrapper keeps the ratio fixed. The next-call estimate bounds
@@ -131,7 +138,7 @@ impl StreamResampler {
                 channel.clear();
             }
             match result {
-                Ok((_, frames)) => Self::interleave_into(&self.output_scratch, frames, &mut out),
+                Ok((_, frames)) => self.append_output(frames, usize::MAX, &mut out),
                 Err(e) => {
                     warn!("rubato process error: {e}");
                     return out;
@@ -142,48 +149,59 @@ impl StreamResampler {
     }
 
     pub(crate) fn flush(&mut self) -> Vec<f32> {
-        if self.residual[0].is_empty() {
-            return Vec::new();
+        // Round the complete source duration once, rather than rounding each
+        // packet. EOF must also drain filter history on exact chunk boundaries.
+        let expected_frames = ((self.input_frames as u128 * self.out_rate as u128
+            + self.in_rate as u128 / 2)
+            / self.in_rate as u128)
+            .min(usize::MAX as u128) as usize;
+        let remaining = expected_frames.saturating_sub(self.output_frames);
+        let mut out = Vec::with_capacity(remaining * self.channels);
+        while self.output_frames < expected_frames {
+            for channel in &mut self.residual {
+                channel.resize(self.chunk_size_in, 0.0);
+            }
+            let result = rubato::Resampler::process_into_buffer(
+                &mut self.inner,
+                &self.residual,
+                &mut self.output_scratch,
+                None,
+            );
+            for channel in &mut self.residual {
+                channel.clear();
+            }
+            match result {
+                Ok((_, frames)) if frames > 0 => {
+                    self.append_output(frames, expected_frames - self.output_frames, &mut out);
+                }
+                Ok(_) => {
+                    warn!("rubato flush made no progress");
+                    break;
+                }
+                Err(e) => {
+                    warn!("rubato flush error: {e}");
+                    break;
+                }
+            }
         }
-        let real_in = self.residual[0].len();
-        for ch in self.residual.iter_mut() {
-            ch.resize(self.chunk_size_in, 0.0);
-        }
-        let result = rubato::Resampler::process_into_buffer(
-            &mut self.inner,
-            &self.residual,
-            &mut self.output_scratch,
-            None,
-        );
         for channel in &mut self.residual {
             channel.clear();
         }
-        let frames = match result {
-            Ok((_, frames)) => frames,
-            Err(e) => {
-                warn!("rubato flush error: {e}");
-                return Vec::new();
-            }
-        };
-        let real_out_frames =
-            ((real_in as f64) * self.out_rate as f64 / self.in_rate as f64).round() as usize;
-        let real_out_frames = real_out_frames.min(frames);
-        let mut out: Vec<f32> = Vec::with_capacity(real_out_frames * self.channels);
-        Self::interleave_into(&self.output_scratch, real_out_frames, &mut out);
         out
     }
 
-    fn interleave_into(chunk_out: &[Vec<f32>], frames: usize, out: &mut Vec<f32>) {
-        if chunk_out.is_empty() {
-            return;
-        }
-        let channels = chunk_out.len();
-        out.reserve(frames * channels);
-        for f in 0..frames {
-            for ch in chunk_out.iter() {
-                out.push(ch[f]);
+    fn append_output(&mut self, frames: usize, limit: usize, out: &mut Vec<f32>) {
+        // SincFixedIn starts its interpolation index half a filter before
+        // zero, aligning emitted PCM with the source already. Its delay is
+        // retained history to drain at EOF, not a prefix to remove here.
+        let take = frames.min(limit);
+        out.reserve(take * self.channels);
+        for frame in 0..take {
+            for channel in &self.output_scratch {
+                out.push(channel[frame]);
             }
         }
+        self.output_frames = self.output_frames.saturating_add(take);
     }
 }
 
@@ -191,41 +209,91 @@ impl StreamResampler {
 mod tests {
     use super::*;
 
-    // Compare against the former allocating path using rubato's independent
-    // convenience API, including its original padding and trimming policy.
-    fn allocating_reference(r: &mut StreamResampler, input: &[f32], flush: bool) -> Vec<f32> {
-        for frame in input.chunks_exact(r.channels) {
-            for (channel, sample) in frame.iter().enumerate() {
-                r.residual[channel].push(*sample);
+    #[test]
+    fn resampler_preserves_duration_and_tail_across_chunk_boundaries() {
+        for (in_rate, out_rate) in [(44_100, 48_000), (96_000, 44_100), (44_100, 96_000)] {
+            for frames in [1, 13, 1024, 1025, 4096, 4099] {
+                let mut r = StreamResampler::new(in_rate, out_rate, 2).unwrap();
+                let mut input = vec![0.0; frames * 2];
+                input[(frames - 1) * 2] = 0.75;
+                input[(frames - 1) * 2 + 1] = -0.5;
+                let mut output = r.process(&input);
+                output.extend(r.flush());
+                let expected_frames =
+                    ((frames as f64 * out_rate as f64 / in_rate as f64).round()) as usize;
+                assert_eq!(
+                    output.len(),
+                    expected_frames * 2,
+                    "{in_rate}->{out_rate}, {frames} input frames"
+                );
+                if expected_frames > 0 {
+                    assert!(
+                        output.iter().any(|s| s.abs() > 0.1),
+                        "last impulse was lost: {in_rate}->{out_rate}, {frames} frames"
+                    );
+                }
+                assert!(r.flush().is_empty());
             }
         }
-        let mut out = Vec::new();
-        while r.residual[0].len() >= r.chunk_size_in || (flush && !r.residual[0].is_empty()) {
-            let real_in = r.residual[0].len().min(r.chunk_size_in);
-            for channel in &mut r.residual {
-                if channel.len() < r.chunk_size_in {
-                    channel.resize(r.chunk_size_in, 0.0);
-                }
-            }
-            let input: Vec<Vec<f32>> = r
-                .residual
-                .iter_mut()
-                .map(|channel| channel.drain(..r.chunk_size_in).collect())
+    }
+
+    #[test]
+    fn resampler_aligns_impulse_to_source_clock() {
+        for (in_rate, out_rate) in [(44_100, 48_000), (48_000, 44_100), (96_000, 48_000)] {
+            let mut r = StreamResampler::new(in_rate, out_rate, 1).unwrap();
+            let mut input = vec![0.0; 4096];
+            input[256] = 0.75;
+            let mut output = r.process(&input);
+            output.extend(r.flush());
+            let peak = output
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+                .unwrap()
+                .0;
+            let expected = (256.0 * out_rate as f64 / in_rate as f64).round() as usize;
+            assert!(
+                peak.abs_diff(expected) <= 1,
+                "impulse at {peak}, expected {expected}: {in_rate}->{out_rate}"
+            );
+        }
+    }
+
+    // Independent whole-clip reference uses rubato's allocating API and
+    // selects exactly the source-duration window after zero-padding its tail.
+    fn allocating_reference(
+        input: &[f32],
+        in_rate: u32,
+        out_rate: u32,
+        channels: usize,
+    ) -> Vec<f32> {
+        let mut r = StreamResampler::new(in_rate, out_rate, channels).unwrap();
+        let expected =
+            ((input.len() / channels) as f64 * out_rate as f64 / in_rate as f64).round() as usize;
+        let mut raw = Vec::new();
+        let mut position = 0;
+        while raw.len() / channels < expected {
+            let planar: Vec<Vec<f32>> = (0..channels)
+                .map(|channel| {
+                    (0..StreamResampler::CHUNK_SIZE_IN)
+                        .map(|frame| {
+                            input
+                                .get((position + frame) * channels + channel)
+                                .copied()
+                                .unwrap_or(0.0)
+                        })
+                        .collect()
+                })
                 .collect();
-            let chunk = rubato::Resampler::process(&mut r.inner, &input, None).unwrap();
-            let frames = if real_in < r.chunk_size_in {
-                ((real_in as f64 * r.out_rate as f64 / r.in_rate as f64).round() as usize)
-                    .min(chunk[0].len())
-            } else {
-                chunk[0].len()
-            };
-            for frame in 0..frames {
+            position += StreamResampler::CHUNK_SIZE_IN;
+            let chunk = rubato::Resampler::process(&mut r.inner, &planar, None).unwrap();
+            for frame in 0..chunk[0].len() {
                 for channel in &chunk {
-                    out.push(channel[frame]);
+                    raw.push(channel[frame]);
                 }
             }
         }
-        out
+        raw[..expected * channels].to_vec()
     }
 
     #[test]
@@ -235,10 +303,13 @@ mod tests {
             (48_000, 44_100),
             (96_000, 44_100),
             (44_100, 96_000),
+            (8_000, 384_000),
+            (384_000, 8_000),
         ] {
             for channels in [1, 2, 6] {
                 let mut r = StreamResampler::new(in_rate, out_rate, channels).unwrap();
-                let mut reference = StreamResampler::new(in_rate, out_rate, channels).unwrap();
+                let mut all_input = Vec::new();
+                let mut all_output = Vec::new();
                 let capacities: Vec<_> = r.residual.iter().map(Vec::capacity).collect();
                 let mut frame_offset = 0;
                 for frames in [1, 1023, 1024, 1025, 8193, 7] {
@@ -255,12 +326,8 @@ mod tests {
                         })
                         .collect();
                     frame_offset += frames;
-                    let actual = r.process(&input);
-                    let expected = allocating_reference(&mut reference, &input, false);
-                    assert_eq!(
-                        actual, expected,
-                        "{in_rate}->{out_rate}, {channels} ch, {frames} frames"
-                    );
+                    all_output.extend(r.process(&input));
+                    all_input.extend(input);
                     assert!(
                         r.residual
                             .iter()
@@ -272,7 +339,12 @@ mod tests {
                         "input scratch must stay bounded for large packets"
                     );
                 }
-                assert_eq!(r.flush(), allocating_reference(&mut reference, &[], true));
+                all_output.extend(r.flush());
+                assert_eq!(
+                    all_output,
+                    allocating_reference(&all_input, in_rate, out_rate, channels),
+                    "{in_rate}->{out_rate}, {channels} ch"
+                );
                 assert!(r.flush().is_empty());
                 assert!(r.process(&[]).is_empty());
             }
