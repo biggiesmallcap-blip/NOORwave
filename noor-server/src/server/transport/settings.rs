@@ -5,9 +5,10 @@ use crate::SharedState;
 use crate::db::queries;
 use crate::playback::{queue, runtime as playback_runtime};
 use crate::server::routes::effective_crossfade_for_exclusive;
-use crate::server::transport::generation::bump as bump_playback_generation;
 use crate::server::transport::runtime::current as current_playback_runtime;
-use crate::server::transport::start::{Dispatch, StartError, StartRequest, start_track};
+use crate::server::transport::start::{
+    Dispatch, Generation, StartError, StartRequest, start_track,
+};
 use tracing::warn;
 
 /// Read the user's configured crossfade length from `playback_state`.
@@ -178,12 +179,14 @@ pub(crate) async fn reissue_current_track_at_new_quality(
         return Ok(());
     }
     let crossfade_ms = current_crossfade_ms(state).await;
-    let generation = bump_playback_generation(state).await;
+    // Not a transport command: claim the generation only once the new stream
+    // resolved, so a failed resolve leaves the playing track able to advance.
+    let observed = super::generation::observe(state).await;
     match start_track(
         state,
         StartRequest {
             track: &track,
-            generation,
+            generation: Generation::ClaimWhenReady { observed },
             dispatch: Dispatch::Switch,
             crossfade_ms,
         },

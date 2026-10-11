@@ -25,7 +25,9 @@ use crate::server::routes::{
 use crate::server::transport::generation::{
     current as current_playback_generation, is_current as playback_generation_is_current,
 };
-use crate::server::transport::start::{Dispatch, StartError, StartRequest, start_track};
+use crate::server::transport::start::{
+    Dispatch, Generation, StartError, StartRequest, start_track,
+};
 use crate::server::transport::stream::{TidalPlaybackError, resolve_tidal_playback_stream};
 use crate::services::tidal::stream as tidal_stream;
 use crate::{AppEvent, PlaybackRuntimeInfo, SharedState};
@@ -1054,7 +1056,7 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
                 state,
                 StartRequest {
                     track: &track,
-                    generation,
+                    generation: Generation::Claimed(generation),
                     dispatch: Dispatch::Switch,
                     crossfade_ms,
                 },

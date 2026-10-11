@@ -18,9 +18,22 @@ pub(crate) enum Dispatch {
     Switch,
 }
 
+/// Which playback generation the started job runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Generation {
+    /// A user transport command already bumped to this generation, so older
+    /// work stops applying right away.
+    Claimed(u64),
+    /// Background work (a quality re-issue) observed this generation. It
+    /// claims a new one only once the stream resolved: a failed resolve then
+    /// leaves the playing track's generation alone, and a transport command
+    /// that arrived meanwhile wins.
+    ClaimWhenReady { observed: u64 },
+}
+
 pub(crate) struct StartRequest<'a> {
     pub track: &'a crate::db::models::Track,
-    pub generation: u64,
+    pub generation: Generation,
     pub dispatch: Dispatch,
     pub crossfade_ms: i32,
 }
@@ -66,9 +79,17 @@ pub(crate) async fn start_track(
     let stream_info = resolve_tidal_playback_stream(state, track, &stream_request)
         .await
         .map_err(StartError::Stream)?;
-    if !generation::is_current(state, start_generation).await {
-        return Err(StartError::Superseded);
-    }
+    let start_generation = match start_generation {
+        Generation::Claimed(claimed) => {
+            if !generation::is_current(state, claimed).await {
+                return Err(StartError::Superseded);
+            }
+            claimed
+        }
+        Generation::ClaimWhenReady { observed } => generation::claim_if_current(state, observed)
+            .await
+            .ok_or(StartError::Superseded)?,
+    };
     let handle = ensure_for_track(state).await.map_err(StartError::Runtime)?;
     // Transport intent is re-read at dispatch: a pause that landed during the
     // stream resolve wins, so the engine comes up silent instead of playing
@@ -165,7 +186,7 @@ mod tests {
     ) -> StartRequest<'_> {
         StartRequest {
             track,
-            generation,
+            generation: Generation::Claimed(generation),
             dispatch,
             crossfade_ms: 0,
         }
@@ -289,5 +310,101 @@ mod tests {
             playback_runtime::PlaybackRuntimeCommand::Play(job) => assert!(job.start_paused),
             other => panic!("expected Play, got {other:?}"),
         }
+    }
+
+    fn reissue(track: &crate::db::models::Track, observed: u64) -> StartRequest<'_> {
+        StartRequest {
+            track,
+            generation: Generation::ClaimWhenReady { observed },
+            dispatch: Dispatch::Switch,
+            crossfade_ms: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_reissue_leaves_the_playing_generation_alone() {
+        // A quality change whose stream lookup fails must not strand the
+        // playing track under a stale generation (its Finished would be
+        // dropped and the queue would never advance).
+        let fx = fixture(
+            Some(99101),
+            ScriptedStreamSource::new(vec![Err(StreamResolveError::StreamRejected {
+                message: "lookup failed".to_string(),
+            })]),
+        )
+        .await;
+        let playing = generation::bump(&fx.state).await;
+        let err = start_track(&fx.state, reissue(&fx.track, playing))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StartError::Stream(_)));
+        assert!(fx.commands.try_recv().is_err(), "nothing dispatched");
+        assert_eq!(generation::observe(&fx.state).await, playing);
+    }
+
+    #[tokio::test]
+    async fn successful_reissue_claims_the_next_generation() {
+        let fx = fixture(
+            Some(99101),
+            ScriptedStreamSource::new(vec![Ok(test_stream_info(99101))]),
+        )
+        .await;
+        let playing = generation::bump(&fx.state).await;
+        start_track(&fx.state, reissue(&fx.track, playing))
+            .await
+            .unwrap();
+        assert_eq!(generation::observe(&fx.state).await, playing + 1);
+        match fx.commands.try_recv().unwrap() {
+            playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                assert_eq!(job.generation, playing + 1)
+            }
+            other => panic!("expected Switch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_command_during_reissue_wins() {
+        let fx = fixture(
+            Some(99101),
+            ScriptedStreamSource::new(vec![Ok(test_stream_info(99101))]),
+        )
+        .await;
+        let observed = generation::bump(&fx.state).await;
+        let skip = generation::bump(&fx.state).await;
+        let err = start_track(&fx.state, reissue(&fx.track, observed))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StartError::Superseded));
+        assert!(fx.commands.try_recv().is_err(), "nothing dispatched");
+        assert_eq!(generation::observe(&fx.state).await, skip);
+    }
+
+    #[tokio::test]
+    async fn failed_quality_change_keeps_the_playing_generation() {
+        let fx = fixture(
+            Some(99101),
+            ScriptedStreamSource::new(vec![Err(StreamResolveError::StreamRejected {
+                message: "lookup failed".to_string(),
+            })]),
+        )
+        .await;
+        fx.state
+            .read()
+            .await
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE playback_state SET current_track_id = 9101 WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let playing = generation::bump(&fx.state).await;
+        let result = super::super::settings::reissue_current_track_at_new_quality(&fx.state).await;
+        assert!(result.is_err(), "the failed lookup is reported");
+        assert_eq!(fx.stream.call_count(), 1, "the re-issue did resolve");
+        assert!(fx.commands.try_recv().is_err(), "nothing dispatched");
+        assert_eq!(generation::observe(&fx.state).await, playing);
     }
 }

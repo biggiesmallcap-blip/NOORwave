@@ -17,7 +17,7 @@ use super::snapshot::{
     overlay_snapshot_with_external_track, recently_cleared, restore_after_previous_failure,
     save_playback_anchor,
 };
-use super::start::{Dispatch, StartError, StartRequest, start_track};
+use super::start::{Dispatch, Generation, StartError, StartRequest, start_track};
 
 /// What a successful command settled on.
 #[derive(Debug)]
@@ -128,7 +128,7 @@ pub(crate) async fn next(state: &SharedState) -> Result<Outcome, CommandError> {
             state,
             StartRequest {
                 track,
-                generation: playback_generation,
+                generation: Generation::Claimed(playback_generation),
                 dispatch: Dispatch::Switch,
                 crossfade_ms,
             },
@@ -199,7 +199,7 @@ async fn start_current_queue_item(
             state,
             StartRequest {
                 track,
-                generation: playback_generation,
+                generation: Generation::Claimed(playback_generation),
                 dispatch: Dispatch::Play,
                 crossfade_ms,
             },
@@ -370,7 +370,7 @@ pub(crate) async fn play(state: &SharedState, track_id: i64) -> Result<Outcome, 
         state,
         StartRequest {
             track: &track,
-            generation: playback_generation,
+            generation: Generation::Claimed(playback_generation),
             dispatch: Dispatch::Play,
             crossfade_ms,
         },
@@ -686,7 +686,7 @@ async fn previous_via_persisted_queue(
             state,
             StartRequest {
                 track,
-                generation: playback_generation,
+                generation: Generation::Claimed(playback_generation),
                 dispatch: Dispatch::Switch,
                 crossfade_ms,
             },
