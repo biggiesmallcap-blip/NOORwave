@@ -313,31 +313,17 @@ pub(crate) fn spawn_playback_runtime_listener(
                     .await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. }) => {
-                    let state_guard = state.read().await;
-                    if !state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
-                    {
-                        break;
-                    }
-                    drop(state_guard);
                     // The runtime acknowledged pause (user command or the
                     // advance-cascade breaker). Reconcile DB/UI to it so the
                     // pause button always reflects what is actually audible.
-                    reconcile_runtime_transport_state(&state, false).await;
-                }
-                Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. }) => {
-                    let state_guard = state.read().await;
-                    if !state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
-                    {
+                    if !reconcile_runtime_transport_state(&state, &handle, false).await {
                         break;
                     }
-                    drop(state_guard);
-                    reconcile_runtime_transport_state(&state, true).await;
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. }) => {
+                    if !reconcile_runtime_transport_state(&state, &handle, true).await {
+                        break;
+                    }
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
                 Ok(playback_runtime::PlaybackRuntimeEvent::Stalled { track_id }) => {
@@ -953,8 +939,21 @@ pub(crate) fn release_next_prebuffer_slot(
 /// runtime is the source of truth for what is audible; this is the
 /// reconciliation channel that closes the "button says paused, audio still
 /// playing" gap after command interleavings.
-pub(crate) async fn reconcile_runtime_transport_state(state: &SharedState, runtime_playing: bool) {
+pub(crate) async fn reconcile_runtime_transport_state(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    runtime_playing: bool,
+) -> bool {
     let state_guard = state.read().await;
+    // Runtime replacement needs the write lock. Keep this validated read
+    // guard through DB reconciliation and its public notification.
+    if !state_guard
+        .playback_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+    {
+        return false;
+    }
     let db_playing = state_guard
         .db
         .with_conn(|conn| {
@@ -967,10 +966,10 @@ pub(crate) async fn reconcile_runtime_transport_state(state: &SharedState, runti
         })
         .map(|value: i64| value != 0);
     let Ok(db_playing) = db_playing else {
-        return;
+        return true;
     };
     if db_playing == runtime_playing {
-        return;
+        return true;
     }
     let updated = state_guard.db.with_conn(|conn| {
         conn.execute(
@@ -987,6 +986,7 @@ pub(crate) async fn reconcile_runtime_transport_state(state: &SharedState, runti
         );
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     }
+    true
 }
 
 pub(crate) async fn switch_runtime_to_snapshot_current(

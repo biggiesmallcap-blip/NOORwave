@@ -18,6 +18,102 @@ use std::time::{Duration, Instant};
 use crate::PlaybackRuntimeState;
 use crate::db::{Database, schema};
 
+#[tokio::test]
+async fn transport_ack_rechecks_runtime_after_state_lock_wait() {
+    for runtime_playing in [false, true] {
+        let (state, old_handle, _, _) = cpal_fault_fixture().await;
+        let mut guard = state.write().await;
+        guard
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE playback_state SET is_playing=?1 WHERE id=1",
+                    rusqlite::params![i64::from(!runtime_playing)],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let before = guard.db.with_conn(player::load_snapshot).unwrap();
+        let mut app_events = guard.event_tx.subscribe();
+        let pending = tokio::spawn({
+            let state = state.clone();
+            async move { reconcile_runtime_transport_state(&state, &old_handle, runtime_playing).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+        let (command_tx, _command_rx) = std::sync::mpsc::channel();
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "replacement".into(),
+            handle: playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx),
+        });
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        let guard = state.read().await;
+        let after = guard.db.with_conn(player::load_snapshot).unwrap();
+        assert_eq!(
+            after.state.is_playing, before.state.is_playing,
+            "retired transport acknowledgment changed replacement intent"
+        );
+        assert_eq!(
+            after.state.current_queue_item_id,
+            before.state.current_queue_item_id
+        );
+        assert_eq!(after.queue.len(), before.queue.len());
+        assert!(matches!(
+            app_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn current_runtime_transport_ack_reconciles_public_state_without_changing_queue() {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let before = {
+        let mut guard = state.write().await;
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+        guard.db.with_conn(player::load_snapshot).unwrap()
+    };
+    let mut app_events = state.read().await.event_tx.subscribe();
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    for runtime_playing in [false, true] {
+        let event = if runtime_playing {
+            playback_runtime::PlaybackRuntimeEvent::Resumed { track_id: Some(1) }
+        } else {
+            playback_runtime::PlaybackRuntimeEvent::Paused { track_id: Some(1) }
+        };
+        assert!(handle.test_publish_event(event));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), app_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            AppEvent::PlaybackStateChanged
+        ));
+        let guard = state.read().await;
+        let after = guard.db.with_conn(player::load_snapshot).unwrap();
+        assert_eq!(after.state.is_playing, runtime_playing);
+        assert_eq!(
+            after.state.current_queue_item_id,
+            before.state.current_queue_item_id
+        );
+        assert_eq!(after.queue.len(), before.queue.len());
+        drop(guard);
+        reconcile_runtime_transport_state(&state, &handle, runtime_playing).await;
+        assert!(matches!(
+            app_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+}
+
 async fn cpal_fault_fixture() -> (
     crate::SharedState,
     playback_runtime::PlaybackRuntimeHandle,
