@@ -78,7 +78,7 @@ describe('TIDAL discover artwork rendering contract', () => {
 		// local artist id, so the href has to be passed in.
 		expect(detailPopup).toContain('artistHref');
 		expect(detailPopup).toContain('popup-artist-link');
-		expect(detailPopup).toContain('function openArtistPage()');
+		expect(detailPopup).toContain('function openArtistPage(requestClose: () => void)');
 		// Close first, then navigate: a popup left mounted over the page it opened
 		// swallows the next click through its window-level outside-click handler.
 		expect(detailPopup).toContain('requestClose();');

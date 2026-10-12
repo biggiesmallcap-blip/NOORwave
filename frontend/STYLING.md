@@ -320,6 +320,8 @@ Albums have one content model shown in two containers:
 
 Do not add a third presentation. A new surface picks quick view or page by that rule.
 
+Album and TIDAL collection quick views share `QuickViewPopup` for the container, focus handling, and exit motion. Scrolling inside browses the track list; scrolling over the page outside dismisses the popup while the page continues scrolling. Collection quick views use `DetailHero` and `ActionBar`, with a compact Save playlist button that uses the collection title. Keep save forms out of the track list. Portalled context menus remain interactive without dismissing the quick view.
+
 ## Media links and context menus
 
 Track, album, artist, and video references should resolve inside NOORwave whenever the app has a route for them. Do not send media-reference clicks to `tidal.com` from cards, rows, now-playing metadata, quiet mode, or context menus.

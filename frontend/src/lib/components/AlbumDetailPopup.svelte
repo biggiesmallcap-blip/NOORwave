@@ -6,7 +6,7 @@
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { formatTrackDuration } from '$lib/utils/format';
-	import { portal } from '$lib/actions/portal';
+	import QuickViewPopup from '$lib/components/ui/QuickViewPopup.svelte';
 	import ActionBar from '$lib/components/ui/ActionBar.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
@@ -51,60 +51,6 @@
 	const markArtworkFailed = artwork.markFailed;
 	let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));
 
-	// Scroll-to-dismiss. The track list scrolls normally; once it can't scroll
-	// further (or the wheel lands on the surrounding backdrop) a scroll gesture
-	// gently collapses the popup so the user never has to reach for the close
-	// button. `closing` plays the exit animation, then finishClose unmounts.
-	let panelEl = $state<HTMLDivElement | null>(null);
-	let closing = $state(false);
-	let closed = false;
-	const WHEEL_DISMISS_THRESHOLD = 6;
-
-	function finishClose() {
-		if (closed) return;
-		closed = true;
-		onClose();
-	}
-
-	function requestClose() {
-		if (closing) return;
-		closing = true;
-		// Fallback in case animationend doesn't fire (reduced-motion, interrupted).
-		setTimeout(finishClose, 240);
-	}
-
-	function isInsidePanel(target: EventTarget | null): boolean {
-		return panelEl != null && target instanceof Node && panelEl.contains(target);
-	}
-
-	// Scrolling over the panel browses the track list; a scroll on the page area
-	// behind dismisses. Crucially the backdrop never intercepts the wheel, so the
-	// page's own scroller is the wheel target from the first notch and keeps
-	// scrolling straight through the dismiss. (Chromium latches a wheel gesture to
-	// its initial target for the whole sequence; if the backdrop were the target
-	// and we removed it, the page wouldn't resume scrolling until the mouse moved.)
-	function handleWheel(e: WheelEvent) {
-		if (closing || isInsidePanel(e.target)) return;
-		if (Math.abs(e.deltaY) < WHEEL_DISMISS_THRESHOLD) return;
-		requestClose();
-	}
-
-	// With the backdrop non-blocking, a click outside the panel is caught here:
-	// close, and swallow it so a card behind the popup isn't activated.
-	function handleOutsideClick(e: MouseEvent) {
-		if (closing || isInsidePanel(e.target)) return;
-		e.preventDefault();
-		e.stopPropagation();
-		requestClose();
-	}
-
-	function handleKey(e: KeyboardEvent) {
-		if (e.key === 'Escape') {
-			e.preventDefault();
-			requestClose();
-		}
-	}
-
 	// Clicking a track plays the album from that track, matching the album page.
 	// playAlbum (not playTracksInContext over the popup's owned rows) so a
 	// partially-owned album queues its TIDAL-only remainder too instead of a
@@ -147,14 +93,14 @@
 	// it looked like it would do.
 	let resolvedAlbumHref = $derived(albumHref ?? (isLocal && album.id != null ? `/albums/${album.id}` : null));
 
-	function openAlbumPage() {
+	function openAlbumPage(requestClose: () => void) {
 		if (!resolvedAlbumHref) return;
 		const href = resolvedAlbumHref;
 		requestClose();
 		void goto(href);
 	}
 
-	function openArtistPage() {
+	function openArtistPage(requestClose: () => void) {
 		if (!resolvedArtistHref) return;
 		const href = resolvedArtistHref;
 		requestClose();
@@ -184,32 +130,8 @@
 	}
 </script>
 
-<svelte:window onkeydown={handleKey} onwheel={handleWheel} onclickcapture={handleOutsideClick} />
-
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<div
-	class="popup-backdrop"
-	class:closing
-	role="presentation"
-	use:portal
->
-	<div
-		class="popup-panel"
-		class:closing
-		bind:this={panelEl}
-		role="dialog"
-		tabindex="-1"
-		aria-modal="true"
-		aria-label={album.title}
-		onclick={(e) => e.stopPropagation()}
-		onanimationend={() => { if (closing) finishClose(); }}
-	>
-		<button class="popup-close" aria-label="Close" onclick={requestClose}>
-			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-				<path d="M18 6 6 18M6 6l12 12" />
-			</svg>
-		</button>
-
+<QuickViewPopup title={album.title} {onClose}>
+	{#snippet children(requestClose)}
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div class="popup-hero" oncontextmenu={openAlbumContextMenu}>
 			{#if popupArtwork}
@@ -234,7 +156,7 @@
 							class="popup-artist popup-artist-link"
 							title={`Open ${album.artist_name ?? 'artist'}`}
 							oncontextmenu={openAlbumArtistContextMenu}
-							onclick={openArtistPage}
+							onclick={() => openArtistPage(requestClose)}
 						>{album.artist_name ?? 'Unknown Artist'}</button>
 					{:else}
 						<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -264,7 +186,7 @@
 							shuffleHint="Play this album in random order"
 						/>
 						{#if resolvedAlbumHref}
-							<button type="button" class="popup-link" onclick={openAlbumPage}>Open album page</button>
+							<button type="button" class="popup-link" onclick={() => openAlbumPage(requestClose)}>Open album page</button>
 						{/if}
 					</div>
 				</div>
@@ -322,98 +244,10 @@
 				{/each}
 			</div>
 		{/if}
-	</div>
-</div>
+	{/snippet}
+</QuickViewPopup>
 
 <style>
-	.popup-backdrop {
-		position: fixed;
-		inset: 0;
-		background: transparent;
-		z-index: 80;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		/* Never intercept the wheel: the page behind stays the scroll target so a
-		   scroll-dismiss doesn't freeze page scrolling. The panel re-enables pointer
-		   events for its own interactions; outside clicks are handled on window. */
-		pointer-events: none;
-		animation: backdrop-fade var(--motion-base) both;
-	}
-
-	@keyframes backdrop-fade {
-		from { opacity: 0; }
-		to { opacity: 1; }
-	}
-
-	.popup-panel {
-		position: relative;
-		width: min(820px, 92vw);
-		max-height: 86vh;
-		pointer-events: auto;
-		display: flex;
-		flex-direction: column;
-		border-radius: var(--radius-lg, 18px);
-		border: 1px solid var(--panel-border);
-		background: var(--bg-elevated);
-		box-shadow:
-			0 28px 70px -22px rgba(0, 0, 0, 0.6),
-			0 2px 8px -2px rgba(0, 0, 0, 0.3);
-		animation: popup-bloom var(--motion-base) both;
-		overflow: hidden;
-	}
-
-	@keyframes popup-bloom {
-		from {
-			opacity: 0;
-			transform: scale(0.975) translateY(10px);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1) translateY(0);
-		}
-	}
-
-	.popup-panel.closing {
-		animation: popup-collapse var(--motion-exit) forwards;
-		pointer-events: none;
-	}
-
-	@keyframes popup-collapse {
-		from {
-			opacity: 1;
-			transform: scale(1) translateY(0);
-		}
-		to {
-			opacity: 0;
-			transform: scale(0.965) translateY(16px);
-		}
-	}
-
-	.popup-close {
-		position: absolute;
-		top: 14px;
-		right: 14px;
-		z-index: 3;
-		display: grid;
-		place-items: center;
-		background: color-mix(in srgb, var(--bg-elevated) 55%, transparent);
-		border: 1px solid var(--panel-border);
-		border-radius: 999px;
-		width: 32px;
-		height: 32px;
-		color: var(--text-secondary);
-		cursor: pointer;
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
-		transition: background var(--motion-fast), color var(--motion-fast), transform var(--motion-fast);
-	}
-	.popup-close:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-		transform: scale(1.06);
-	}
-
 	/* ── Hero with ambient artwork wash ─────────────────────────────────────── */
 	.popup-hero {
 		position: relative;
@@ -709,9 +543,6 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.popup-eq i { animation: none; height: 70%; }
-		.popup-panel,
-		.popup-panel.closing { animation: none; }
-		.popup-backdrop { animation: none; }
 	}
 
 	.popup-empty {
