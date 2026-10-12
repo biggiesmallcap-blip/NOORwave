@@ -809,8 +809,16 @@ impl PlaybackSharedState {
     /// Emit any diagnostics the audio callback latched (underrun, rejected
     /// in-callback seek). Called from the runtime loop's watchdog tick -
     /// never from the real-time thread, which only does the latching.
-    pub(crate) fn drain_deferred_rt_logs(&self) {
+    /// Returns true when the system default output endpoint changed.
+    pub(crate) fn drain_deferred_rt_logs(&self) -> bool {
         let notices = self.deferred_cpal_notices.swap(0, Ordering::Relaxed);
+        let default_output_changed = notices & 8 != 0;
+        if default_output_changed {
+            warn!(
+                track_id = self.track_id,
+                "System default output device changed"
+            );
+        }
         if notices & 1 != 0 {
             warn!(
                 track_id = self.track_id,
@@ -866,6 +874,7 @@ impl PlaybackSharedState {
             ),
             _ => {}
         }
+        default_output_changed
     }
 
     pub(crate) fn suppress_started_event(&self) {

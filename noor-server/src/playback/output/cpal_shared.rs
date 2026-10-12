@@ -144,6 +144,16 @@ pub(crate) fn emit_cpal_stream_error(
         cpal::ErrorKind::Xrun => 1,
         cpal::ErrorKind::RealtimeDenied => 2,
         cpal::ErrorKind::DeviceChanged => 4,
+        // cpal 0.18 WASAPI reports a system default-device change on a
+        // default-device stream as a message-less StreamInvalidated (or
+        // DeviceNotAvailable when no default remains). Every genuine WASAPI
+        // fault carries a message. The stream keeps rendering to its original
+        // endpoint, so the runtime follows the new default instead of pausing.
+        cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable
+            if err.message().is_none() =>
+        {
+            8
+        }
         // WASAPI falls back to SetThreadPriority when MMCSS refuses and
         // reports that fallback's failure as a backend error. Audio still
         // plays, so it is a notice rather than a fault.
@@ -422,6 +432,8 @@ mod tests {
             (cpal::Error::new(cpal::ErrorKind::Xrun), 1),
             (cpal::Error::new(cpal::ErrorKind::RealtimeDenied), 2),
             (cpal::Error::new(cpal::ErrorKind::DeviceChanged), 4),
+            (cpal::Error::new(cpal::ErrorKind::StreamInvalidated), 8),
+            (cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable), 8),
             (
                 cpal::Error::with_message(
                     cpal::ErrorKind::BackendError,

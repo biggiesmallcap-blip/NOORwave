@@ -463,6 +463,7 @@ fn run_runtime_loop(
                 // Emit any warns the audio callback latched (underrun,
                 // rejected in-callback seek) - the callback itself must not
                 // touch tracing.
+                let mut default_output_changed = false;
                 for engine in [
                     state.engine.as_ref(),
                     state.next_engine.as_ref(),
@@ -472,7 +473,27 @@ fn run_runtime_loop(
                 .into_iter()
                 .flatten()
                 {
-                    engine.shared.drain_deferred_rt_logs();
+                    default_output_changed |= engine.shared.drain_deferred_rt_logs();
+                }
+                // A shared stream opened on "Default" keeps rendering to the
+                // old endpoint after Windows switches defaults. Follow the new
+                // default through the ordinary device swap.
+                if default_output_changed
+                    && matches!(
+                        state.current_device_selection,
+                        OutputDeviceSelection::Default
+                    )
+                    && resolve_device(&OutputDeviceSelection::Default).is_some()
+                {
+                    let _ = command_tx.send(PlaybackRuntimeCommand::DeviceSwap {
+                        released_output_identity: None,
+                        device: OutputDeviceSelection::Default,
+                        exclusive: state.current_exclusive,
+                        sample_rate_follow: state.current_sample_rate_follow,
+                        desired_sample_rate: None,
+                        exclusive_release_grace_secs: state.current_exclusive_release_grace_secs,
+                        exclusive_latency_mode: state.current_exclusive_latency_mode.clone(),
+                    });
                 }
                 // Idle tick: nothing to dispatch. Check whether the audible deck
                 // has frozen on a hung TIDAL segment and, if so, force the queue
