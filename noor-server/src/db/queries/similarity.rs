@@ -1476,6 +1476,35 @@ pub fn seed_has_neighbors(conn: &Connection, model_id: i64, seed_id: i64) -> Res
     )?)
 }
 
+/// Longest length difference between two catalogue rows that still counts as
+/// the same cut of one ISRC (re-release padding, silence trims).
+pub const RECORDING_TWIN_MAX_DURATION_DELTA_MS: i64 = 3_000;
+
+/// Another catalogue row of the same recording as `track_id` (same ISRC,
+/// length within `RECORDING_TWIN_MAX_DURATION_DELTA_MS` when both are known)
+/// that has neighbors under `model_id`. The most played twin wins.
+pub fn trained_recording_twin(
+    conn: &Connection,
+    model_id: i64,
+    track_id: i64,
+) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT twin.id FROM tracks seed
+             JOIN tracks twin ON twin.isrc = seed.isrc AND twin.id != seed.id
+             WHERE seed.id = ?1 AND seed.isrc IS NOT NULL AND seed.isrc != ''
+               AND (seed.duration_ms IS NULL OR twin.duration_ms IS NULL
+                    OR ABS(seed.duration_ms - twin.duration_ms) <= ?3)
+               AND EXISTS (SELECT 1 FROM track_neighbors n
+                           WHERE n.model_id = ?2 AND n.track_id = twin.id)
+             ORDER BY twin.play_count DESC, twin.id ASC
+             LIMIT 1",
+            params![track_id, model_id, RECORDING_TWIN_MAX_DURATION_DELTA_MS],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 pub fn replace_seed_neighbors(
     conn: &Connection,
     model_id: i64,

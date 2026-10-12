@@ -57,6 +57,81 @@ fn tidal_mix_fills_a_cold_seed_with_library_rows_first() {
 }
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Seed 2 is a new release of trained row 1 (same ISRC, 1 s longer). Row 1's
+/// learned neighbor is 3, by another artist.
+fn recording_twin_db() -> Database {
+    let db = Database::open(":memory:").expect("in-memory db");
+    db.run_migrations().expect("run migrations");
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Ram Dass'), (2, 'Ashana');
+             INSERT INTO tracks (id, title, artist_id, isrc, duration_ms) VALUES
+                 (1, 'The Water Poem', 1, 'USKHG2021203', 200000),
+                 (2, 'The Water Poem', 1, 'USKHG2021203', 201000),
+                 (3, 'Jai Ma', 2, 'USX000000003', 300000),
+                 (4, 'Long Version', 1, 'USX000000004', 200000),
+                 (5, 'Long Version', 1, 'USX000000004', 260000);",
+        )?;
+        let model = crate::db::queries::create_embedding_model(
+            conn,
+            "discovery-fusion-v2:twin",
+            crate::db::queries::DISCOVERY_ENGINE_V2_FAMILY,
+            8,
+            "ready",
+            None,
+        )?;
+        crate::db::queries::activate_embedding_model(conn, model.id)?;
+        conn.execute(
+            "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score)
+             VALUES (1, 3, ?1, 1, 0.9), (4, 3, ?1, 1, 0.9)",
+            rusqlite::params![model.id],
+        )?;
+        Ok(())
+    })
+    .expect("seed");
+    db
+}
+
+#[test]
+fn recall_seed_borrows_a_trained_twin_with_the_same_isrc() {
+    let db = recording_twin_db();
+    assert_eq!(crate::services::learning::recall_seed_for(&db, 2), 1);
+    // A seed with neighbors of its own keeps them.
+    assert_eq!(crate::services::learning::recall_seed_for(&db, 1), 1);
+    // No ISRC twin: the seed stands alone.
+    assert_eq!(crate::services::learning::recall_seed_for(&db, 3), 3);
+}
+
+#[test]
+fn recall_seed_ignores_a_twin_of_a_different_length() {
+    let db = recording_twin_db();
+    // Same ISRC, 60 s longer: not the same cut, no borrowing.
+    assert_eq!(crate::services::learning::recall_seed_for(&db, 5), 5);
+}
+
+#[tokio::test]
+async fn new_release_seed_gets_the_known_recordings_neighbors_with_isrcs() {
+    let db = recording_twin_db();
+    let queue = orchestrate_song(&db, None, None, 2, RadioBlend::Mixed, 20, &[])
+        .await
+        .expect("radio");
+    let neighbor = queue
+        .tracks
+        .iter()
+        .find(|c| c.track_id == 3)
+        .expect("the trained twin's neighbor is recalled");
+    assert_eq!(neighbor.source, RadioSource::Library);
+    assert_eq!(neighbor.isrc.as_deref(), Some("USX000000003"));
+    // Neither the seed nor its twin come back as picks.
+    assert!(
+        queue
+            .tracks
+            .iter()
+            .all(|c| c.track_id != 1 && c.track_id != 2)
+    );
+    assert_eq!(queue.seed.track_id, Some(2));
+}
+
 #[test]
 fn recent_played_artist_names_keep_to_the_hour_window_for_rfc3339_rows() {
     let db = Database::open(":memory:").expect("in-memory db");
