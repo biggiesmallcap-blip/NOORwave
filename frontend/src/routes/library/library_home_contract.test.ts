@@ -47,7 +47,12 @@ describe('library home hero contract', () => {
 		expect(libraryHero).toContain('<ArtworkImage');
 		expect(libraryHero).toContain('className="mural-panel-art"');
 		expect(libraryHero).toContain('src={artistArtworkSources(artist)}');
-		expect(libraryHero).toContain('size={640}');
+		// TIDAL serves artist pictures at 160/320/480/750 and covers at
+		// 80/160/320/640/750/1080/1280. The mural mixes both, so it must ask for
+		// 750: at 640 every portrait 403s, is never cached, and its slow failure
+		// holds request slots the rest of the landing's artwork waits on.
+		expect(libraryHero).toContain('size={750}');
+		expect(libraryHero).not.toContain('size={640}');
 		expect(libraryHero).toContain('fallbackText={initials(artist.name)}');
 		expect(libraryHero).toContain('decorative={true}');
 		expect(libraryHero).toContain(':global(.mural-panel-art)');
@@ -102,6 +107,14 @@ describe('library home hero contract', () => {
 		expect(murals).not.toContain('homePanelRefreshBucket');
 		expect(murals).not.toContain('listenHistorySeeds()');
 		expect(murals).not.toContain('stableRandomOffsets');
+
+		// New picks crossfade in over the old collage instead of every tile
+		// cutting at once; the outgoing collage holds until it is covered, and
+		// reduced motion makes the swap instant.
+		expect(murals).toContain('{#key panelSignature(panel)}');
+		expect(murals).toContain('in:fade={{ duration: swapFadeMs() }}');
+		expect(murals).toContain('out:hold={{ duration: swapFadeMs() }}');
+		expect(murals).toContain('prefersReducedMotion()');
 
 		// Playing a track tile queues its panel and starts at the clicked track.
 		expect(murals).toContain('const replaced = await api.replacePlaybackQueue(');
