@@ -564,8 +564,12 @@
 		}
 
 		if (shortcutsBlocked()) return;
-		if (!((event.key === ' ' || event.key === 'Spacebar') && spaceActivatesFocusedControl(event.target as HTMLElement | null))
-			&& handleVideoShortcut(event)) return;
+
+		const target = event.target as HTMLElement | null;
+		// An active video session takes the playback shortcuts: resuming the
+		// paused music queue would end the video.
+		const spaceOnControl = (event.key === ' ' || event.key === 'Spacebar') && spaceActivatesFocusedControl(target);
+		if (!spaceOnControl && handleVideoShortcut(event)) return;
 
 		if (event.key === 'q' || event.key === 'Q') {
 			event.preventDefault();
@@ -573,7 +577,6 @@
 			return;
 		}
 
-		const target = event.target as HTMLElement | null;
 		const inQueueSection = target?.closest?.('.queue-section') != null;
 		if (inQueueSection && event.key === 'ArrowUp' && !queueExpanded) {
 			event.preventDefault();
@@ -1140,6 +1143,12 @@
 		writePersisted(QUEUE_EXPANDED_KEY, queueExpanded ? '1' : '0');
 	}
 	function togglePlayerQueue() {
+		// The video queue panel stands in for the music queue during a video
+		// session; the side layout always shows its list.
+		if (videoChromeActive) {
+			if (effectivePlayerLayout === 'bottom') videoQueueDrawerOpen = !videoQueueDrawerOpen;
+			return;
+		}
 		if (effectivePlayerLayout === 'bottom') queueDrawerOpen = !queueDrawerOpen;
 		else toggleQueueExpanded();
 	}

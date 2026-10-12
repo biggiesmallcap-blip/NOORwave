@@ -1,18 +1,18 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { writable } from 'svelte/store';
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined), listen: vi.fn(), dispatch: vi.fn() }));
+const mocks = vi.hoisted(() => ({ tauri: false, invoke: vi.fn().mockResolvedValue(undefined), listen: vi.fn(), dispatch: vi.fn() }));
 const session = writable({ active: false });
 vi.mock('$lib/stores/video_session', () => ({ videoSession: { subscribe: (fn: (value: { active: boolean }) => void) => session.subscribe(fn) } }));
 vi.mock('$lib/video/controls', () => ({ dispatchVideoControl: mocks.dispatch }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke, isTauri: () => mocks.tauri }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ listen: mocks.listen }) }));
 import { installVideoMediaKeys } from './video_media_keys';
 
-afterEach(() => { session.set({ active: false }); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { session.set({ active: false }); mocks.tauri = false; vi.clearAllMocks(); });
 
 test('native ownership follows the active session and routes hardware controls', async () => {
-	vi.stubGlobal('window', { __TAURI_INTERNALS__: { invoke: true } });
+	mocks.tauri = true;
 	const unlisten = vi.fn();
 	mocks.listen.mockResolvedValueOnce(unlisten);
 	const cleanup = installVideoMediaKeys();
@@ -33,7 +33,7 @@ test('native ownership follows the active session and routes hardware controls',
 });
 
 test('teardown during listener setup never claims native keys', async () => {
-	vi.stubGlobal('window', { __TAURI_INTERNALS__: { invoke: true } });
+	mocks.tauri = true;
 	let ready!: (cleanup: () => void) => void;
 	mocks.listen.mockImplementationOnce(() => new Promise(resolve => { ready = resolve; }));
 	const cleanup = installVideoMediaKeys();
@@ -46,7 +46,6 @@ test('teardown during listener setup never claims native keys', async () => {
 });
 
 test('web playback does not install a native bridge', () => {
-	vi.stubGlobal('window', {});
 	installVideoMediaKeys()();
 	expect(mocks.listen).not.toHaveBeenCalled();
 	expect(mocks.invoke).not.toHaveBeenCalled();

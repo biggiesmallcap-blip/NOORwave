@@ -4,6 +4,7 @@
 	import type Hls from 'hls.js';
 	import type { VideoQualityMode } from '$lib/api/client';
 	import { isPlaying, togglePlayback } from '$lib/stores/player';
+	import { closeContextMenu, contextMenu } from '$lib/stores/context_menu';
 	import FullscreenVideoQueue from './FullscreenVideoQueue.svelte';
 	import { handleVideoShortcut, registerVideoControls, type VideoControl } from '$lib/video/controls';
 
@@ -83,6 +84,8 @@
 	let queueButton: HTMLButtonElement | null = $state(null);
 	let upNextVisible = $state(false);
 	let retryUsed = false;
+	/** A refresh is replacing `src`; the src effect must not treat it as a new video. */
+	let retrying = false;
 	let mounted = false;
 	let fullscreenListener: (() => void) | null = null;
 	let surfaceClickTimer: ReturnType<typeof setTimeout> | null = null;
@@ -179,32 +182,40 @@
 	async function retryWithFreshStream() {
 		if (retryUsed || !refreshStream || !videoEl) return false;
 		retryUsed = true;
+		retrying = true;
 		const resumeAt = videoEl.currentTime;
 		try {
 			const next = await refreshStream();
-			await load(next, resumeAt);
+			await load(next, resumeAt, true);
 			return true;
 		} catch {
 			return false;
+		} finally {
+			retrying = false;
+			// A video picked while the refresh was in flight still loads.
+			if (src !== currentSrc) void load(src);
 		}
 	}
 
 	function handleFatalError(message = 'This video could not be loaded.') {
+		const failedSrc = currentSrc;
 		void retryWithFreshStream().then((recovered) => {
-			if (recovered) return;
+			if (recovered || currentSrc !== failedSrc) return;
 			error = message;
 			loading = false;
 		});
 	}
 
-	async function load(nextSrc: string, resumeAt = 0) {
+	async function load(nextSrc: string, resumeAt = 0, retry = false) {
 		if (!videoEl || !HlsClass) return;
 		currentSrc = nextSrc;
 		destroyHls();
 		error = null;
 		unsupported = false;
 		loading = true;
-		retryUsed = resumeAt > 0 ? retryUsed : false;
+		// One fresh stream per video. Keyed on resumeAt it reset whenever a
+		// stream failed at 0:00, refetching the stream URL in a tight loop.
+		if (!retry) retryUsed = false;
 		videoEl.removeAttribute('src');
 		videoEl.load();
 		playing = false;
@@ -326,13 +337,7 @@
 	}
 
 	function handleKeydown(event: KeyboardEvent) {
-		if (skipTypingTarget(event.target)) return;
-		if (event.key === 'Escape' && queueOpen) {
-			event.preventDefault();
-			event.stopPropagation();
-			closeQueue();
-			return;
-		}
+		if (skipTypingTarget(event.target) || get(contextMenu).open) return;
 		if (event.key === ' ' && event.target instanceof HTMLElement && event.target.closest('button, a[href]')) return;
 		if (handleVideoShortcut(event)) event.stopPropagation();
 	}
@@ -342,6 +347,21 @@
 		queueButton?.focus();
 		revealChrome();
 	}
+
+	// While the queue is open Esc closes it (or a row's menu) wherever focus
+	// is. Capture phase, so the dock's own Esc never leaves fullscreen first.
+	$effect(() => {
+		if (!queueOpen) return;
+		const onKeydown = (event: KeyboardEvent) => {
+			if (event.key !== 'Escape') return;
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			if (get(contextMenu).open) closeContextMenu();
+			else closeQueue();
+		};
+		window.addEventListener('keydown', onKeydown, true);
+		return () => window.removeEventListener('keydown', onKeydown, true);
+	});
 
 	function handleControl(action: VideoControl): boolean {
 		switch (action) {
@@ -354,7 +374,8 @@
 			case 'volume-down': setVolume(volume - 0.05); break;
 			case 'queue':
 				if (!fullscreen) return false;
-				queueOpen = !queueOpen;
+				if (queueOpen) closeQueue();
+				else queueOpen = true;
 				break;
 		}
 		revealChrome();
@@ -390,7 +411,7 @@
 	});
 
 	$effect(() => {
-		if (!mounted || src === currentSrc) return;
+		if (!mounted || retrying || src === currentSrc) return;
 		void load(src);
 	});
 
@@ -810,17 +831,30 @@
 		border-radius: 0;
 	}
 
+	/* Same pill as the autoplay control; the title leaves room for it. */
 	.queue-toggle {
 		position: absolute;
 		z-index: 3;
-		top: var(--space-4);
-		right: var(--space-4);
-		min-height: 36px;
-		padding: 0 var(--space-3);
+		top: 14px;
+		right: 16px;
+		height: 34px;
+		padding: 0 12px;
+		border: 1px solid rgba(255, 255, 255, 0.16);
 		border-radius: 999px;
-		background: rgb(0 0 0 / 76%);
-		color: white;
+		background: rgba(12, 12, 16, 0.76);
+		color: rgba(255, 255, 255, 0.92);
+		font-size: var(--font-size-xs);
+		font-weight: 800;
 		transition: opacity var(--motion-base);
+	}
+
+	.queue-toggle:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
+	}
+
+	.fullscreen .top-meta {
+		padding-right: 112px;
 	}
 
 	@keyframes up-next-drop {
