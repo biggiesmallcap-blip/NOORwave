@@ -1,7 +1,10 @@
 //! Reacting to audio runtime events: ready, near end, finished, track errors, exit; the skip-aware snapshot switch.
 
 use super::{
-    listen::{flush_active_listen_session_locked, sync_session_after_snapshot},
+    listen::{
+        flush_active_listen_session_locked, sync_session_after_snapshot,
+        sync_session_after_snapshot_for_owner,
+    },
     pending::{resolve_or_skip_pending_current, spawn_tidal_id_reresolve},
     settings::{
         current_user_audio_quality, effective_crossfade_ms,
@@ -1715,7 +1718,15 @@ async fn handle_runtime_finished_for_owner(
     } else {
         Some(player::ListenSessionEndReason::QueueEnded)
     };
-    sync_session_after_snapshot(&state, &snapshot, end_reason).await;
+    sync_session_after_snapshot_for_owner(
+        &state,
+        &snapshot,
+        end_reason,
+        expected_runtime
+            .zip(expected_source)
+            .map(|(runtime, source)| (generation, runtime, source)),
+    )
+    .await;
     let owner_is_current = {
         let state_guard = state.read().await;
         runtime_finish_owner_is_current(&state_guard, generation, expected_runtime, expected_source)

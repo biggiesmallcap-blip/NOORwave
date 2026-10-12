@@ -690,6 +690,102 @@ async fn terminal_queue_write_serializes_generation_claim() {
 }
 
 #[tokio::test]
+async fn terminal_session_sync_rechecks_owner_after_waiting_for_writer() {
+    for replacement in ["current", "decoder", "generation"] {
+        let (state, handle, _, _) = cpal_fault_fixture().await;
+        let resumed_at = {
+            let mut guard = state.write().await;
+            guard.active_listen_session = Some(player::ActiveListenSession::start(
+                1,
+                chrono::Utc::now() - chrono::Duration::seconds(8),
+                crate::db::models::ListenSource::Manual,
+                None,
+            ));
+            guard.active_listen_session.as_ref().unwrap().resumed_at
+        };
+        let reader = state.read().await;
+        let mut events = reader.event_tx.subscribe();
+        let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+        assert!(
+            handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Finished {
+                track_id: 1,
+                generation: 0,
+                source_identity: handle.playback_source_identity(),
+            })
+        );
+        // Queue advancement and pending resolution only need readers. The
+        // first queued writer is the successful snapshot's session sync.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = reader.db.with_conn(player::load_snapshot).unwrap();
+        assert!(snapshot.state.current_track.is_none());
+        assert!(!snapshot.state.is_playing);
+        match replacement {
+            "decoder" => handle.test_replace_playback_source(),
+            "generation" => {
+                reader
+                    .playback_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            _ => {}
+        }
+        drop(reader);
+        assert!(handle.test_publish_event(
+            playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                output_identity: handle.test_exclusive_event_identity(),
+                device_name: "listener barrier".into(),
+                transport_format: "test format".into(),
+            }
+        ));
+        let mut history_events = 0;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    AppEvent::AudioExclusiveEngaged { .. } => break,
+                    AppEvent::ListenHistoryUpdated { .. } => history_events += 1,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        listener.abort();
+        assert!(listener.await.unwrap_err().is_cancelled());
+        let guard = state.read().await;
+        let rows: i64 = guard
+            .db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM listen_history WHERE track_id=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        if replacement == "current" {
+            assert!(guard.active_listen_session.is_none());
+            assert_eq!(rows, 1);
+            assert_eq!(history_events, 1);
+        } else {
+            let session = guard
+                .active_listen_session
+                .as_ref()
+                .expect("retired terminal synchronized the replacement listen session");
+            assert_eq!(session.track_id, 1);
+            assert_eq!(session.resumed_at, resumed_at);
+            assert_eq!(rows, 0);
+            assert_eq!(history_events, 0);
+        }
+    }
+}
+
+#[tokio::test]
 async fn promoted_decoder_finished_listener_advances_to_prepared_track() {
     let (state, _, _, _) = cpal_fault_fixture().await;
     let (command_tx, command_rx) = std::sync::mpsc::channel();
