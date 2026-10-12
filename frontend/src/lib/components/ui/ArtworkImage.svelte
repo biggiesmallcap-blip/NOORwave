@@ -18,6 +18,7 @@
 		loading?: 'eager' | 'lazy';
 		decoding?: 'async' | 'sync' | 'auto';
 		fetchPriority?: 'high' | 'low' | 'auto';
+		fallbackOrder?: 'source' | 'size';
 		// When true, a missing-artwork fallback gets a stable per-name colour
 		// instead of a flat grey box, so empty tiles read as intentional.
 		tint?: boolean;
@@ -37,6 +38,7 @@
 		loading = 'lazy',
 		decoding = 'async',
 		fetchPriority = 'auto',
+		fallbackOrder = 'source',
 		tint = false,
 		fadeIn = false,
 	}: Props = $props();
@@ -59,8 +61,8 @@
 	const srcKey = $derived(sources.join('\n'));
 	// The first try goes through the local artwork cache; if that fails the
 	// direct TIDAL sizes follow as before.
-	const attempts = $derived(
-		sources.flatMap((source) => {
+	const attempts = $derived.by(() => {
+		const bySource = sources.map((source) => {
 			const direct = tidalArtworkFallbackSizes(source, size).map((fallbackSize) => ({
 				source,
 				size: fallbackSize,
@@ -69,8 +71,13 @@
 			return direct.length > 0 && cachedTidalArtwork(upscaleTidalArtwork(source, size))
 				? [{ ...direct[0], cached: true }, ...direct]
 				: direct;
-		})
-	);
+		});
+		if (fallbackOrder === 'source') return bySource.flat();
+		// A stale portrait must not delay a usable cover behind every size retry.
+		return Array.from({ length: Math.max(0, ...bySource.map((group) => group.length)) }, (_, index) =>
+			bySource.flatMap((group) => group[index] ? [group[index]] : [])
+		).flat();
+	});
 	const exhausted = $derived(failedAttempts >= attempts.length);
 	const resolvedSrc = $derived.by(() => {
 		if (exhausted) return null;

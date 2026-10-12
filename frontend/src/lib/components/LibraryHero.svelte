@@ -134,6 +134,9 @@
             className="mural-panel-art"
             src={artistArtworkSources(artist)}
             size={640}
+            loading="eager"
+            fetchPriority={artist.id === current.id ? 'high' : 'auto'}
+            fallbackOrder="size"
             fallbackText={initials(artist.name)}
             decorative={true}
           />
