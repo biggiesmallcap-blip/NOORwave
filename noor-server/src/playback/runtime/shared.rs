@@ -553,6 +553,7 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) deferred_seek_offset: AtomicU64,
     pub(crate) deferred_seek_buffered: AtomicU64,
     pub(crate) buffer: Mutex<PlaybackBuffer>,
+    pending_rt_notifications: Arc<AtomicBool>,
     pub(crate) command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     pub(crate) volume_ctl: Arc<AtomicU32>,
     /// f32 bits of the gain actually applied to the last frame emitted, as
@@ -662,12 +663,20 @@ impl PlaybackSharedState {
             return None;
         }
         for _ in 0..32 {
+            // Empty actor polls must not compete with the device callback for PCM.
+            // Producers and consumers publish this hint under the buffer lock.
+            if !self.pending_rt_notifications.load(Ordering::Acquire) {
+                return None;
+            }
             let notification = {
                 let Ok(mut buffer) = self.buffer.try_lock() else {
                     return None;
                 };
                 let notification = buffer.notifications[0].take()?;
                 buffer.notifications.rotate_left(1);
+                buffer
+                    .pending_notifications
+                    .store(buffer.notifications[0].is_some(), Ordering::Release);
                 notification
             };
             match notification {
@@ -743,6 +752,8 @@ impl PlaybackSharedState {
         let source_offset_samples = Arc::new(AtomicU64::new(
             position_offset_samples.load(Ordering::Relaxed),
         ));
+        let buffer = PlaybackBuffer::new(prebuffer_samples);
+        let pending_rt_notifications = Arc::clone(&buffer.pending_notifications);
         Self {
             track_id,
             generation,
@@ -760,7 +771,8 @@ impl PlaybackSharedState {
             deferred_seek_target: AtomicU64::new(0),
             deferred_seek_offset: AtomicU64::new(0),
             deferred_seek_buffered: AtomicU64::new(0),
-            buffer: Mutex::new(PlaybackBuffer::new(prebuffer_samples)),
+            buffer: Mutex::new(buffer),
+            pending_rt_notifications,
             command_tx,
             volume_ctl,
             volume_smoothed,
@@ -1226,6 +1238,7 @@ impl PlaybackSharedState {
 #[derive(Debug)]
 pub(crate) struct PlaybackBuffer {
     notifications: [Option<RtNotification>; 32],
+    pending_notifications: Arc<AtomicBool>,
     pub(crate) samples: Vec<f32>,
     pub(crate) read_pos: usize,
     pub(crate) start_threshold_samples: usize,
@@ -1243,6 +1256,7 @@ impl PlaybackBuffer {
     fn push_notification(&mut self, notification: RtNotification) -> bool {
         if let Some(slot) = self.notifications.iter_mut().find(|slot| slot.is_none()) {
             *slot = Some(notification);
+            self.pending_notifications.store(true, Ordering::Release);
             true
         } else {
             false
@@ -1251,11 +1265,13 @@ impl PlaybackBuffer {
 
     pub(crate) fn clear_rt_notifications(&mut self) {
         self.notifications.fill(None);
+        self.pending_notifications.store(false, Ordering::Release);
     }
 
     pub(crate) fn new(start_threshold_samples: usize) -> Self {
         Self {
             notifications: [None; 32],
+            pending_notifications: Arc::new(AtomicBool::new(false)),
             samples: Vec::new(),
             read_pos: 0,
             start_threshold_samples,
@@ -1614,6 +1630,53 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn empty_actor_polling_does_not_interrupt_buffered_pcm() {
+        let shared = test_shared_state();
+        const BLOCKS: usize = 20_000;
+        const SAMPLES: usize = 128;
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples = vec![0.25; BLOCKS * SAMPLES];
+            buffer.started = true;
+            buffer.started_notified = true;
+        }
+        shared.near_end_signaled.store(true, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let observer_shared = shared.clone();
+        let observer_stop = stop.clone();
+        let observer_barrier = barrier.clone();
+        let observer = std::thread::spawn(move || {
+            let (event_tx, _) = tokio::sync::broadcast::channel(8);
+            observer_barrier.wait();
+            while !observer_stop.load(Ordering::Relaxed) {
+                assert!(observer_shared.take_rt_command(&event_tx).is_none());
+            }
+        });
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [0.0; SAMPLES];
+        let mut silent_blocks = 0;
+        barrier.wait();
+        for _ in 0..BLOCKS {
+            super::write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+            if output.iter().all(|sample| *sample == 0.0) {
+                silent_blocks += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        observer.join().unwrap();
+        assert_eq!(
+            silent_blocks, 0,
+            "empty actor polling inserted silent PCM blocks"
+        );
+        assert_eq!(
+            shared.position_samples.load(Ordering::Relaxed),
+            (BLOCKS * SAMPLES) as u64
+        );
+    }
+
     fn test_shared_state() -> Arc<PlaybackSharedState> {
         let (command_tx, _) = mpsc::channel();
         Arc::new(PlaybackSharedState::new(
@@ -1639,7 +1702,9 @@ mod tests {
             buffer.started = true;
             buffer.started_notified = true;
             buffer.finished = true;
-            buffer.notifications.fill(Some(RtNotification::NearEnd));
+            for _ in 0..32 {
+                assert!(buffer.push_notification(RtNotification::NearEnd));
+            }
         }
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, _) = tokio::sync::broadcast::channel(64);
