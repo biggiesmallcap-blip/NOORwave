@@ -5774,7 +5774,18 @@ fn poisoned_pcm_resume_silent_native_smoke() {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let mut request = [0; 4096];
-        socket.read(&mut request).unwrap();
+        let mut received = 0;
+        // Consume complete headers before closing the HTTP fixture so a split
+        // request cannot leave unread input that resets the socket.
+        while !request[..received].ends_with(b"\r\n\r\n") {
+            assert!(
+                received < request.len(),
+                "silent fixture request is too large"
+            );
+            let count = socket.read(&mut request[received..]).unwrap();
+            assert!(count > 0, "silent fixture request ended before its headers");
+            received += count;
+        }
         write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len()).unwrap();
         socket.write_all(&wav).unwrap();
     });
