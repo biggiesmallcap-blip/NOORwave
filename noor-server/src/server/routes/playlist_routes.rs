@@ -258,11 +258,31 @@ async fn save_tidal_playlist(
             Json(json!({ "message": "Save at least one track" })),
         ));
     }
-    let mut tidal_ids = state
+    if let Some(originals) = original_tidal_ids {
+        require_positive_track_ids(originals)?;
+        if originals.len() != track_ids.len() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "message": "Each snapshot track needs its original TIDAL id" })),
+            ));
+        }
+    }
+    let tidal_ids = state
         .read()
         .await
         .db
         .with_conn(|conn| {
+            if let Some(originals) = original_tidal_ids {
+                // A provider alias can resolve to a local recording without a
+                // selected TIDAL id. Verify identity using the import lookup.
+                for (local_id, tidal_id) in track_ids.iter().zip(originals) {
+                    anyhow::ensure!(
+                        crate::db::catalogue::track_id(conn, *tidal_id)? == Some(*local_id),
+                        "Each original TIDAL id must resolve to its snapshot track"
+                    );
+                }
+                return Ok(originals.to_vec());
+            }
             track_ids
                 .iter()
                 .map(|id| {
@@ -280,18 +300,6 @@ async fn save_tidal_playlist(
                 Json(json!({ "message": error.to_string() })),
             )
         })?;
-    if let Some(originals) = original_tidal_ids {
-        require_positive_track_ids(originals)?;
-        if originals.len() != track_ids.len() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "message": "Each snapshot track needs its original TIDAL id" })),
-            ));
-        }
-        // Canonical local rows can represent a different catalogue copy of the
-        // same recording. Keep the exact provider ids displayed in the popup.
-        tidal_ids = originals.to_vec();
-    }
     let client = tidal_write_context(state).await.ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
@@ -1072,3 +1080,4 @@ mod tests {
         assert_eq!(clamp_artist_search_limit(Some(5_000)), 50);
     }
 }
+

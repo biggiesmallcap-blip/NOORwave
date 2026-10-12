@@ -52,11 +52,13 @@
 	}
 
 	function handleRowClick() {
+		if (!playable) return;
 		if (onRowClick) onRowClick();
 		else defaultClick();
 	}
 
 	function handleKeyDown(e: KeyboardEvent) {
+		if (e.target !== e.currentTarget) return;
 		if (e.key === 'Enter' || e.key === ' ') {
 			e.preventDefault();
 			handleRowClick();
@@ -106,8 +108,7 @@
 
 	function handlePlay(e: MouseEvent) {
 		e.stopPropagation();
-		if (!playable) return;
-		void playTidalTrackNow(track);
+		handleRowClick();
 	}
 
 	function handleAddToQueue(e: MouseEvent) {
@@ -161,7 +162,7 @@
 		tabindex={playable ? 0 : -1}
 		aria-disabled={!playable}
 		onclick={handleRowClick}
-		ondblclick={() => playable && void playTidalTrackNow(track)}
+		ondblclick={handleRowClick}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -243,7 +244,7 @@
 		tabindex={playable ? 0 : -1}
 		aria-disabled={!playable}
 		onclick={handleRowClick}
-		ondblclick={() => playable && void playTidalTrackNow(track)}
+		ondblclick={handleRowClick}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -312,7 +313,7 @@
 		tabindex={playable ? 0 : -1}
 		aria-disabled={!playable}
 		onclick={handleRowClick}
-		ondblclick={() => playable && void playTidalTrackNow(track)}
+		ondblclick={handleRowClick}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>
@@ -392,7 +393,7 @@
 		tabindex={playable ? 0 : -1}
 		aria-disabled={!playable}
 		onclick={handleRowClick}
-		ondblclick={() => playable && void playTidalTrackNow(track)}
+		ondblclick={handleRowClick}
 		onkeydown={handleKeyDown}
 		oncontextmenu={handleContextMenu}
 	>

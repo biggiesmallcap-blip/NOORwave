@@ -89,6 +89,19 @@ try {
 		popup.getByRole('button', { name: 'Shuffle', exact: true }).click(),
 	]);
 	assert(writes.filter((write) => write.path.includes('/queue')).length >= 2, 'Shuffle must reach the queue API');
+	const secondRow = popup.locator('ol > li').nth(1);
+	for (const gesture of [
+		() => secondRow.locator('.title').click(),
+		() => secondRow.getByRole('button', { name: 'Play Smoke Song 2', exact: true }).click(),
+		() => secondRow.locator('.title').dblclick(),
+	]) {
+		await Promise.all([
+			page.waitForResponse((response) => new URL(response.url()).pathname === '/api/playback/queue' && response.request().method() === 'POST'),
+			gesture(),
+		]);
+		await page.waitForTimeout(100);
+		assert.deepEqual(writes.filter((write) => write.path === '/api/playback/queue').at(-1).body.items.map((item) => item.tidal_id), [43, 42], 'Every row play gesture must preserve the remaining collection');
+	}
 	await popup.getByText('Smoke Song 1', { exact: true }).click({ button: 'right' });
 	await page.getByRole('menuitem', { name: 'Add to playlist', exact: true }).click();
 	const picker = page.getByRole('dialog', { name: 'Add to playlist' });
