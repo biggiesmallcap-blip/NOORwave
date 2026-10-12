@@ -4071,6 +4071,90 @@ async fn retry_resolution_fixture(
 }
 
 #[tokio::test]
+async fn transient_failure_after_retry_dispatch_pauses_instead_of_retrying_again() {
+    let (state, probe, gate) = retry_resolution_fixture(false).await;
+    let handle = probe.handle.clone();
+    let first = tokio::spawn({
+        let state = state.clone();
+        let handle = handle.clone();
+        async move {
+            handle_runtime_track_error(
+                state,
+                &handle,
+                &handle.playback_source_identity(),
+                1,
+                0,
+                "DASH stream prebuffer failed",
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .unwrap();
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        probe.commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::Switch(_)
+    ));
+    assert_eq!(
+        state
+            .read()
+            .await
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some(RUNTIME_TRACK_RETRY_MARKER),
+        "dispatching the retry must not erase its marker before Started"
+    );
+
+    // The retried stream fails again before Started: pause, do not retry.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        handle_runtime_track_error(
+            state.clone(),
+            &handle,
+            &handle.playback_source_identity(),
+            1,
+            0,
+            "DASH stream prebuffer failed",
+        ),
+    )
+    .await
+    .expect("a second retry would wait on the stream gate")
+    .unwrap();
+    assert!(
+        probe.commands.try_recv().is_err(),
+        "second retry dispatched"
+    );
+    let guard = state.read().await;
+    assert!(
+        !guard
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap()
+            .state
+            .is_playing
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("DASH stream prebuffer failed")
+    );
+}
+
+#[tokio::test]
 async fn transient_retry_resolution_cannot_dispatch_or_pause_replacement_runtime() {
     for reject in [false, true] {
         let (state, old, gate) = retry_resolution_fixture(reject).await;
@@ -4249,13 +4333,16 @@ async fn transient_retry_resolution_preserves_current_row_and_latest_pause_inten
                     .active_track_id,
                 Some(1)
             );
-            assert!(
+            // Only Started clears the marker; a second pre-Started failure
+            // must pause instead of retrying again.
+            assert_eq!(
                 guard
                     .playback_runtime_info
                     .as_ref()
                     .unwrap()
                     .last_error
-                    .is_none()
+                    .as_deref(),
+                Some(RUNTIME_TRACK_RETRY_MARKER)
             );
             assert_eq!(
                 guard.current_stream_display.as_ref().unwrap().audio_quality,

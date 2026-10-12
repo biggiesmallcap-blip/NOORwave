@@ -1353,7 +1353,11 @@ async fn switch_runtime_to_snapshot_current_for_owner(
                 })?;
                 if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                     info.active_track_id = Some(track.id);
-                    info.last_error = None;
+                    if expected_owner.is_some() {
+                        clear_error_after_owned_dispatch(info);
+                    } else {
+                        info.last_error = None;
+                    }
                 }
                 if let Some(pending) = state_guard.pending_stream_display.take() {
                     state_guard.current_stream_display = Some(pending);
@@ -1878,6 +1882,15 @@ pub(crate) fn runtime_track_error_is_retryable(message: &str) -> bool {
         || lower.contains("error sending request")
 }
 
+/// Runtime-owned dispatches (retries, queue advances) keep the transient
+/// retry marker: only Started proves the retried stream works. Clearing it
+/// here let every pre-Started failure retry again, forever.
+pub(crate) fn clear_error_after_owned_dispatch(info: &mut crate::PlaybackRuntimeInfo) {
+    if info.last_error.as_deref() != Some(RUNTIME_TRACK_RETRY_MARKER) {
+        info.last_error = None;
+    }
+}
+
 pub(crate) async fn handle_runtime_track_error(
     state: SharedState,
     expected_runtime: &playback_runtime::PlaybackRuntimeHandle,
@@ -1950,50 +1963,51 @@ pub(crate) async fn handle_runtime_track_error(
             }
             state_guard.db.with_conn(player::load_snapshot)?
         };
-        let Some(track) = snapshot
+        // A row that no longer holds the failed track has nothing to retry;
+        // fall through and pause rather than leave "retrying" with no audio.
+        if let Some(track) = snapshot
             .state
             .current_track
             .as_ref()
             .filter(|track| track.id == failed_track_id)
-        else {
-            return Ok(());
-        };
-        let crossfade_ms = effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await;
-        match start_track_for_runtime(
-            &state,
-            StartRequest {
-                track,
-                generation: Generation::Claimed(generation),
-                dispatch: Dispatch::Switch,
-                crossfade_ms,
-            },
-            expected_runtime,
-            expected_source,
-        )
-        .await
         {
-            Ok(_) => {
-                tracing::warn!(
-                    target: "noor.playback.recovery",
-                    event = "runtime_track_retry_dispatched",
-                    failed_track_id,
-                    generation,
-                    error = %message,
-                    "retrying the current queue row after a transient runtime failure"
-                );
-                return Ok(());
-            }
-            Err(StartError::Superseded) => return Ok(()),
-            Err(error) => {
-                tracing::warn!(
-                    target: "noor.playback.recovery",
-                    event = "runtime_track_retry_failed",
-                    failed_track_id,
-                    generation,
-                    original_error = %message,
-                    retry_error = ?error,
-                    "current-row playback recovery failed; pausing without advancing"
-                );
+            let crossfade_ms = effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await;
+            match start_track_for_runtime(
+                &state,
+                StartRequest {
+                    track,
+                    generation: Generation::Claimed(generation),
+                    dispatch: Dispatch::Switch,
+                    crossfade_ms,
+                },
+                expected_runtime,
+                expected_source,
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::warn!(
+                        target: "noor.playback.recovery",
+                        event = "runtime_track_retry_dispatched",
+                        failed_track_id,
+                        generation,
+                        error = %message,
+                        "retrying the current queue row after a transient runtime failure"
+                    );
+                    return Ok(());
+                }
+                Err(StartError::Superseded) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "noor.playback.recovery",
+                        event = "runtime_track_retry_failed",
+                        failed_track_id,
+                        generation,
+                        original_error = %message,
+                        retry_error = ?error,
+                        "current-row playback recovery failed; pausing without advancing"
+                    );
+                }
             }
         }
     }
@@ -2014,6 +2028,9 @@ pub(crate) async fn handle_runtime_track_error(
                 return Ok(());
             }
             state_guard.db.with_conn(player::pause)?;
+            if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                info.last_error = Some(message.to_string());
+            }
             let outcome = flush_active_listen_session_locked(
                 &mut state_guard,
                 chrono::Utc::now(),

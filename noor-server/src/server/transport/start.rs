@@ -184,7 +184,7 @@ async fn start_track_inner(
     if expected_runtime.is_some() {
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.active_track_id = Some(track.id);
-            info.last_error = None;
+            super::events::clear_error_after_owned_dispatch(info);
         }
         let _ = state_guard
             .event_tx
