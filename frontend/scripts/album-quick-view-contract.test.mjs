@@ -12,11 +12,18 @@ describe('album quick view', () => {
 	test('offers Open album page, derived for library albums and passed in otherwise', () => {
 		expect(popup).toContain('albumHref?: string | null;');
 		expect(popup).toContain('albumHref ?? (isLocal && album.id != null ? `/albums/${album.id}` : null)');
-		expect(popup).toContain('>Open album page</button>');
+		expect(popup).toContain('>Open album page</a>');
 	});
 
-	test('closes before navigating, like the artist link', () => {
-		expect(popup).toMatch(/function openAlbumPage\(requestClose: \(\) => void\) \{[\s\S]*?requestClose\(\);[\s\S]*?goto\(href\)/);
+	test('closes as it navigates, like the artist link', () => {
+		expect(popup).toContain('href={resolvedAlbumHref} onclick={requestClose}');
+	});
+
+	test('uses the album page hero, action bar and rows', () => {
+		expect(popup).toContain('<DetailHero');
+		expect(popup).toContain('<ActionBar');
+		expect(popup).toContain('<TrackRow');
+		expect(popup).toContain('<TidalTrackRow');
 	});
 
 	test('TIDAL-only albums link to their TIDAL album page', () => {

@@ -2,7 +2,10 @@
 	// The container shared by the album and TIDAL collection quick views
 	// (STYLING.md "Album quick view and album page"). It owns the overlay
 	// surface, focus, and dismissal: Escape, the close button, a click outside,
-	// or a wheel over the page behind.
+	// or a wheel over the page behind. Content comes in two parts: `hero`
+	// (fixed at the top, room left for the close button) and `children` (the
+	// body, which scrolls on its own). `busy` is the refresh state from STYLING.md
+	// "States": a 2px bar under the hero; callers dim their own content.
 	//
 	// The backdrop never takes pointer events, so the page stays the wheel
 	// target and keeps scrolling straight through a scroll-dismiss. (Chromium
@@ -16,10 +19,12 @@
 	import { portal } from '$lib/actions/portal';
 	import { contextMenu, closeContextMenu } from '$lib/stores/context_menu';
 
-	let { title, onClose, children }: {
+	let { title, onClose, busy = false, hero, children }: {
 		title: string;
 		onClose: () => void;
-		/** Receives requestClose, so content can play the exit before navigating. */
+		busy?: boolean;
+		/** Both snippets receive requestClose, so links can play the exit as they navigate. */
+		hero: Snippet<[requestClose: () => void]>;
 		children: Snippet<[requestClose: () => void]>;
 	} = $props();
 
@@ -117,7 +122,9 @@
 		<button type="button" class="close btn btn-icon" aria-label="Close" onclick={requestClose}>
 			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
 		</button>
-		{@render children(requestClose)}
+		<div class="hero">{@render hero(requestClose)}</div>
+		<div class="refresh-bar" class:active={busy} aria-hidden="true"></div>
+		<div class="body">{@render children(requestClose)}</div>
 	</div>
 </div>
 
@@ -154,6 +161,38 @@
 		pointer-events: none;
 	}
 
+	.hero {
+		padding: var(--space-5) var(--space-7) var(--space-3) var(--space-5);
+	}
+
+	.hero :global(.detail-hero) {
+		margin: 0;
+	}
+
+	.refresh-bar {
+		position: relative;
+		height: 2px;
+		flex-shrink: 0;
+		overflow: hidden;
+	}
+
+	.refresh-bar.active::after {
+		content: '';
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: 40%;
+		background: var(--accent);
+		animation: refresh-sweep 1.1s var(--ease-standard) infinite;
+	}
+
+	.body {
+		min-height: 0;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-width: thin;
+		padding: var(--space-2) var(--space-5) var(--space-4);
+	}
+
 	.close {
 		position: absolute;
 		top: var(--space-3);
@@ -168,6 +207,11 @@
 	@keyframes quick-view-in {
 		from { opacity: 0; transform: translateY(12px); }
 		to { opacity: 1; transform: none; }
+	}
+
+	@keyframes refresh-sweep {
+		from { transform: translateX(-100%); }
+		to { transform: translateX(250%); }
 	}
 
 	@keyframes quick-view-out {
