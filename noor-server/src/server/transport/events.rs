@@ -1226,6 +1226,18 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
     snapshot: &player::PlaybackSnapshot,
     generation: u64,
 ) -> anyhow::Result<()> {
+    switch_runtime_to_snapshot_current_for_owner(state, snapshot, generation, None).await
+}
+
+async fn switch_runtime_to_snapshot_current_for_owner(
+    state: &SharedState,
+    snapshot: &player::PlaybackSnapshot,
+    generation: u64,
+    expected_owner: Option<(
+        &playback_runtime::PlaybackRuntimeHandle,
+        &Arc<std::sync::atomic::AtomicU64>,
+    )>,
+) -> anyhow::Result<()> {
     // A track whose TIDAL asset won't resolve (pulled from the catalog, 4005
     // "asset not ready", or a hard rejection) used to wedge playback here: the
     // resolve error propagated up as fatal and the runtime sat frozen on a dead
@@ -1257,6 +1269,21 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
                 .await;
             }
             let mut state_guard = state.write().await;
+            let source_guard =
+                expected_owner.map(|(runtime, _)| runtime.lock_playback_source_identity());
+            if current_playback_generation(&state_guard) != generation
+                || expected_owner.is_some_and(|(runtime, expected_source)| {
+                    !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                        || source_guard
+                            .as_ref()
+                            .is_none_or(|current| !Arc::ptr_eq(current, expected_source))
+                })
+            {
+                return Ok(());
+            }
             if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                 info.active_track_id = None;
             }
@@ -1266,48 +1293,71 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
         };
 
         let user_quality = current_user_audio_quality(state).await;
-        let runtime_handle = ensure_playback_runtime_for_track(state, &track)
-            .await
-            .map_err(|(status, body)| {
-                anyhow::anyhow!("playback runtime unavailable ({status}): {}", body.0)
-            })?;
+        let runtime_handle = match expected_owner {
+            Some((runtime, _)) => runtime.clone(),
+            None => ensure_playback_runtime_for_track(state, &track)
+                .await
+                .map_err(|(status, body)| {
+                    anyhow::anyhow!("playback runtime unavailable ({status}): {}", body.0)
+                })?,
+        };
         let prepared_status = runtime_handle.track_status(track.id, generation);
         if matches!(
             prepared_status,
             playback_runtime::PlaybackTrackStatus::Active
                 | playback_runtime::PlaybackTrackStatus::Prepared
         ) {
-            let job = player::build_playback_preparation(
-                &track,
-                None,
-                effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
-                user_quality,
-            )
-            .with_generation(generation)
-            .with_start_paused(!transport_intent_is_playing(state).await);
-            runtime_handle.switch_to(job).map_err(|error| {
-                tracing::warn!(
-                    target: "noor.playback.runtime",
-                    event = "runtime_snapshot_switch_failed",
-                    generation,
-                    track_id = track.id,
-                    ?current_queue_item_id,
-                    queue_len,
-                    runtime_track_status = ?prepared_status,
-                    stream_resolved = false,
-                    error = %error,
-                    "failed to switch runtime to prepared snapshot current track"
-                );
-                error
-            })?;
+            let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
             {
                 let mut state_guard = state.write().await;
+                let source_guard =
+                    expected_owner.map(|(runtime, _)| runtime.lock_playback_source_identity());
+                if current_playback_generation(&state_guard) != generation
+                    || !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&runtime_handle))
+                    || expected_owner.is_some_and(|(_, expected_source)| {
+                        source_guard
+                            .as_ref()
+                            .is_none_or(|current| !Arc::ptr_eq(current, expected_source))
+                    })
+                {
+                    return Ok(());
+                }
+                let is_playing = transport_intent_is_playing(&state_guard);
+                let job =
+                    player::build_playback_preparation(&track, None, crossfade_ms, user_quality)
+                        .with_generation(generation)
+                        .with_start_paused(!is_playing);
+                runtime_handle.switch_to(job).map_err(|error| {
+                    tracing::warn!(
+                        target: "noor.playback.runtime",
+                        event = "runtime_snapshot_switch_failed",
+                        generation,
+                        track_id = track.id,
+                        ?current_queue_item_id,
+                        queue_len,
+                        runtime_track_status = ?prepared_status,
+                        stream_resolved = false,
+                        error = %error,
+                        "failed to switch runtime to prepared snapshot current track"
+                    );
+                    error
+                })?;
                 if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                     info.active_track_id = Some(track.id);
                     info.last_error = None;
                 }
                 if let Some(pending) = state_guard.pending_stream_display.take() {
                     state_guard.current_stream_display = Some(pending);
+                }
+                if expected_owner.is_some() {
+                    let _ = state_guard
+                        .event_tx
+                        .send(AppEvent::TrackChanged { track_id: track.id });
+                    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+                    let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
                 }
             }
             tracing::info!(
@@ -1323,22 +1373,26 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
             );
         } else {
             let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
-            match start_track(
-                state,
-                StartRequest {
-                    track: &track,
-                    generation: Generation::Claimed(generation),
-                    dispatch: Dispatch::Switch,
-                    crossfade_ms,
-                },
-            )
-            .await
-            {
+            let request = StartRequest {
+                track: &track,
+                generation: Generation::Claimed(generation),
+                dispatch: Dispatch::Switch,
+                crossfade_ms,
+            };
+            let started = match expected_owner {
+                Some((runtime, source)) => {
+                    start_track_for_runtime(state, request, runtime, source).await
+                }
+                None => start_track(state, request).await,
+            };
+            match started {
                 Ok(_) => {
-                    let mut state_guard = state.write().await;
-                    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-                        info.active_track_id = Some(track.id);
-                        info.last_error = None;
+                    if expected_owner.is_none() {
+                        let mut state_guard = state.write().await;
+                        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                            info.active_track_id = Some(track.id);
+                            info.last_error = None;
+                        }
                     }
                 }
                 Err(StartError::Superseded) => return Ok(()),
@@ -1446,6 +1500,11 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
             .await;
         }
 
+        if expected_owner.is_some() {
+            // Owned dispatch already published while its source/state guards
+            // were held. A later publication could overwrite a replacement.
+            return Ok(());
+        }
         let state_guard = state.read().await;
         let _ = state_guard
             .event_tx
@@ -1649,7 +1708,13 @@ async fn handle_runtime_finished_for_owner(
         );
         return Ok(());
     }
-    switch_runtime_to_snapshot_current(&state, &snapshot, generation).await
+    switch_runtime_to_snapshot_current_for_owner(
+        &state,
+        &snapshot,
+        generation,
+        expected_runtime.zip(expected_source),
+    )
+    .await
 }
 
 pub(crate) async fn mark_armed_dj_transition_missed_if_needed(

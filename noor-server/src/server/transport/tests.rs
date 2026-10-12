@@ -4081,6 +4081,314 @@ async fn delayed_unplayable_lookup_cannot_skip_new_generation_queue() {
 }
 
 #[tokio::test]
+async fn terminal_snapshot_lookup_cannot_modify_replacement_owner() {
+    for retire_runtime in [false, true] {
+        for reject in [false, true] {
+            let (state, old, gate) = near_end_fixture(reject).await;
+            let listener = spawn_playback_runtime_listener(state.clone(), old.handle.clone());
+            assert!(old.handle.test_publish_event(
+                playback_runtime::PlaybackRuntimeEvent::TrackError {
+                    track_id: 1,
+                    generation: 0,
+                    source_identity: old.handle.playback_source_identity(),
+                    message: "active decode failed".into(),
+                }
+            ));
+            tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+                .await
+                .unwrap();
+            let replacement = NearEndRuntimeProbe::new();
+            let (before, mut events) = {
+                let mut guard = state.write().await;
+                if retire_runtime {
+                    guard.playback_runtime.as_mut().unwrap().handle = replacement.handle.clone();
+                } else {
+                    old.handle.test_replace_playback_source();
+                }
+                guard
+                    .audio_active
+                    .store(true, std::sync::atomic::Ordering::Release);
+                let info = guard.playback_runtime_info.as_mut().unwrap();
+                info.active_track_id = Some(2);
+                info.last_error = None;
+                guard.current_stream_display = Some(crate::StreamDisplayInfo {
+                    audio_quality: "replacement owner".into(),
+                    sample_rate: Some(96_000),
+                    bit_depth: Some(24),
+                });
+                (
+                    guard.db.with_conn(player::load_snapshot).unwrap(),
+                    guard.event_tx.subscribe(),
+                )
+            };
+            gate.release.notify_one();
+            let mut stale_events = Vec::new();
+            if retire_runtime {
+                // Ready ends a retired listener without cleaning up the live runtime.
+                assert!(old.handle.test_publish_event(
+                    playback_runtime::PlaybackRuntimeEvent::Ready {
+                        device_name: "retired barrier".into(),
+                        sample_rate: 48_000,
+                        channels: 2,
+                    }
+                ));
+                tokio::time::timeout(Duration::from_secs(3), listener)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                while let Ok(event) = events.try_recv() {
+                    stale_events.push(event);
+                }
+            } else {
+                assert!(old.handle.test_publish_event(
+                    playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                        output_identity: old.handle.test_exclusive_event_identity(),
+                        device_name: "listener barrier".into(),
+                        transport_format: "test format".into(),
+                    }
+                ));
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let event = events.recv().await.unwrap();
+                        if matches!(event, AppEvent::AudioExclusiveEngaged { .. }) {
+                            break;
+                        }
+                        stale_events.push(event);
+                    }
+                })
+                .await
+                .unwrap();
+                listener.abort();
+                assert!(listener.await.unwrap_err().is_cancelled());
+            }
+            for probe in [&old, &replacement] {
+                probe.handle.pause().unwrap();
+                assert!(
+                    matches!(
+                        probe.commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+                        playback_runtime::PlaybackRuntimeCommand::Pause
+                    ),
+                    "stale lookup dispatched a job"
+                );
+            }
+            let guard = state.read().await;
+            let after = guard.db.with_conn(player::load_snapshot).unwrap();
+            assert_eq!(
+                after.state.current_queue_item_id,
+                before.state.current_queue_item_id
+            );
+            assert_eq!(after.state.is_playing, before.state.is_playing);
+            assert_eq!(
+                guard.current_stream_display.as_ref().unwrap().audio_quality,
+                "replacement owner"
+            );
+            assert_eq!(
+                guard
+                    .playback_runtime_info
+                    .as_ref()
+                    .unwrap()
+                    .active_track_id,
+                Some(2)
+            );
+            assert!(
+                guard
+                    .playback_runtime_info
+                    .as_ref()
+                    .unwrap()
+                    .last_error
+                    .is_none()
+            );
+            assert!(
+                guard
+                    .audio_active
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            assert!(
+                stale_events.is_empty(),
+                "stale recovery published {stale_events:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_prepared_status_cannot_dispatch_after_decoder_replacement() {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut events = {
+        let mut guard = state.write().await;
+        guard
+            .db
+            .with_conn(|conn| player::enqueue_track(conn, 2, "test"))
+            .unwrap();
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+        guard.event_tx.subscribe()
+    };
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let actor_handle = handle.clone();
+    let runtime_thread = std::thread::spawn(move || {
+        loop {
+            match command_rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                playback_runtime::PlaybackRuntimeCommand::RequestReady => {}
+                playback_runtime::PlaybackRuntimeCommand::TrackStatus { respond_to, .. } => {
+                    actor_handle.test_replace_playback_source();
+                    respond_to
+                        .send(playback_runtime::PlaybackTrackStatus::Prepared)
+                        .unwrap();
+                }
+                command => {
+                    let done = matches!(command, playback_runtime::PlaybackRuntimeCommand::Pause);
+                    observed_tx.send(command).unwrap();
+                    if done {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::TrackError {
+            track_id: 1,
+            generation: 0,
+            source_identity: handle.playback_source_identity(),
+            message: "active decode failed".into(),
+        })
+    );
+    assert!(handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+            output_identity: handle.test_exclusive_event_identity(),
+            device_name: "listener barrier".into(),
+            transport_format: "test format".into(),
+        }
+    ));
+    let mut changed = false;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match events.recv().await.unwrap() {
+                AppEvent::AudioExclusiveEngaged { .. } => break,
+                AppEvent::TrackChanged { track_id: 2 } => changed = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+    handle.pause().unwrap();
+    let command = observed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    runtime_thread.join().unwrap();
+    assert!(
+        matches!(command, playback_runtime::PlaybackRuntimeCommand::Pause),
+        "retired prepared source dispatched {command:?}"
+    );
+    assert!(!changed, "retired prepared source published TrackChanged");
+    let guard = state.read().await;
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .active_track_id,
+        None
+    );
+    assert!(guard.current_stream_display.is_none());
+}
+
+#[tokio::test]
+async fn current_terminal_snapshot_lookup_publishes_once_and_honors_pause() {
+    for pause_during_lookup in [false, true] {
+        let (state, runtime, gate) = near_end_fixture(false).await;
+        let listener = spawn_playback_runtime_listener(state.clone(), runtime.handle.clone());
+        assert!(runtime.handle.test_publish_event(
+            playback_runtime::PlaybackRuntimeEvent::TrackError {
+                track_id: 1,
+                generation: 0,
+                source_identity: runtime.handle.playback_source_identity(),
+                message: "active decode failed".into(),
+            }
+        ));
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        let mut events = {
+            let guard = state.read().await;
+            if pause_during_lookup {
+                guard.db.with_conn(player::pause).unwrap();
+            }
+            guard.event_tx.subscribe()
+        };
+        gate.release.notify_one();
+        assert!(runtime.handle.test_publish_event(
+            playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                output_identity: runtime.handle.test_exclusive_event_identity(),
+                device_name: "listener barrier".into(),
+                transport_format: "test format".into(),
+            }
+        ));
+        let mut publications = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if matches!(event, AppEvent::AudioExclusiveEngaged { .. }) {
+                    break;
+                }
+                publications.push(event);
+            }
+        })
+        .await
+        .unwrap();
+        listener.abort();
+        assert!(listener.await.unwrap_err().is_cancelled());
+        runtime.handle.pause().unwrap();
+        match runtime
+            .commands
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+        {
+            playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                assert_eq!(job.track.id, 2);
+                assert_eq!(job.start_paused, pause_during_lookup);
+            }
+            other => panic!("expected current recovery Switch, got {other:?}"),
+        }
+        assert!(matches!(
+            runtime
+                .commands
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            playback_runtime::PlaybackRuntimeCommand::Pause
+        ));
+        assert_eq!(
+            publications.len(),
+            3,
+            "duplicate or missing publications: {publications:?}"
+        );
+        assert!(matches!(
+            publications[0],
+            AppEvent::TrackChanged { track_id: 2 }
+        ));
+        assert!(matches!(publications[1], AppEvent::PlaybackStateChanged));
+        assert!(matches!(publications[2], AppEvent::QueueUpdated));
+        let guard = state.read().await;
+        assert_eq!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .unwrap()
+                .active_track_id,
+            Some(2)
+        );
+        assert_eq!(
+            guard.current_stream_display.as_ref().unwrap().audio_quality,
+            "LOSSLESS"
+        );
+    }
+}
+
+#[tokio::test]
 async fn near_end_resolution_cannot_dispatch_to_replaced_runtime_or_publish_its_metadata() {
     let (state, old, source) = near_end_fixture(false).await;
     let pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, old.handle.clone()));

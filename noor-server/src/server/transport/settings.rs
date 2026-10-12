@@ -63,9 +63,8 @@ pub(crate) async fn current_crossfade_ms(state: &SharedState) -> i32 {
     effective_crossfade_for_exclusive(exclusive, dj_engine_enabled, configured)
 }
 
-pub(crate) async fn transport_intent_is_playing(state: &SharedState) -> bool {
-    let guard = state.read().await;
-    guard
+pub(crate) fn transport_intent_is_playing(state: &crate::AppState) -> bool {
+    state
         .db
         .with_conn(|conn| {
             conn.query_row(
