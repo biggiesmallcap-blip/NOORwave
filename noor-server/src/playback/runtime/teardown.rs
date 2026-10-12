@@ -79,7 +79,7 @@ fn report_runtime_command_error(
     warn!("{message}");
     let source_identity = Arc::clone(
         &state
-            .handoff_elapsed_source
+            .source_identity
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()),
     );

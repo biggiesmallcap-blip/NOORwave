@@ -70,6 +70,10 @@ pub(super) struct PlaybackEngine {
     /// (incrementing `start_from_segment_index` / `start_from_offset_ms`)
     /// without having to plumb the original job through the engine API.
     pub(super) job: PreparedPlaybackJob,
+    /// Ownership token for transport events. Separate from the DJ handoff
+    /// counter so a same-job restart can keep it and so DJ telemetry reads
+    /// never contend with listeners that hold it across SQLite writes.
+    pub(super) source_identity: Arc<AtomicU64>,
 }
 
 fn join_decoder_thread_in_background(track_id: i64, handle: JoinHandle<()>) {
@@ -151,6 +155,7 @@ impl PlaybackEngine {
             shared,
             job: PreparedPlaybackJob::test_fixture(track_id, generation),
             created_at: std::time::Instant::now(),
+            source_identity: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -366,6 +371,7 @@ impl PlaybackEngine {
             shared,
             job,
             created_at: std::time::Instant::now(),
+            source_identity: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -559,6 +565,7 @@ mod tests {
             shared: Arc::clone(&shared),
             job: PreparedPlaybackJob::test_fixture(1, 1),
             created_at: std::time::Instant::now(),
+            source_identity: Arc::new(AtomicU64::new(0)),
         };
 
         // Watchdog: if stop() blocks waiting on the decoder thread, release it

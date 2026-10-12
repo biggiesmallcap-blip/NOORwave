@@ -213,16 +213,15 @@ pub(super) fn promote_next_to_active(
     // bounded). Task 7's catch_unwind around the dispatch loop catches the
     // panic and emits Error+Stopped. The "preserve frozen-position UX" win
     // was judged to outweigh the rare-poisoning bandwidth blip.
-    *position_source.lock().unwrap() = Arc::clone(&next.shared.source_position_samples);
-    *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
-    *offset_source.lock().unwrap() = Arc::clone(&next.shared.source_offset_samples);
-    *state
-        .handoff_elapsed_source
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) =
-        Arc::clone(&next.shared.handoff_elapsed_samples);
+    publish_audible_engine(
+        state,
+        &next,
+        position_source,
+        buffered_source,
+        offset_source,
+    );
 
-    let source_identity = Arc::clone(&next.shared.handoff_elapsed_samples);
+    let source_identity = Arc::clone(&next.source_identity);
     let outgoing = state.engine.take();
     state.engine = Some(next);
 
@@ -336,16 +335,15 @@ pub(super) fn promote_prepared_at_boundary(
     next.shared
         .paused
         .store(state.user_paused, Ordering::SeqCst);
-    *position_source.lock().unwrap() = Arc::clone(&next.shared.source_position_samples);
-    *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
-    *offset_source.lock().unwrap() = Arc::clone(&next.shared.source_offset_samples);
-    *state
-        .handoff_elapsed_source
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) =
-        Arc::clone(&next.shared.handoff_elapsed_samples);
+    publish_audible_engine(
+        state,
+        &next,
+        position_source,
+        buffered_source,
+        offset_source,
+    );
 
-    let source_identity = Arc::clone(&next.shared.handoff_elapsed_samples);
+    let source_identity = Arc::clone(&next.source_identity);
     let outgoing = state.engine.take();
     state.engine = Some(next);
 

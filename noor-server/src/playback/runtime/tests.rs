@@ -1694,6 +1694,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
         let (command_tx, _) = mpsc::channel();
         let mut handle = PlaybackRuntimeHandle::test_with_command_tx(command_tx);
         handle.handoff_elapsed_source = Arc::clone(&state.handoff_elapsed_source);
+        handle.source_identity = Arc::clone(&state.source_identity);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         promote_next_to_active(
             &mut state,
@@ -3547,12 +3548,7 @@ fn automatic_crossfade_promotion_emits_timing_event() {
             assert_eq!(generation, 20);
             assert!(Arc::ptr_eq(
                 &source_identity,
-                &state
-                    .engine
-                    .as_ref()
-                    .unwrap()
-                    .shared
-                    .handoff_elapsed_samples
+                &state.engine.as_ref().unwrap().source_identity
             ));
         }
         other => panic!("expected finished event, got {other:?}"),
@@ -3720,12 +3716,7 @@ fn boundary_fallback_promotion_emits_missed_timing_event() {
             assert_eq!(generation, 20);
             assert!(Arc::ptr_eq(
                 &source_identity,
-                &state
-                    .engine
-                    .as_ref()
-                    .unwrap()
-                    .shared
-                    .handoff_elapsed_samples
+                &state.engine.as_ref().unwrap().source_identity
             ));
         }
         other => panic!("expected finished event, got {other:?}"),
@@ -4230,6 +4221,7 @@ fn buffered_source_redirect_makes_handle_read_from_new_engine() {
         buffered_source: Arc::clone(&buffered_source),
         offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
 
@@ -4273,6 +4265,7 @@ fn get_buffered_ms_returns_zero_for_invalid_device_config() {
         buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(48_000)))),
         offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
     assert_eq!(handle.get_buffered_ms(0, 2), 0);
@@ -4357,8 +4350,8 @@ fn command_error_keeps_generation_and_reader_identity_after_engine_teardown() {
     let mut state = test_runtime_loop_state();
     state.requested_generation = Some(7);
     let engine = test_engine_with_shared(17, 7);
-    let source = Arc::clone(&engine.shared.handoff_elapsed_samples);
-    *state.handoff_elapsed_source.lock().unwrap() = Arc::clone(&source);
+    let source = Arc::clone(&engine.source_identity);
+    *state.source_identity.lock().unwrap() = Arc::clone(&source);
     state.engine = Some(engine);
     stop_all_engines(&mut state);
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
@@ -4385,7 +4378,7 @@ fn command_error_keeps_generation_and_reader_identity_after_engine_teardown() {
 fn track_error_keeps_failed_decoder_identity_after_engine_teardown() {
     let mut state = test_runtime_loop_state();
     let engine = test_engine_with_shared(17, 7);
-    let failed_source = Arc::clone(&engine.shared.handoff_elapsed_samples);
+    let failed_source = Arc::clone(&engine.source_identity);
     let stop = engine.shared.stop_flag();
     state.engine = Some(engine);
     let (event_tx, mut events) = tokio::sync::broadcast::channel(8);
@@ -4416,7 +4409,7 @@ fn track_error_keeps_failed_decoder_identity_after_engine_teardown() {
             // reader happens to be published when teardown finishes.
             assert!(!Arc::ptr_eq(
                 &source_identity,
-                &state.handoff_elapsed_source.lock().unwrap()
+                &state.source_identity.lock().unwrap()
             ));
         }
         other => panic!("expected decoder error, got {other:?}"),
@@ -4989,6 +4982,7 @@ fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {
     PlaybackRuntimeLoopState {
         requested_generation: None,
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         device_name: "test".to_string(),
         device_sample_rate: 48_000,
         device_channels: 2,
@@ -5249,14 +5243,7 @@ fn queued_terminal_from_same_job_retired_decoder_cannot_remove_replacement() {
     retired.stop();
     state.engine = Some(test_engine_with_shared(1, 7));
     let replacement = state.engine.as_ref().unwrap().shared.stop_flag();
-    let replacement_source = Arc::clone(
-        &state
-            .engine
-            .as_ref()
-            .unwrap()
-            .shared
-            .handoff_elapsed_samples,
-    );
+    let replacement_source = Arc::clone(&state.engine.as_ref().unwrap().source_identity);
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
     let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     if let PlaybackRuntimeCommand::TrackTerminal {
@@ -6247,6 +6234,7 @@ fn selecting_predecoded_next_binds_transport_readers_and_preserves_pause() {
     let (command_tx, _) = mpsc::channel();
     let handle = PlaybackRuntimeHandle::test_with_command_tx(command_tx);
     state.handoff_elapsed_source = Arc::clone(&handle.handoff_elapsed_source);
+    state.source_identity = Arc::clone(&handle.source_identity);
     handle.test_publish_position(9_600_000);
     adopt_predecoded_next_engine(
         &mut state,
@@ -6668,6 +6656,7 @@ fn offset_source_redirect_makes_handle_read_from_new_engine() {
         buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         offset_source: Arc::clone(&offset_source),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
 
@@ -6731,5 +6720,46 @@ fn failed_commands_acknowledge_the_hard_pause() {
     assert!(matches!(
         event_rx.try_recv(),
         Ok(PlaybackRuntimeEvent::Paused { track_id: Some(17) })
+    ));
+}
+
+#[test]
+fn same_job_restart_keeps_source_identity_and_other_jobs_do_not() {
+    let mut state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(17, 9);
+    let identity = Arc::clone(&engine.source_identity);
+    state.engine = Some(engine);
+    let same = PreparedPlaybackJob::test_fixture(17, 9);
+    assert!(Arc::ptr_eq(
+        &restarted_job_identity(&state, &same, true).unwrap(),
+        &identity
+    ));
+    assert!(restarted_job_identity(&state, &same, false).is_none());
+    assert!(
+        restarted_job_identity(&state, &PreparedPlaybackJob::test_fixture(18, 9), true).is_none()
+    );
+    assert!(
+        restarted_job_identity(&state, &PreparedPlaybackJob::test_fixture(17, 10), true).is_none()
+    );
+}
+
+#[test]
+fn publishing_an_engine_keeps_identity_apart_from_dj_telemetry() {
+    let state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(17, 9);
+    let readers = || Mutex::new(Arc::new(AtomicU64::new(0)));
+    let (position, buffered, offset) = (readers(), readers(), readers());
+    publish_audible_engine(&state, &engine, &position, &buffered, &offset);
+    assert!(Arc::ptr_eq(
+        &state.source_identity.lock().unwrap(),
+        &engine.source_identity
+    ));
+    assert!(Arc::ptr_eq(
+        &state.handoff_elapsed_source.lock().unwrap(),
+        &engine.shared.handoff_elapsed_samples
+    ));
+    assert!(!Arc::ptr_eq(
+        &engine.source_identity,
+        &engine.shared.handoff_elapsed_samples
     ));
 }

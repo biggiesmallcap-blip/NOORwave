@@ -1044,7 +1044,7 @@ pub(super) fn handle_track_terminal(
                 let Some(source_identity) = state
                     .engine
                     .as_ref()
-                    .map(|engine| Arc::clone(&engine.shared.handoff_elapsed_samples))
+                    .map(|engine| Arc::clone(&engine.source_identity))
                 else {
                     return ControlFlow::Continue(());
                 };

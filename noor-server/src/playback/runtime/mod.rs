@@ -203,6 +203,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     let offset_source: Arc<Mutex<Arc<AtomicU64>>> =
         Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     let handoff_elapsed_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX))));
+    let source_identity = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     let exclusive_event_identity = Arc::new(Mutex::new(Arc::new(())));
 
     let worker_volume_ctl = Arc::clone(&volume_ctl);
@@ -211,6 +212,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     let worker_buffered_source = Arc::clone(&buffered_source);
     let worker_offset_source = Arc::clone(&offset_source);
     let worker_handoff_elapsed_source = Arc::clone(&handoff_elapsed_source);
+    let worker_source_identity = Arc::clone(&source_identity);
     let worker_exclusive_event_identity = Arc::clone(&exclusive_event_identity);
 
     thread::Builder::new()
@@ -227,6 +229,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
                 worker_buffered_source,
                 worker_offset_source,
                 worker_handoff_elapsed_source,
+                worker_source_identity,
                 worker_exclusive_event_identity,
             ) {
                 let _ = worker_event_tx.send(PlaybackRuntimeEvent::Error {
@@ -253,6 +256,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
         buffered_source,
         offset_source,
         handoff_elapsed_source,
+        source_identity,
         exclusive_event_identity,
     })
 }
@@ -260,6 +264,8 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
 struct PlaybackRuntimeLoopState {
     requested_generation: Option<u64>,
     handoff_elapsed_source: Arc<Mutex<Arc<AtomicU64>>>,
+    /// Shared with the handle; see `PlaybackEngine::source_identity`.
+    source_identity: Arc<Mutex<Arc<AtomicU64>>>,
     device_name: String,
     device_sample_rate: u32,
     device_channels: u16,
@@ -369,6 +375,7 @@ fn run_runtime_loop(
     buffered_source: Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: Arc<Mutex<Arc<AtomicU64>>>,
     handoff_elapsed_source: Arc<Mutex<Arc<AtomicU64>>>,
+    source_identity: Arc<Mutex<Arc<AtomicU64>>>,
     _exclusive_event_identity: Arc<Mutex<Arc<()>>>,
 ) -> Result<()> {
     let host = cpal::default_host();
@@ -385,6 +392,7 @@ fn run_runtime_loop(
     let mut state = PlaybackRuntimeLoopState {
         requested_generation: None,
         handoff_elapsed_source,
+        source_identity,
         device_name,
         device_sample_rate: output_config.sample_rate,
         device_channels: output_config.channels,
