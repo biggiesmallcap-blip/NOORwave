@@ -785,6 +785,142 @@ async fn terminal_session_sync_rechecks_owner_after_waiting_for_writer() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_adoption_serializes_generation_with_sql_write() {
+    use futures::FutureExt;
+    use std::sync::{Mutex, OnceLock};
+    struct BusyGate {
+        entered: tokio::sync::Notify,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    static GATE: OnceLock<Mutex<Option<Arc<BusyGate>>>> = OnceLock::new();
+    fn blocked_write(_: i32) -> bool {
+        let gate = GATE
+            .get()
+            .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
+        let Some(gate) = gate else {
+            return false;
+        };
+        gate.entered.notify_one();
+        gate.release
+            .lock()
+            .ok()
+            .is_some_and(|receiver| receiver.recv_timeout(Duration::from_secs(3)).is_ok())
+    }
+    struct ScratchDatabase(std::path::PathBuf);
+    impl Drop for ScratchDatabase {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut name = self.0.as_os_str().to_os_string();
+                name.push(suffix);
+                let _ = std::fs::remove_file(std::path::PathBuf::from(name));
+            }
+        }
+    }
+    let scratch = ScratchDatabase(std::env::temp_dir().join(format!(
+        "noor-pending-adoption-{}-{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let db = Database::open(&scratch.0).unwrap();
+    db.run_migrations().unwrap();
+    seed_basic_tracks(&db);
+    let queue_item_id = db.with_conn(|conn| {
+        let queue = player::enqueue_track(conn, 1, "test")?;
+        conn.execute("UPDATE playback_state SET current_track_id=NULL, current_queue_item_id=?1, is_playing=1, position_ms=17 WHERE id=1", [queue[0].id])?;
+        Ok(queue[0].id)
+    }).unwrap();
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    state.write().await.db = db.clone();
+    let mut events = state.read().await.event_tx.subscribe();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(BusyGate {
+        entered: tokio::sync::Notify::new(),
+        release: Mutex::new(release_rx),
+    });
+    *GATE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(gate.clone());
+    db.with_conn(|conn| {
+        conn.busy_handler(Some(blocked_write))?;
+        Ok(())
+    })
+    .unwrap();
+    let competing = db.open_isolated().unwrap();
+    competing.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let adoption = tokio::spawn({
+        let state = state.clone();
+        async move { adopt_resolved_current_queue_item(&state, queue_item_id, 0).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .unwrap();
+    let claim = super::generation::bump(&state);
+    tokio::pin!(claim);
+    let early = claim.as_mut().now_or_never();
+    let excluded = early.is_none();
+    let quality_excluded = super::generation::claim_if_current(&state, 0)
+        .now_or_never()
+        .is_none();
+    competing.execute_batch("ROLLBACK").unwrap();
+    release_tx.send(()).unwrap();
+    let adopted = tokio::time::timeout(Duration::from_secs(2), adoption)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let claimed = match early {
+        Some(value) => value,
+        None => tokio::time::timeout(Duration::from_secs(2), claim.as_mut())
+            .await
+            .unwrap(),
+    };
+    assert_eq!(claimed, 1);
+    db.with_conn(|conn| {
+        conn.busy_handler(None)?;
+        Ok(())
+    })
+    .unwrap();
+    *GATE.get().unwrap().lock().unwrap() = None;
+    assert!(
+        excluded,
+        "new generation was admitted during pending adoption's SQL write"
+    );
+    assert!(
+        quality_excluded,
+        "quality claim bypassed pending adoption admission"
+    );
+    let snapshot = adopted.expect("current adoption did not return its committed snapshot");
+    assert_eq!(snapshot.state.current_track.as_ref().unwrap().id, 1);
+    assert_eq!(snapshot.state.current_queue_item_id, Some(queue_item_id));
+    assert_eq!(snapshot.state.position_ms, 0);
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        AppEvent::TrackChanged { track_id: 1 }
+    ));
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        AppEvent::PlaybackStateChanged
+    ));
+    assert!(events.try_recv().is_err());
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE playback_state SET current_track_id=NULL, position_ms=17 WHERE id=1",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        adopt_resolved_current_queue_item(&state, queue_item_id, 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let after = db.with_conn(player::load_snapshot).unwrap();
+    assert!(after.state.current_track.is_none());
+    assert_eq!(after.state.position_ms, 17);
+    assert!(events.try_recv().is_err());
+}
+
 #[tokio::test]
 async fn promoted_decoder_finished_listener_advances_to_prepared_track() {
     let (state, _, _, _) = cpal_fault_fixture().await;

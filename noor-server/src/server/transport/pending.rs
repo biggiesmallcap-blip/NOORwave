@@ -400,16 +400,16 @@ pub(crate) async fn adopt_resolved_current_queue_item(
     queue_item_id: i64,
     generation: u64,
 ) -> anyhow::Result<Option<player::PlaybackSnapshot>> {
-    if !playback_generation_is_current(state, generation).await {
+    // A generation admitted during the SQL write cannot undo that write.
+    // Keep validation, adoption and publication in the same admission block.
+    let admission = state.read().await.playback_generation_admission.clone();
+    let _admission = admission.lock().await;
+    let state_guard = state.read().await;
+    if super::generation::current(&state_guard) != generation {
         return Ok(None);
     }
 
-    let (db, event_tx) = {
-        let state_guard = state.read().await;
-        (state_guard.db.clone(), state_guard.event_tx.clone())
-    };
-
-    let adopted_track_id = db.with_conn(move |conn| {
+    let adopted = state_guard.db.with_conn(move |conn| {
         let track_id: Option<i64> = conn
             .query_row(
                 "SELECT track_id FROM queue WHERE id = ?1 AND track_id IS NOT NULL",
@@ -428,19 +428,20 @@ pub(crate) async fn adopt_resolved_current_queue_item(
                AND current_queue_item_id = ?2",
             params![track_id, queue_item_id],
         )?;
-        Ok(if updated == 1 { Some(track_id) } else { None })
+        if updated != 1 {
+            return Ok(None);
+        }
+        Ok(Some((track_id, player::load_snapshot(conn)?)))
     })?;
 
-    let Some(track_id) = adopted_track_id else {
+    let Some((track_id, snapshot)) = adopted else {
         return Ok(None);
     };
-    if !playback_generation_is_current(state, generation).await {
-        return Ok(None);
-    }
 
-    let _ = event_tx.send(AppEvent::TrackChanged { track_id });
-    let _ = event_tx.send(AppEvent::PlaybackStateChanged);
-    let snapshot = load_persisted_playback_snapshot(state).await?;
+    let _ = state_guard
+        .event_tx
+        .send(AppEvent::TrackChanged { track_id });
+    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     if snapshot.state.current_track.is_some() {
         tracing::info!(
             target: "noor.playback.resolve",
