@@ -144,6 +144,10 @@ pub(crate) fn emit_cpal_stream_error(
         cpal::ErrorKind::Xrun => 1,
         cpal::ErrorKind::RealtimeDenied => 2,
         cpal::ErrorKind::DeviceChanged => 4,
+        // WASAPI falls back to SetThreadPriority when MMCSS refuses and
+        // reports that fallback's failure as a backend error. Audio still
+        // plays, so it is a notice rather than a fault.
+        _ if is_priority_boost_failure(&err) => 2,
         _ => 0,
     };
     if notice != 0 {
@@ -163,6 +167,11 @@ pub(crate) fn emit_cpal_stream_error(
         // the owned diagnostic neither formats nor frees its payload here.
         let _ = callback.error.set(err);
     }
+}
+
+fn is_priority_boost_failure(err: &cpal::Error) -> bool {
+    err.message()
+        .is_some_and(|message| message.starts_with("Failed to promote audio thread"))
 }
 
 fn build_output_stream(
@@ -409,19 +418,31 @@ mod tests {
 
     #[test]
     fn recoverable_cpal_notices_do_not_queue_faults() {
-        for (kind, notice) in [
-            (cpal::ErrorKind::Xrun, 1),
-            (cpal::ErrorKind::RealtimeDenied, 2),
-            (cpal::ErrorKind::DeviceChanged, 4),
+        for (error, notice) in [
+            (cpal::Error::new(cpal::ErrorKind::Xrun), 1),
+            (cpal::Error::new(cpal::ErrorKind::RealtimeDenied), 2),
+            (cpal::Error::new(cpal::ErrorKind::DeviceChanged), 4),
+            (
+                cpal::Error::with_message(
+                    cpal::ErrorKind::BackendError,
+                    "Failed to promote audio thread to real-time priority: Access is denied.",
+                ),
+                2,
+            ),
         ] {
             let (command_tx, command_rx) = mpsc::channel();
             let shared = shared(command_tx);
             let live = Arc::new(AtomicBool::new(true));
             let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
-            emit_cpal_stream_error(&shared, &callback, cpal::Error::new(kind));
+            let label = error.to_string();
+            emit_cpal_stream_error(&shared, &callback, error);
             assert!(
                 command_rx.try_recv().is_err(),
-                "recoverable notice {kind:?} stopped playback"
+                "recoverable notice {label} stopped playback"
+            );
+            assert!(
+                callback.take_command(&shared).is_none(),
+                "{label} became fatal"
             );
             assert_eq!(shared.deferred_cpal_notices.load(Ordering::Relaxed), notice);
             assert!(!shared.paused.load(Ordering::Acquire));
