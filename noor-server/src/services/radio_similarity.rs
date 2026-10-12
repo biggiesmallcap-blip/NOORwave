@@ -266,19 +266,22 @@ fn read_freshness(conn: &Connection) -> anyhow::Result<Freshness> {
     })
 }
 
-/// Bump the monotonic library-change counter. Called for every `LibrarySynced`
-/// before any other check, so the change survives a busy app or an in-flight
-/// rebuild. Single statement — the increment is atomic.
+/// Bump the monotonic library-change counter: the next hourly tick rebuilds
+/// the index. Single statement, so the increment is atomic. Also called by
+/// repairs that change genre rows without a `LibrarySynced`.
+pub(crate) fn bump_change_gen(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO server_config (key, value)
+         VALUES (?1, CAST(COALESCE((SELECT value FROM server_config WHERE key = ?1), '0') AS INTEGER) + 1)",
+        rusqlite::params![CHANGE_GEN_KEY],
+    )?;
+    Ok(())
+}
+
+/// Bump the change counter for every `LibrarySynced` before any other check,
+/// so the change survives a busy app or an in-flight rebuild.
 fn mark_library_changed(db: &Database) {
-    let result = db.with_conn(|conn| {
-        conn.execute(
-            "INSERT OR REPLACE INTO server_config (key, value)
-             VALUES (?1, CAST(COALESCE((SELECT value FROM server_config WHERE key = ?1), '0') AS INTEGER) + 1)",
-            rusqlite::params![CHANGE_GEN_KEY],
-        )?;
-        Ok(())
-    });
-    if let Err(err) = result {
+    if let Err(err) = db.with_conn(|conn| Ok(bump_change_gen(conn)?)) {
         warn!(target: "noor.radio_similarity", error = %err, "failed to bump library-change counter");
     }
 }
@@ -366,6 +369,22 @@ impl Drop for RunningGuard {
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    #[test]
+    fn bump_change_gen_increments_the_counter() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        db.with_conn(|c| {
+            bump_change_gen(c)?;
+            bump_change_gen(c)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            db.with_conn(|c| Ok(read_gen(c, CHANGE_GEN_KEY)?)).unwrap(),
+            2
+        );
+    }
 
     #[test]
     fn never_built_always_rebuilds() {
