@@ -4686,6 +4686,177 @@ async fn terminal_snapshot_lookup_cannot_modify_replacement_owner() {
 }
 
 #[tokio::test]
+async fn terminal_pending_adoption_rejects_replaced_decoder() {
+    let (state, runtime, gate) = near_end_fixture(false).await;
+    let pending_qid = state.read().await.db.with_conn(|conn| {
+        conn.execute("UPDATE queue SET position=2 WHERE track_id=2", [])?;
+        conn.execute("INSERT INTO queue (track_id, position, source, pending_artist, pending_title, pending_at, resolving_at) VALUES (NULL, 1, 'radio_pending', 'Artist', 'Title', datetime('now'), datetime('now'))", [])?;
+        Ok(conn.last_insert_rowid())
+    }).unwrap();
+    let listener = spawn_playback_runtime_listener(state.clone(), runtime.handle.clone());
+    assert!(
+        runtime
+            .handle
+            .test_publish_event(playback_runtime::PlaybackRuntimeEvent::Finished {
+                track_id: 1,
+                generation: 0,
+                source_identity: runtime.handle.playback_source_identity(),
+            })
+    );
+    // On this single-thread executor the pending row becomes observable when
+    // the listener yields for its busy resolver. Gate on the persisted row.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = state
+                .read()
+                .await
+                .db
+                .with_conn(player::load_snapshot)
+                .unwrap();
+            if snapshot.state.current_queue_item_id == Some(pending_qid) {
+                assert!(snapshot.state.current_track.is_none());
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.handle.test_replace_playback_source();
+    let mut events = {
+        let guard = state.read().await;
+        guard.db.with_conn(|conn| {
+            conn.execute("UPDATE queue SET track_id=2, resolving_at=NULL, resolved_at=datetime('now') WHERE id=?1", [pending_qid])?;
+            Ok(())
+        }).unwrap();
+        guard.event_tx.subscribe()
+    };
+    assert!(runtime.handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+            output_identity: runtime.handle.test_exclusive_event_identity(),
+            device_name: "listener barrier".into(),
+            transport_format: "test format".into(),
+        }
+    ));
+    let mut stale_events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(event, AppEvent::AudioExclusiveEngaged { .. }) {
+                break;
+            }
+            stale_events.push(event);
+        }
+    })
+    .await
+    .unwrap();
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+    gate.release.notify_one();
+    let snapshot = state
+        .read()
+        .await
+        .db
+        .with_conn(player::load_snapshot)
+        .unwrap();
+    assert!(
+        snapshot.state.current_track.is_none(),
+        "retired decoder adopted background resolution"
+    );
+    assert_eq!(snapshot.state.current_queue_item_id, Some(pending_qid));
+    assert!(
+        stale_events.is_empty(),
+        "retired decoder published adoption: {stale_events:?}"
+    );
+    assert!(runtime.commands.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn pending_resolution_rechecks_owner_after_admission_wait() {
+    use futures::FutureExt;
+    for replacement in ["current", "decoder", "runtime"] {
+        let (state, handle, _, _) = cpal_fault_fixture().await;
+        let (qid, admission, mut events) = {
+            let guard = state.read().await;
+            let qid = guard.db.with_conn(|conn| {
+                let qid = player::load_state(conn)?.current_queue_item_id.unwrap();
+                conn.execute("UPDATE playback_state SET current_track_id=NULL, position_ms=17 WHERE id=1", [])?;
+                Ok(qid)
+            }).unwrap();
+            (
+                qid,
+                guard.playback_generation_admission.clone(),
+                guard.event_tx.subscribe(),
+            )
+        };
+        let held = admission.lock().await;
+        let source = handle.playback_source_identity();
+        let snapshot = state
+            .read()
+            .await
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap();
+        let adoption = resolve_or_skip_pending_current_for_owner(
+            &state,
+            snapshot,
+            0,
+            "owner_wait_regression",
+            Some((&handle, &source)),
+        );
+        tokio::pin!(adoption);
+        assert!(adoption.as_mut().now_or_never().is_none());
+        let (_replacement_receiver, replacement_handle) = {
+            let (tx, rx) = std::sync::mpsc::channel();
+            (
+                rx,
+                playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(tx),
+            )
+        };
+        match replacement {
+            "decoder" => handle.test_replace_playback_source(),
+            "runtime" => {
+                state
+                    .write()
+                    .await
+                    .playback_runtime
+                    .as_mut()
+                    .unwrap()
+                    .handle = replacement_handle;
+            }
+            _ => {}
+        }
+        drop(held);
+        let adopted = adoption.await.unwrap();
+        let after = state
+            .read()
+            .await
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap();
+        if replacement == "current" {
+            assert_eq!(adopted.state.current_track.unwrap().id, 1);
+            assert_eq!(after.state.position_ms, 0);
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AppEvent::TrackChanged { track_id: 1 }
+            ));
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AppEvent::PlaybackStateChanged
+            ));
+        } else {
+            assert!(adopted.state.current_track.is_none());
+            assert_eq!(adopted.state.current_queue_item_id, Some(qid));
+            assert!(after.state.current_track.is_none());
+            assert_eq!(after.state.current_queue_item_id, Some(qid));
+            assert_eq!(after.state.position_ms, 17);
+        }
+        assert!(events.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
 async fn terminal_prepared_status_cannot_dispatch_after_decoder_replacement() {
     let (state, _, _, _) = cpal_fault_fixture().await;
     let (command_tx, command_rx) = std::sync::mpsc::channel();

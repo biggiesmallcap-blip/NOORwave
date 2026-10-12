@@ -5,7 +5,10 @@ use super::{
         flush_active_listen_session_locked, sync_session_after_snapshot,
         sync_session_after_snapshot_for_owner,
     },
-    pending::{resolve_or_skip_pending_current, spawn_tidal_id_reresolve},
+    pending::{
+        resolve_or_skip_pending_current, resolve_or_skip_pending_current_for_owner,
+        spawn_tidal_id_reresolve,
+    },
     settings::{
         current_user_audio_quality, effective_crossfade_ms,
         runtime_output_settings_from_audio_settings,
@@ -1697,8 +1700,14 @@ async fn handle_runtime_finished_for_owner(
         return Ok(());
     };
 
-    let snapshot =
-        resolve_or_skip_pending_current(&state, snapshot, generation, "runtime_finished").await?;
+    let snapshot = resolve_or_skip_pending_current_for_owner(
+        &state,
+        snapshot,
+        generation,
+        "runtime_finished",
+        expected_runtime.zip(expected_source),
+    )
+    .await?;
     let owner_is_current = {
         let state_guard = state.read().await;
         runtime_finish_owner_is_current(&state_guard, generation, expected_runtime, expected_source)
