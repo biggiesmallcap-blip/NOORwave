@@ -1,8 +1,14 @@
 //! Reacting to audio runtime events: ready, near end, finished, track errors, exit; the skip-aware snapshot switch.
 
 use super::{
-    listen::{flush_active_listen_session_locked, sync_session_after_snapshot},
-    pending::{resolve_or_skip_pending_current, spawn_tidal_id_reresolve},
+    listen::{
+        flush_active_listen_session_locked, sync_session_after_snapshot,
+        sync_session_after_snapshot_for_owner,
+    },
+    pending::{
+        resolve_or_skip_pending_current, resolve_or_skip_pending_current_for_owner,
+        spawn_tidal_id_reresolve,
+    },
     settings::{
         current_user_audio_quality, effective_crossfade_ms,
         runtime_output_settings_from_audio_settings,
@@ -26,13 +32,199 @@ use crate::server::transport::generation::{
     current as current_playback_generation, is_current as playback_generation_is_current,
 };
 use crate::server::transport::start::{
-    Dispatch, Generation, StartError, StartRequest, start_track,
+    Dispatch, Generation, StartError, StartRequest, start_track, start_track_for_runtime,
 };
 use crate::server::transport::stream::{TidalPlaybackError, resolve_tidal_playback_stream};
 use crate::services::tidal::stream as tidal_stream;
 use crate::{AppEvent, PlaybackRuntimeInfo, SharedState};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
+
+type ExclusiveRecoveryResult =
+    Result<anyhow::Result<Option<super::settings::RuntimeOutputSettings>>, tokio::task::JoinError>;
+
+struct ExclusiveRecoveryRequest {
+    identity: Arc<()>,
+    device_name: String,
+    db: crate::db::Database,
+}
+
+struct PendingExclusiveRecovery {
+    request: ExclusiveRecoveryRequest,
+    task: tokio::task::JoinHandle<anyhow::Result<Option<super::settings::RuntimeOutputSettings>>>,
+}
+
+#[derive(Default)]
+struct ExclusiveRecoveryQueue {
+    active: Option<PendingExclusiveRecovery>,
+    latest: Option<ExclusiveRecoveryRequest>,
+}
+
+impl ExclusiveRecoveryQueue {
+    fn start(request: ExclusiveRecoveryRequest) -> PendingExclusiveRecovery {
+        let db = request.db.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            db.with_conn(|conn| {
+                let settings = crate::db::audio_settings::load(conn)?;
+                let is_playing = player::load_state(conn)?.is_playing;
+                Ok(
+                    should_retry_exclusive_release(is_playing, settings.exclusive_mode)
+                        .then(|| runtime_output_settings_from_audio_settings(&settings)),
+                )
+            })
+        });
+        PendingExclusiveRecovery { request, task }
+    }
+
+    fn request(&mut self, request: ExclusiveRecoveryRequest) {
+        if let Some(active) = &self.active {
+            if !Arc::ptr_eq(&active.request.identity, &request.identity) {
+                // A started blocking read cannot be cancelled reliably. Keep
+                // one active lookup and only the newest later request.
+                self.latest = Some(request);
+            }
+        } else {
+            self.active = Some(Self::start(request));
+        }
+    }
+
+    async fn completed(&mut self) -> Option<(ExclusiveRecoveryRequest, ExclusiveRecoveryResult)> {
+        let result = match self.active.as_mut() {
+            Some(active) => (&mut active.task).await,
+            None => std::future::pending().await,
+        };
+        let finished = self.active.take()?;
+        if let Some(latest) = self.latest.take() {
+            self.active = Some(Self::start(latest));
+        }
+        Some((finished.request, result))
+    }
+}
+
+impl Drop for ExclusiveRecoveryQueue {
+    fn drop(&mut self) {
+        if let Some(active) = &self.active {
+            // Prevent queued pool work from starting after listener shutdown.
+            // A read that has already started still finishes without effects.
+            active.task.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod exclusive_recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn recovery_burst_keeps_one_lookup_and_only_the_latest_request() {
+        let db = crate::db::Database::open_in_memory().expect("database");
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            locked_db.with_conn(|_| {
+                locked_tx.send(()).expect("lock signal");
+                let _ = unlock_rx.recv_timeout(Duration::from_secs(5));
+                Ok(())
+            })
+        });
+        locked_rx.recv().expect("database locked");
+        let first = Arc::new(());
+        let request = |identity| ExclusiveRecoveryRequest {
+            identity,
+            device_name: "test output".to_string(),
+            db: db.clone(),
+        };
+        let mut recovery = ExclusiveRecoveryQueue::default();
+        recovery.request(request(first.clone()));
+        let first_task = recovery.active.as_ref().expect("active").task.id();
+        let mut latest = first.clone();
+        for _ in 0..1_000 {
+            latest = Arc::new(());
+            recovery.request(request(latest.clone()));
+            recovery.request(request(first.clone()));
+        }
+        assert_eq!(
+            recovery.active.as_ref().expect("active").task.id(),
+            first_task
+        );
+        assert!(Arc::ptr_eq(
+            &recovery.latest.as_ref().expect("latest").identity,
+            &latest
+        ));
+        unlock_tx.send(()).expect("unlock");
+        holder
+            .join()
+            .expect("database holder")
+            .expect("database read");
+        let (completed, _) = recovery.completed().await.expect("first completion");
+        assert!(Arc::ptr_eq(&completed.identity, &first));
+        assert!(recovery.latest.is_none());
+        assert!(Arc::ptr_eq(
+            &recovery
+                .active
+                .as_ref()
+                .expect("next active")
+                .request
+                .identity,
+            &latest
+        ));
+        let (completed, _) = recovery.completed().await.expect("latest completion");
+        assert!(Arc::ptr_eq(&completed.identity, &latest));
+        assert!(recovery.active.is_none());
+    }
+}
+
+async fn apply_exclusive_recovery(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    request: ExclusiveRecoveryRequest,
+    result: ExclusiveRecoveryResult,
+) {
+    let retry = match result {
+        Ok(result) => result.ok().flatten(),
+        Err(error) => {
+            warn!("Exclusive recovery settings task failed: {error}");
+            None
+        }
+    };
+    let mut state_guard = state.write().await;
+    if !state_guard
+        .playback_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+    {
+        return;
+    }
+    let identity_guard = handle.lock_exclusive_event_identity();
+    if !Arc::ptr_eq(&identity_guard, &request.identity) {
+        return;
+    }
+    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+        info.exclusive_engaged = false;
+        info.exclusive_transport_format = None;
+    }
+    let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
+        device: request.device_name,
+    });
+    let recovery_result = retry.map(|output| {
+        handle.recover_released_exclusive_output(
+            request.identity,
+            output.device,
+            output.exclusive_mode,
+            output.sample_rate_follow,
+            None,
+            output.exclusive_release_grace_secs,
+            output.exclusive_latency_mode,
+        )
+    });
+    drop(identity_guard);
+    drop(state_guard);
+    if let Some(Err(error)) = recovery_result {
+        warn!("Failed to recover released WASAPI exclusive stream: {error}");
+    }
+}
 
 pub(crate) async fn apply_runtime_ready(
     state: &SharedState,
@@ -88,30 +280,52 @@ pub(crate) fn spawn_playback_runtime_listener(
         warn!("Could not request runtime device metadata: {error}");
     }
     tokio::spawn(async move {
+        let mut recovery = ExclusiveRecoveryQueue::default();
         loop {
-            match rx.recv().await {
+            let event = tokio::select! {
+                completed = recovery.completed(), if recovery.active.is_some() => {
+                    if let Some((request, result)) = completed {
+                        apply_exclusive_recovery(&state, &handle, request, result).await;
+                    }
+                    continue;
+                }
+                event = rx.recv() => event,
+            };
+            match event {
                 Ok(playback_runtime::PlaybackRuntimeEvent::Finished {
                     track_id,
                     generation,
+                    source_identity,
                 }) => {
                     // A late terminal from the previous track or runtime must
                     // not mark a newer, already audible track as paused.
-                    let state_guard = state.read().await;
-                    if current_playback_generation(&state_guard) != generation
-                        || !state_guard
-                            .playback_runtime
-                            .as_ref()
-                            .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
-                    {
+                    let terminal_is_current = {
+                        let state_guard = state.read().await;
+                        let source_guard = handle.lock_playback_source_identity();
+                        let current = current_playback_generation(&state_guard) == generation
+                            && state_guard
+                                .playback_runtime
+                                .as_ref()
+                                .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                            && Arc::ptr_eq(&source_guard, &source_identity);
+                        if current {
+                            state_guard
+                                .audio_active
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        current
+                    };
+                    if !terminal_is_current {
                         continue;
                     }
-                    state_guard
-                        .audio_active
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
-                    drop(state_guard);
-                    if let Err(error) =
-                        handle_runtime_finished_with_retry(state.clone(), track_id, generation)
-                            .await
+                    if let Err(error) = handle_runtime_finished_with_retry_for_owner(
+                        state.clone(),
+                        track_id,
+                        generation,
+                        Some(&handle),
+                        Some(&source_identity),
+                    )
+                    .await
                     {
                         let message =
                             format!("Failed to advance playback after track end: {error}");
@@ -197,11 +411,18 @@ pub(crate) fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::TrackError {
                     track_id,
                     generation,
+                    source_identity,
                     message,
                 }) => {
-                    if let Err(error) =
-                        handle_runtime_track_error(state.clone(), track_id, generation, &message)
-                            .await
+                    if let Err(error) = handle_runtime_track_error(
+                        state.clone(),
+                        &handle,
+                        &source_identity,
+                        track_id,
+                        generation,
+                        &message,
+                    )
+                    .await
                     {
                         let message =
                             format!("Failed to advance playback after track error: {error}");
@@ -241,12 +462,16 @@ pub(crate) fn spawn_playback_runtime_listener(
                     generation,
                     ..
                 }) => {
-                    // Read the persisted queue anchor before taking the global
-                    // write lock. A briefly busy SQLite connection must not
-                    // block pause, resume, queue, or runtime-health updates.
+                    // Capture the queue anchor before the write lock, then
+                    // revalidate runtime and generation after that await.
                     let history_row = {
                         let state_guard = state.read().await;
-                        if current_playback_generation(&state_guard) != generation {
+                        if current_playback_generation(&state_guard) != generation
+                            || !state_guard
+                                .playback_runtime
+                                .as_ref()
+                                .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                        {
                             continue;
                         }
                         state_guard
@@ -271,7 +496,12 @@ pub(crate) fn spawn_playback_runtime_listener(
                             .flatten()
                     };
                     let mut state_guard = state.write().await;
-                    if current_playback_generation(&state_guard) != generation {
+                    if current_playback_generation(&state_guard) != generation
+                        || !state_guard
+                            .playback_runtime
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
                         continue;
                     }
                     // CPAL buffer threshold crossed. Samples are actually flowing now.
@@ -298,8 +528,6 @@ pub(crate) fn spawn_playback_runtime_listener(
                             generation,
                         );
                     }
-                    drop(state_guard);
-                    let state_guard = state.read().await;
                     let _ = state_guard
                         .event_tx
                         .send(AppEvent::TrackChanged { track_id });
@@ -333,6 +561,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                     // (observed: 2795 s recorded on a 334 s track). Playback
                     // recovery itself is the watchdog's force-advance.
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     let now = chrono::Utc::now();
                     if let Some(session) = state_guard.active_listen_session.as_mut()
                         && session.track_id == track_id
@@ -342,6 +577,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::StallRecovered { track_id }) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     let now = chrono::Utc::now();
                     if let Some(session) = state_guard.active_listen_session.as_mut()
                         && session.track_id == track_id
@@ -423,13 +665,18 @@ pub(crate) fn spawn_playback_runtime_listener(
                 }) => {
                     // Pre-decode the next track so the transition is gapless.
                     let next_state = state.clone();
+                    let emitting_runtime = handle.clone();
                     tokio::spawn(async move {
-                        if let Err(err) = handle_near_end(next_state, track_id, generation).await {
+                        if let Err(err) =
+                            handle_near_end(next_state, track_id, generation, emitting_runtime)
+                                .await
+                        {
                             warn!("Failed to pre-buffer next track: {err:?}");
                         }
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                    output_identity,
                     device_name,
                     transport_format,
                 }) => {
@@ -439,6 +686,10 @@ pub(crate) fn spawn_playback_runtime_listener(
                         .as_ref()
                         .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
                     {
+                        continue;
+                    }
+                    let identity_guard = handle.lock_exclusive_event_identity();
+                    if !Arc::ptr_eq(&identity_guard, &output_identity) {
                         continue;
                     }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -451,6 +702,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeFailed {
+                    output_identity,
                     reason,
                     device_name,
                 }) => {
@@ -460,6 +712,10 @@ pub(crate) fn spawn_playback_runtime_listener(
                         .as_ref()
                         .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
                     {
+                        continue;
+                    }
+                    let identity_guard = handle.lock_exclusive_event_identity();
+                    if !Arc::ptr_eq(&identity_guard, &output_identity) {
                         continue;
                     }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -472,9 +728,10 @@ pub(crate) fn spawn_playback_runtime_listener(
                     });
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::ExclusiveModeReleased {
+                    output_identity,
                     device_name,
                 }) => {
-                    let mut state_guard = state.write().await;
+                    let state_guard = state.read().await;
                     if !state_guard
                         .playback_runtime
                         .as_ref()
@@ -482,55 +739,23 @@ pub(crate) fn spawn_playback_runtime_listener(
                     {
                         continue;
                     }
-                    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-                        info.exclusive_engaged = false;
-                        info.exclusive_transport_format = None;
-                    }
-                    let _ = state_guard.event_tx.send(AppEvent::AudioExclusiveReleased {
-                        device: device_name,
-                    });
-                    let retry = {
-                        let settings = state_guard
-                            .db
-                            .with_conn(|conn| {
-                                crate::db::audio_settings::load(conn).map_err(anyhow::Error::from)
-                            })
-                            .ok();
-                        let is_playing = state_guard
-                            .db
-                            .with_conn(|conn| player::load_state(conn).map(|s| s.is_playing))
-                            .unwrap_or(false);
-                        let runtime = state_guard
-                            .playback_runtime
-                            .as_ref()
-                            .map(|runtime| runtime.handle.clone());
-                        settings.and_then(|settings| {
-                            if should_retry_exclusive_release(is_playing, settings.exclusive_mode) {
-                                runtime.map(|runtime| {
-                                    (
-                                        runtime,
-                                        runtime_output_settings_from_audio_settings(&settings),
-                                    )
-                                })
-                            } else {
-                                None
-                            }
-                        })
+                    // Reject old releases cheaply, but never hold the output
+                    // publication mutex while waiting for SQLite. The actor
+                    // must remain able to retire an output during that wait.
+                    let is_current_output = {
+                        let identity_guard = handle.lock_exclusive_event_identity();
+                        Arc::ptr_eq(&identity_guard, &output_identity)
                     };
-                    // Sending is synchronous. Keep the validated runtime
-                    // current until its recovery command has been queued.
-                    if let Some((runtime, output)) = retry
-                        && let Err(error) = runtime.device_swap(
-                            output.device,
-                            output.exclusive_mode,
-                            output.sample_rate_follow,
-                            None,
-                            output.exclusive_release_grace_secs,
-                            output.exclusive_latency_mode,
-                        )
-                    {
-                        warn!("Failed to recover released WASAPI exclusive stream: {error}");
+                    if !is_current_output {
+                        continue;
                     }
+                    let db = state_guard.db.clone();
+                    drop(state_guard);
+                    recovery.request(ExclusiveRecoveryRequest {
+                        identity: output_identity,
+                        device_name,
+                        db,
+                    });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!("Playback runtime listener lagged by {skipped} events");
@@ -541,17 +766,36 @@ pub(crate) fn spawn_playback_runtime_listener(
     })
 }
 
+fn near_end_runtime_is_current(
+    state: &crate::AppState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    track_id: i64,
+    generation: u64,
+) -> bool {
+    state
+        .playback_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+        && current_playback_generation(state) == generation
+        && state
+            .playback_runtime_info
+            .as_ref()
+            .and_then(|info| info.active_track_id)
+            == Some(track_id)
+}
+
 /// Peek at what would play next without advancing the queue, then send `PrepareNext` to the
 /// runtime so it can pre-decode the track and swap it in gaplessly when the current one ends.
 pub(crate) async fn handle_near_end(
     state: SharedState,
     current_track_id: i64,
     generation: u64,
+    handle: playback_runtime::PlaybackRuntimeHandle,
 ) -> anyhow::Result<bool> {
     let mut skipped = false;
     let mut result = Ok(false);
     for _ in 0..PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
-        match prepare_near_end_once(state.clone(), current_track_id, generation).await {
+        match prepare_near_end_once(state.clone(), current_track_id, generation, &handle).await {
             Ok(NearEndPreparationOutcome::SkippedUnavailable) => {
                 skipped = true;
                 result = Ok(true);
@@ -580,19 +824,11 @@ pub(crate) async fn prepare_near_end_once(
     state: SharedState,
     current_track_id: i64,
     generation: u64,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
 ) -> anyhow::Result<NearEndPreparationOutcome> {
-    let (next_track, expected_pair, runtime_handle, crossfade_ms) = {
+    let (next_track, expected_pair, crossfade_ms) = {
         let state_guard = state.read().await;
-
-        // Guard: only proceed if the current track is still the one that fired NearEnd.
-        let active_id = state_guard
-            .playback_runtime_info
-            .as_ref()
-            .and_then(|info| info.active_track_id);
-        if active_id != Some(current_track_id) {
-            return Ok(NearEndPreparationOutcome::Idle);
-        }
-        if current_playback_generation(&state_guard) != generation {
+        if !near_end_runtime_is_current(&state_guard, handle, current_track_id, generation) {
             return Ok(NearEndPreparationOutcome::Idle);
         }
 
@@ -604,10 +840,6 @@ pub(crate) async fn prepare_near_end_once(
                 crate::playback::dj_lookahead::load_dj_lookahead_pair(conn)?,
             ))
         })?;
-        let handle = state_guard
-            .playback_runtime
-            .as_ref()
-            .map(|r| r.handle.clone());
         let crossfade = state_guard.db.with_conn(|conn| {
             conn.query_row(
                 "SELECT crossfade_ms FROM playback_state WHERE id = 1",
@@ -617,10 +849,10 @@ pub(crate) async fn prepare_near_end_once(
             .map_err(anyhow::Error::from)
         })?;
 
-        (next, pair, handle, crossfade)
+        (next, pair, crossfade)
     };
 
-    let (Some(next), Some(handle)) = (next_track, runtime_handle) else {
+    let Some(next) = next_track else {
         return Ok(NearEndPreparationOutcome::Idle);
     };
     if matches!(
@@ -631,13 +863,20 @@ pub(crate) async fn prepare_near_end_once(
         return Ok(NearEndPreparationOutcome::Idle);
     }
     let prebuffer_key = crate::NextPrebufferKey {
+        runtime_identity: handle.runtime_identity(),
         current_track_id,
         next_track_id: next.id,
         generation,
     };
     {
         let mut state_guard = state.write().await;
-        if !claim_next_prebuffer_slot(&mut state_guard.next_prebuffer_inflight, prebuffer_key) {
+        if !near_end_runtime_is_current(&state_guard, handle, current_track_id, generation) {
+            return Ok(NearEndPreparationOutcome::Idle);
+        }
+        if !claim_next_prebuffer_slot(
+            &mut state_guard.next_prebuffer_inflight,
+            prebuffer_key.clone(),
+        ) {
             return Ok(NearEndPreparationOutcome::Idle);
         }
     }
@@ -648,7 +887,7 @@ pub(crate) async fn prepare_near_end_once(
         generation,
         expected_pair,
         next,
-        handle,
+        handle.clone(),
         crossfade_ms,
     )
     .await;
@@ -674,6 +913,9 @@ pub(crate) async fn handle_near_end_prebuffer_next(
     handle: playback_runtime::PlaybackRuntimeHandle,
     crossfade_ms: i32,
 ) -> anyhow::Result<bool> {
+    if !near_end_runtime_is_current(&*state.read().await, &handle, current_track_id, generation) {
+        return Ok(false);
+    }
     // Resolve the stream URL for the next track (we need a live access token).
     let user_quality = current_user_audio_quality(&state).await;
     let stream_request = match player::build_tidal_stream_request(&next, user_quality.clone()) {
@@ -724,6 +966,9 @@ pub(crate) async fn handle_near_end_prebuffer_next(
 
     {
         let state_guard = state.read().await;
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
         let runtime_token = state_guard
             .playback_runtime
             .as_ref()
@@ -764,10 +1009,13 @@ pub(crate) async fn handle_near_end_prebuffer_next(
         }
     }
 
-    // If sample_rate_follow is enabled and the next track's rate differs from current,
-    // rebuild the output device at the new rate before PrepareNext.
+    // Native format changes belong at track start. Prebuffering must leave
+    // the outgoing stream's format alone, including when rate metadata is absent.
     {
         let state_guard = state.read().await;
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
         if let (Some(stream), Some(info)) =
             (stream_info.as_ref(), &state_guard.playback_runtime_info)
         {
@@ -779,8 +1027,8 @@ pub(crate) async fn handle_near_end_prebuffer_next(
                 .ok();
             if let Some(settings) = audio_settings
                 && settings.sample_rate_follow
-                && let Some(next_rate) = stream.sample_rate
             {
+                let next_rate = stream.sample_rate.filter(|rate| *rate > 0);
                 let current_rate = info.sample_rate;
                 let current_bit_depth = state_guard
                     .current_stream_display
@@ -790,7 +1038,7 @@ pub(crate) async fn handle_near_end_prebuffer_next(
                     settings.exclusive_mode,
                     settings.sample_rate_follow,
                     current_rate,
-                    Some(next_rate),
+                    next_rate,
                     current_bit_depth,
                     stream.bit_depth,
                 ) {
@@ -801,33 +1049,18 @@ pub(crate) async fn handle_near_end_prebuffer_next(
                         .bit_depth
                         .map(|depth| depth.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
+                    let next_rate_label = next_rate
+                        .map(|rate| rate.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
                     info!(
                         "Skipping pre-buffer for next track {}: sample-rate-follow will switch native format from {} Hz/{} bit to {} Hz/{} bit at track start",
-                        next.id, current_rate, current_depth_label, next_rate, next_depth_label
+                        next.id,
+                        current_rate,
+                        current_depth_label,
+                        next_rate_label,
+                        next_depth_label
                     );
                     return Ok(false);
-                }
-                if next_rate as u32 != current_rate {
-                    let device_sel = match settings.output_device {
-                        Some(device_id) => {
-                            playback_runtime::OutputDeviceSelection::Named(device_id)
-                        }
-                        None => playback_runtime::OutputDeviceSelection::Default,
-                    };
-                    // StreamInfo.sample_rate is Option<i32>; cast is safe (fits in u32).
-                    if let Err(e) = handle.device_swap(
-                        device_sel,
-                        settings.exclusive_mode,
-                        settings.sample_rate_follow,
-                        Some(next_rate as u32),
-                        settings.exclusive_release_grace_secs,
-                        settings.exclusive_latency_mode,
-                    ) {
-                        warn!(
-                            "Failed to rebuild stream for next track {} at {} Hz: {e}",
-                            next.id, next_rate
-                        );
-                    }
                 }
             }
         }
@@ -847,6 +1080,9 @@ pub(crate) async fn handle_near_end_prebuffer_next(
     .with_generation(generation);
     let (job, lookahead_start) = {
         let state_guard = state.read().await;
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
         let channels = state_guard
             .playback_runtime_info
             .as_ref()
@@ -876,37 +1112,39 @@ pub(crate) async fn handle_near_end_prebuffer_next(
 
     {
         let state_guard = state.read().await;
-        let active_id = state_guard
-            .playback_runtime_info
-            .as_ref()
-            .and_then(|info| info.active_track_id);
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
         let db_current = state_guard
             .db
             .with_conn(player::current_track_id)
             .unwrap_or(None);
-        if active_id != Some(current_track_id) || db_current != Some(current_track_id) {
-            return Ok(false);
-        }
-        if current_playback_generation(&state_guard) != generation {
+        if db_current != Some(current_track_id) {
             return Ok(false);
         }
     }
-
-    if job.prepared_transition.is_some()
-        && let Some(start) = lookahead_start
     {
-        let _ = start.dispatch(&handle);
+        let mut state_guard = state.write().await;
+        if !near_end_runtime_is_current(&state_guard, &handle, current_track_id, generation) {
+            return Ok(false);
+        }
+        if job.prepared_transition.is_some()
+            && let Some(start) = lookahead_start.as_ref()
+        {
+            let _ = start.dispatch(&handle);
+        }
+        handle.prepare_next(job)?;
+        if let Some(ref si) = stream_info {
+            state_guard.pending_stream_display = Some(crate::StreamDisplayInfo {
+                audio_quality: si.audio_quality.clone(),
+                sample_rate: si.sample_rate.filter(|rate| *rate > 0),
+                bit_depth: si.bit_depth,
+            });
+        }
+    }
+    if lookahead_start.is_some() {
         queue_missing_dj_profiles_after_pair_change(state.clone(), "prepared_next_transition")
             .await;
-    }
-    let _ = handle.prepare_next(job);
-    if let Some(ref si) = stream_info {
-        let mut state_guard = state.write().await;
-        state_guard.pending_stream_display = Some(crate::StreamDisplayInfo {
-            audio_quality: si.audio_quality.clone(),
-            sample_rate: si.sample_rate,
-            bit_depth: si.bit_depth,
-        });
     }
     info!("Pre-buffering next track: {} (id {})", next.title, next.id);
     Ok(false)
@@ -916,7 +1154,7 @@ pub(crate) fn claim_next_prebuffer_slot(
     slot: &mut Option<crate::NextPrebufferKey>,
     key: crate::NextPrebufferKey,
 ) -> bool {
-    if *slot == Some(key) {
+    if slot.as_ref() == Some(&key) {
         return false;
     }
     *slot = Some(key);
@@ -927,7 +1165,7 @@ pub(crate) fn release_next_prebuffer_slot(
     slot: &mut Option<crate::NextPrebufferKey>,
     key: crate::NextPrebufferKey,
 ) {
-    if *slot == Some(key) {
+    if slot.as_ref() == Some(&key) {
         *slot = None;
     }
 }
@@ -994,6 +1232,18 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
     snapshot: &player::PlaybackSnapshot,
     generation: u64,
 ) -> anyhow::Result<()> {
+    switch_runtime_to_snapshot_current_for_owner(state, snapshot, generation, None).await
+}
+
+async fn switch_runtime_to_snapshot_current_for_owner(
+    state: &SharedState,
+    snapshot: &player::PlaybackSnapshot,
+    generation: u64,
+    expected_owner: Option<(
+        &playback_runtime::PlaybackRuntimeHandle,
+        &Arc<std::sync::atomic::AtomicU64>,
+    )>,
+) -> anyhow::Result<()> {
     // A track whose TIDAL asset won't resolve (pulled from the catalog, 4005
     // "asset not ready", or a hard rejection) used to wedge playback here: the
     // resolve error propagated up as fatal and the runtime sat frozen on a dead
@@ -1025,6 +1275,21 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
                 .await;
             }
             let mut state_guard = state.write().await;
+            let source_guard =
+                expected_owner.map(|(runtime, _)| runtime.lock_playback_source_identity());
+            if current_playback_generation(&state_guard) != generation
+                || expected_owner.is_some_and(|(runtime, expected_source)| {
+                    !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                        || source_guard
+                            .as_ref()
+                            .is_none_or(|current| !Arc::ptr_eq(current, expected_source))
+                })
+            {
+                return Ok(());
+            }
             if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                 info.active_track_id = None;
             }
@@ -1034,48 +1299,71 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
         };
 
         let user_quality = current_user_audio_quality(state).await;
-        let runtime_handle = ensure_playback_runtime_for_track(state, &track)
-            .await
-            .map_err(|(status, body)| {
-                anyhow::anyhow!("playback runtime unavailable ({status}): {}", body.0)
-            })?;
+        let runtime_handle = match expected_owner {
+            Some((runtime, _)) => runtime.clone(),
+            None => ensure_playback_runtime_for_track(state, &track)
+                .await
+                .map_err(|(status, body)| {
+                    anyhow::anyhow!("playback runtime unavailable ({status}): {}", body.0)
+                })?,
+        };
         let prepared_status = runtime_handle.track_status(track.id, generation);
         if matches!(
             prepared_status,
             playback_runtime::PlaybackTrackStatus::Active
                 | playback_runtime::PlaybackTrackStatus::Prepared
         ) {
-            let job = player::build_playback_preparation(
-                &track,
-                None,
-                effective_crossfade_ms(state, snapshot.state.crossfade_ms).await,
-                user_quality,
-            )
-            .with_generation(generation)
-            .with_start_paused(!transport_intent_is_playing(state).await);
-            runtime_handle.switch_to(job).map_err(|error| {
-                tracing::warn!(
-                    target: "noor.playback.runtime",
-                    event = "runtime_snapshot_switch_failed",
-                    generation,
-                    track_id = track.id,
-                    ?current_queue_item_id,
-                    queue_len,
-                    runtime_track_status = ?prepared_status,
-                    stream_resolved = false,
-                    error = %error,
-                    "failed to switch runtime to prepared snapshot current track"
-                );
-                error
-            })?;
+            let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
             {
                 let mut state_guard = state.write().await;
+                let source_guard =
+                    expected_owner.map(|(runtime, _)| runtime.lock_playback_source_identity());
+                if current_playback_generation(&state_guard) != generation
+                    || !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&runtime_handle))
+                    || expected_owner.is_some_and(|(_, expected_source)| {
+                        source_guard
+                            .as_ref()
+                            .is_none_or(|current| !Arc::ptr_eq(current, expected_source))
+                    })
+                {
+                    return Ok(());
+                }
+                let is_playing = transport_intent_is_playing(&state_guard);
+                let job =
+                    player::build_playback_preparation(&track, None, crossfade_ms, user_quality)
+                        .with_generation(generation)
+                        .with_start_paused(!is_playing);
+                runtime_handle.switch_to(job).map_err(|error| {
+                    tracing::warn!(
+                        target: "noor.playback.runtime",
+                        event = "runtime_snapshot_switch_failed",
+                        generation,
+                        track_id = track.id,
+                        ?current_queue_item_id,
+                        queue_len,
+                        runtime_track_status = ?prepared_status,
+                        stream_resolved = false,
+                        error = %error,
+                        "failed to switch runtime to prepared snapshot current track"
+                    );
+                    error
+                })?;
                 if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                     info.active_track_id = Some(track.id);
                     info.last_error = None;
                 }
                 if let Some(pending) = state_guard.pending_stream_display.take() {
                     state_guard.current_stream_display = Some(pending);
+                }
+                if expected_owner.is_some() {
+                    let _ = state_guard
+                        .event_tx
+                        .send(AppEvent::TrackChanged { track_id: track.id });
+                    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+                    let _ = state_guard.event_tx.send(AppEvent::QueueUpdated);
                 }
             }
             tracing::info!(
@@ -1091,22 +1379,26 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
             );
         } else {
             let crossfade_ms = effective_crossfade_ms(state, snapshot.state.crossfade_ms).await;
-            match start_track(
-                state,
-                StartRequest {
-                    track: &track,
-                    generation: Generation::Claimed(generation),
-                    dispatch: Dispatch::Switch,
-                    crossfade_ms,
-                },
-            )
-            .await
-            {
+            let request = StartRequest {
+                track: &track,
+                generation: Generation::Claimed(generation),
+                dispatch: Dispatch::Switch,
+                crossfade_ms,
+            };
+            let started = match expected_owner {
+                Some((runtime, source)) => {
+                    start_track_for_runtime(state, request, runtime, source).await
+                }
+                None => start_track(state, request).await,
+            };
+            match started {
                 Ok(_) => {
-                    let mut state_guard = state.write().await;
-                    if let Some(info) = state_guard.playback_runtime_info.as_mut() {
-                        info.active_track_id = Some(track.id);
-                        info.last_error = None;
+                    if expected_owner.is_none() {
+                        let mut state_guard = state.write().await;
+                        if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                            info.active_track_id = Some(track.id);
+                            info.last_error = None;
+                        }
                     }
                 }
                 Err(StartError::Superseded) => return Ok(()),
@@ -1214,6 +1506,11 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
             .await;
         }
 
+        if expected_owner.is_some() {
+            // Owned dispatch already published while its source/state guards
+            // were held. A later publication could overwrite a replacement.
+            return Ok(());
+        }
         let state_guard = state.read().await;
         let _ = state_guard
             .event_tx
@@ -1231,10 +1528,43 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
 /// recoverable (sleep + retry the same track once); any other failure is
 /// track-specific (skip to the next item). Only gives up when the continuation
 /// is exhausted or MAX_CONSEC_FAILURES distinct tracks fail in a row.
+#[cfg(test)]
 pub(crate) async fn handle_runtime_finished(
     state: SharedState,
     finished_track_id: i64,
     generation: u64,
+) -> anyhow::Result<()> {
+    handle_runtime_finished_for_owner(state, finished_track_id, generation, None, None).await
+}
+
+fn runtime_finish_owner_is_current(
+    state_guard: &crate::AppState,
+    generation: u64,
+    expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    expected_source: Option<&Arc<std::sync::atomic::AtomicU64>>,
+) -> bool {
+    if current_playback_generation(state_guard) != generation {
+        return false;
+    }
+    match (expected_runtime, expected_source) {
+        (None, None) => true,
+        (Some(runtime), Some(source_identity)) => {
+            state_guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                && Arc::ptr_eq(&runtime.lock_playback_source_identity(), source_identity)
+        }
+        _ => false,
+    }
+}
+
+async fn handle_runtime_finished_for_owner(
+    state: SharedState,
+    finished_track_id: i64,
+    generation: u64,
+    expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    expected_source: Option<&Arc<std::sync::atomic::AtomicU64>>,
 ) -> anyhow::Result<()> {
     {
         let state_guard = state.read().await;
@@ -1253,6 +1583,21 @@ pub(crate) async fn handle_runtime_finished(
             );
             return Ok(());
         }
+        if !runtime_finish_owner_is_current(
+            &state_guard,
+            generation,
+            expected_runtime,
+            expected_source,
+        ) {
+            tracing::warn!(
+                target: "noor.playback.advance",
+                event = "runtime_finished_stale_source",
+                finished_track_id,
+                generation,
+                "end-of-track advance dropped: playback source changed; queue left unchanged"
+            );
+            return Ok(());
+        }
     }
     tracing::info!(
         target: "noor.playback.advance",
@@ -1266,7 +1611,36 @@ pub(crate) async fn handle_runtime_finished(
     }
 
     let snapshot = {
+        // Serialize generation claims with queue mutation without excluding
+        // state readers used to retrieve pause/resume controls during DB waits.
+        let admission = state.read().await.playback_generation_admission.clone();
+        let _admission = admission.lock().await;
         let state_guard = state.read().await;
+        // Keep the source lock while the queue row is advanced. A same-runtime
+        // decoder restart uses this mutex before replacing its identity.
+        let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
+        let owner_is_current = current_playback_generation(&state_guard) == generation
+            && match (expected_runtime, expected_source, source_guard.as_ref()) {
+                (None, None, None) => true,
+                (Some(runtime), Some(expected_source), Some(current_source)) => {
+                    state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                        && Arc::ptr_eq(current_source, expected_source)
+                }
+                _ => false,
+            };
+        if !owner_is_current {
+            tracing::warn!(
+                target: "noor.playback.advance",
+                event = "runtime_finished_stale_source_before_queue_advance",
+                finished_track_id,
+                generation,
+                "end-of-track advance dropped before queue mutation: playback source changed"
+            );
+            return Ok(());
+        }
         let cleared = recently_cleared(&state_guard);
         state_guard.db.with_conn(|conn| {
             let current_track_id = player::current_track_id(conn)?;
@@ -1289,6 +1663,24 @@ pub(crate) async fn handle_runtime_finished(
 
     let Some(snapshot) = snapshot else {
         let mut state_guard = state.write().await;
+        // Mismatch cleanup can wait behind another writer. Revalidate while
+        // holding the source identity through the session/history mutation.
+        let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
+        let owner_is_current = current_playback_generation(&state_guard) == generation
+            && match (expected_runtime, expected_source, source_guard.as_ref()) {
+                (None, None, None) => true,
+                (Some(runtime), Some(expected_source), Some(current_source)) => {
+                    state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                        && Arc::ptr_eq(current_source, expected_source)
+                }
+                _ => false,
+            };
+        if !owner_is_current {
+            return Ok(());
+        }
         let track_id_for_event = match flush_active_listen_session_locked(
             &mut state_guard,
             chrono::Utc::now(),
@@ -1308,15 +1700,25 @@ pub(crate) async fn handle_runtime_finished(
         return Ok(());
     };
 
-    let snapshot =
-        resolve_or_skip_pending_current(&state, snapshot, generation, "runtime_finished").await?;
-    if !playback_generation_is_current(&state, generation).await {
+    let snapshot = resolve_or_skip_pending_current_for_owner(
+        &state,
+        snapshot,
+        generation,
+        "runtime_finished",
+        expected_runtime.zip(expected_source),
+    )
+    .await?;
+    let owner_is_current = {
+        let state_guard = state.read().await;
+        runtime_finish_owner_is_current(&state_guard, generation, expected_runtime, expected_source)
+    };
+    if !owner_is_current {
         tracing::warn!(
             target: "noor.playback.advance",
             event = "runtime_finished_stale_after_resolve",
             finished_track_id,
             generation,
-            "end-of-track advance dropped after pending resolve: generation moved on"
+            "end-of-track advance dropped after pending resolve: playback ownership changed"
         );
         return Ok(());
     }
@@ -1325,8 +1727,39 @@ pub(crate) async fn handle_runtime_finished(
     } else {
         Some(player::ListenSessionEndReason::QueueEnded)
     };
-    sync_session_after_snapshot(&state, &snapshot, end_reason).await;
-    switch_runtime_to_snapshot_current(&state, &snapshot, generation).await
+    if !sync_session_after_snapshot_for_owner(
+        &state,
+        &snapshot,
+        end_reason,
+        expected_runtime
+            .zip(expected_source)
+            .map(|(runtime, source)| (generation, runtime, source)),
+    )
+    .await
+    {
+        return Ok(());
+    }
+    let owner_is_current = {
+        let state_guard = state.read().await;
+        runtime_finish_owner_is_current(&state_guard, generation, expected_runtime, expected_source)
+    };
+    if !owner_is_current {
+        tracing::warn!(
+            target: "noor.playback.advance",
+            event = "runtime_finished_stale_after_session_sync",
+            finished_track_id,
+            generation,
+            "end-of-track runtime switch dropped after session sync: playback ownership changed"
+        );
+        return Ok(());
+    }
+    switch_runtime_to_snapshot_current_for_owner(
+        &state,
+        &snapshot,
+        generation,
+        expected_runtime.zip(expected_source),
+    )
+    .await
 }
 
 pub(crate) async fn mark_armed_dj_transition_missed_if_needed(
@@ -1396,13 +1829,23 @@ pub(crate) async fn mark_armed_dj_transition_manual_seek_suppressed_if_needed(
     Ok(())
 }
 
-pub(crate) async fn handle_runtime_finished_with_retry(
+async fn handle_runtime_finished_with_retry_for_owner(
     state: SharedState,
     finished_track_id: i64,
     generation: u64,
+    expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    expected_source: Option<&Arc<std::sync::atomic::AtomicU64>>,
 ) -> anyhow::Result<()> {
     for attempt in 0..=PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT {
-        match handle_runtime_finished(state.clone(), finished_track_id, generation).await {
+        match handle_runtime_finished_for_owner(
+            state.clone(),
+            finished_track_id,
+            generation,
+            expected_runtime,
+            expected_source,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(error)
                 if sqlite_database_locked(&error)
@@ -1437,6 +1880,8 @@ pub(crate) fn runtime_track_error_is_retryable(message: &str) -> bool {
 
 pub(crate) async fn handle_runtime_track_error(
     state: SharedState,
+    expected_runtime: &playback_runtime::PlaybackRuntimeHandle,
+    expected_source: &Arc<std::sync::atomic::AtomicU64>,
     failed_track_id: i64,
     generation: u64,
     message: &str,
@@ -1444,7 +1889,18 @@ pub(crate) async fn handle_runtime_track_error(
     let retryable = runtime_track_error_is_retryable(message);
     let retry_already_attempted = {
         let mut state_guard = state.write().await;
-        if current_playback_generation(&state_guard) != generation {
+        // Check after taking the write guard: the emitting runtime may have
+        // been replaced while this listener waited behind another operation.
+        if current_playback_generation(&state_guard) != generation
+            || !state_guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.handle.is_same_runtime(expected_runtime))
+        {
+            return Ok(());
+        }
+        let source_guard = expected_runtime.lock_playback_source_identity();
+        if !Arc::ptr_eq(&source_guard, expected_source) {
             return Ok(());
         }
         let retry_already_attempted = state_guard
@@ -1480,10 +1936,43 @@ pub(crate) async fn handle_runtime_track_error(
     if retryable && !retry_already_attempted {
         let snapshot = {
             let state_guard = state.read().await;
+            if current_playback_generation(&state_guard) != generation
+                || !state_guard
+                    .playback_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.handle.is_same_runtime(expected_runtime))
+            {
+                return Ok(());
+            }
+            let source_guard = expected_runtime.lock_playback_source_identity();
+            if !Arc::ptr_eq(&source_guard, expected_source) {
+                return Ok(());
+            }
             state_guard.db.with_conn(player::load_snapshot)?
         };
-        match switch_runtime_to_snapshot_current(&state, &snapshot, generation).await {
-            Ok(()) => {
+        let Some(track) = snapshot
+            .state
+            .current_track
+            .as_ref()
+            .filter(|track| track.id == failed_track_id)
+        else {
+            return Ok(());
+        };
+        let crossfade_ms = effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await;
+        match start_track_for_runtime(
+            &state,
+            StartRequest {
+                track,
+                generation: Generation::Claimed(generation),
+                dispatch: Dispatch::Switch,
+                crossfade_ms,
+            },
+            expected_runtime,
+            expected_source,
+        )
+        .await
+        {
+            Ok(_) => {
                 tracing::warn!(
                     target: "noor.playback.recovery",
                     event = "runtime_track_retry_dispatched",
@@ -1494,6 +1983,7 @@ pub(crate) async fn handle_runtime_track_error(
                 );
                 return Ok(());
             }
+            Err(StartError::Superseded) => return Ok(()),
             Err(error) => {
                 tracing::warn!(
                     target: "noor.playback.recovery",
@@ -1501,7 +1991,7 @@ pub(crate) async fn handle_runtime_track_error(
                     failed_track_id,
                     generation,
                     original_error = %message,
-                    retry_error = %error,
+                    retry_error = ?error,
                     "current-row playback recovery failed; pausing without advancing"
                 );
             }
@@ -1509,19 +1999,44 @@ pub(crate) async fn handle_runtime_track_error(
     }
 
     if retryable {
-        let paused_snapshot = {
-            let state_guard = state.read().await;
-            state_guard.db.with_conn(player::pause)?
-        };
-        sync_session_after_snapshot(
-            &state,
-            &paused_snapshot,
-            Some(player::ListenSessionEndReason::Stopped),
-        )
-        .await;
-        {
-            let state_guard = state.read().await;
+        let completed = {
+            let mut state_guard = state.write().await;
+            if current_playback_generation(&state_guard) != generation
+                || !state_guard
+                    .playback_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.handle.is_same_runtime(expected_runtime))
+            {
+                return Ok(());
+            }
+            let source_guard = expected_runtime.lock_playback_source_identity();
+            if !Arc::ptr_eq(&source_guard, expected_source) {
+                return Ok(());
+            }
+            state_guard.db.with_conn(player::pause)?;
+            let outcome = flush_active_listen_session_locked(
+                &mut state_guard,
+                chrono::Utc::now(),
+                player::ListenSessionEndReason::Stopped,
+            )
+            .map_err(|error| warn!("Failed to flush exhausted-retry listen session: {error}"))
+            .ok();
+            if let Some(track_id) = outcome
+                .as_ref()
+                .and_then(|outcome| outcome.flushed_track_id)
+            {
+                let _ = state_guard
+                    .event_tx
+                    .send(AppEvent::ListenHistoryUpdated { track_id });
+            }
+            let _ = state_guard.event_tx.send(AppEvent::PlaybackFailed {
+                message: message.to_string(),
+            });
             let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+            outcome.and_then(|outcome| outcome.scrobble_completed)
+        };
+        if let Some(payload) = completed {
+            crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
         }
         tracing::warn!(
             target: "noor.playback.recovery",
@@ -1531,7 +2046,6 @@ pub(crate) async fn handle_runtime_track_error(
             error = %message,
             "transient playback recovery was exhausted; paused without advancing the queue"
         );
-        report_playback_failure(&state, message);
         return Ok(());
     }
 
@@ -1544,7 +2058,14 @@ pub(crate) async fn handle_runtime_track_error(
         "runtime track error; advancing queue"
     );
     report_playback_failure(&state, message);
-    handle_runtime_finished_with_retry(state, failed_track_id, generation).await
+    handle_runtime_finished_with_retry_for_owner(
+        state,
+        failed_track_id,
+        generation,
+        Some(expected_runtime),
+        Some(expected_source),
+    )
+    .await
 }
 
 pub(crate) async fn handle_prepared_runtime_track_error_for_runtime(
@@ -1820,33 +2341,52 @@ pub(crate) async fn handle_runtime_exit(
     exited_handle: &playback_runtime::PlaybackRuntimeHandle,
     message: Option<&str>,
 ) {
-    let removed_current_runtime = {
+    let user_message = match message {
+        Some(detail) => format!("Playback runtime stopped and will restart on resume: {detail}"),
+        None => "Playback runtime stopped and will restart on resume.".to_string(),
+    };
+    let completed = {
         let mut state_guard = state.write().await;
         let is_current = state_guard
             .playback_runtime
             .as_ref()
             .is_some_and(|runtime| runtime.handle.is_same_runtime(exited_handle));
         if !is_current {
-            false
-        } else {
-            state_guard.playback_runtime = None;
-            state_guard.playback_runtime_info = None;
-            state_guard
-                .audio_active
-                .store(false, std::sync::atomic::Ordering::Release);
-            state_guard.current_stream_display = None;
-            state_guard.pending_stream_display = None;
-            state_guard.next_prebuffer_inflight = None;
-            true
+            return;
         }
-    };
-    if !removed_current_runtime {
-        return;
-    }
-
-    let user_message = match message {
-        Some(detail) => format!("Playback runtime stopped and will restart on resume: {detail}"),
-        None => "Playback runtime stopped and will restart on resume.".to_string(),
+        // Removal, persisted intent, history and UI effects belong to this
+        // runtime. A separate lock acquisition could target its replacement.
+        state_guard.playback_runtime = None;
+        state_guard.playback_runtime_info = None;
+        state_guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Release);
+        state_guard.current_stream_display = None;
+        state_guard.pending_stream_display = None;
+        state_guard.next_prebuffer_inflight = None;
+        if let Err(error) = state_guard.db.with_conn(player::pause) {
+            warn!("Failed to persist runtime-exit pause: {error}");
+        }
+        let outcome = flush_active_listen_session_locked(
+            &mut state_guard,
+            chrono::Utc::now(),
+            player::ListenSessionEndReason::Stopped,
+        )
+        .map_err(|error| warn!("Failed to flush runtime-exit listen session: {error}"))
+        .ok();
+        if let Some(track_id) = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.flushed_track_id)
+        {
+            let _ = state_guard
+                .event_tx
+                .send(AppEvent::ListenHistoryUpdated { track_id });
+        }
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackFailed {
+            message: user_message,
+        });
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        outcome.and_then(|outcome| outcome.scrobble_completed)
     };
     tracing::error!(
         target: "noor.playback.recovery",
@@ -1854,22 +2394,9 @@ pub(crate) async fn handle_runtime_exit(
         error = message.unwrap_or("runtime command loop closed"),
         "discarded dead playback runtime handle"
     );
-    report_playback_failure(state, &user_message);
-
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard.db.with_conn(player::pause).ok()
-    };
-    if let Some(snapshot) = snapshot {
-        sync_session_after_snapshot(
-            state,
-            &snapshot,
-            Some(player::ListenSessionEndReason::Stopped),
-        )
-        .await;
+    if let Some(payload) = completed {
+        crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
     }
-    let state_guard = state.read().await;
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
 }
 
 /// Broadcast a "we skipped this track" notice so the UI can toast which track

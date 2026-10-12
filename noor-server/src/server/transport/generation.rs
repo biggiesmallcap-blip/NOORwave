@@ -11,6 +11,8 @@ pub(crate) fn current(state: &crate::AppState) -> u64 {
 }
 
 pub(crate) async fn bump(state: &SharedState) -> u64 {
+    let admission = state.read().await.playback_generation_admission.clone();
+    let _admission = admission.lock().await;
     let state_guard = state.read().await;
     state_guard
         .playback_generation
@@ -32,6 +34,8 @@ pub(crate) async fn observe(state: &SharedState) -> u64 {
 /// itself a user command (a quality re-issue) claims its generation once its
 /// result is ready, and loses to any transport command that arrived meanwhile.
 pub(crate) async fn claim_if_current(state: &SharedState, observed: u64) -> Option<u64> {
+    let admission = state.read().await.playback_generation_admission.clone();
+    let _admission = admission.lock().await;
     let state_guard = state.read().await;
     state_guard
         .playback_generation

@@ -12,7 +12,30 @@ use crate::server::transport::generation::is_current as playback_generation_is_c
 use crate::services::tidal::{client::TidalClient, import as tidal_import};
 use crate::{AppEvent, SharedState};
 use rusqlite::{OptionalExtension, params};
+use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Duration;
+
+pub(crate) type PendingRuntimeOwner<'a> = (
+    &'a crate::playback::runtime::PlaybackRuntimeHandle,
+    &'a Arc<AtomicU64>,
+);
+
+async fn pending_runtime_owner_is_current(
+    state: &SharedState,
+    generation: u64,
+    expected_owner: Option<PendingRuntimeOwner<'_>>,
+) -> bool {
+    let Some((runtime, source)) = expected_owner else {
+        return true;
+    };
+    let guard = state.read().await;
+    super::generation::current(&guard) == generation
+        && guard
+            .playback_runtime
+            .as_ref()
+            .is_some_and(|current| current.handle.is_same_runtime(runtime))
+        && Arc::ptr_eq(&runtime.lock_playback_source_identity(), source)
+}
 
 pub(crate) async fn find_pending_tidal_match(
     client: &TidalClient,
@@ -400,16 +423,36 @@ pub(crate) async fn adopt_resolved_current_queue_item(
     queue_item_id: i64,
     generation: u64,
 ) -> anyhow::Result<Option<player::PlaybackSnapshot>> {
-    if !playback_generation_is_current(state, generation).await {
+    adopt_resolved_current_queue_item_for_owner(state, queue_item_id, generation, None).await
+}
+
+pub(crate) async fn adopt_resolved_current_queue_item_for_owner(
+    state: &SharedState,
+    queue_item_id: i64,
+    generation: u64,
+    expected_owner: Option<PendingRuntimeOwner<'_>>,
+) -> anyhow::Result<Option<player::PlaybackSnapshot>> {
+    // A generation admitted during the SQL write cannot undo that write.
+    // Keep validation, adoption and publication in the same admission block.
+    let admission = state.read().await.playback_generation_admission.clone();
+    let _admission = admission.lock().await;
+    let state_guard = state.read().await;
+    let source_guard = expected_owner.map(|(runtime, _)| runtime.lock_playback_source_identity());
+    if super::generation::current(&state_guard) != generation
+        || expected_owner.is_some_and(|(runtime, source)| {
+            !state_guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                || !source_guard
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, source))
+        })
+    {
         return Ok(None);
     }
 
-    let (db, event_tx) = {
-        let state_guard = state.read().await;
-        (state_guard.db.clone(), state_guard.event_tx.clone())
-    };
-
-    let adopted_track_id = db.with_conn(move |conn| {
+    let adopted = state_guard.db.with_conn(move |conn| {
         let track_id: Option<i64> = conn
             .query_row(
                 "SELECT track_id FROM queue WHERE id = ?1 AND track_id IS NOT NULL",
@@ -428,19 +471,20 @@ pub(crate) async fn adopt_resolved_current_queue_item(
                AND current_queue_item_id = ?2",
             params![track_id, queue_item_id],
         )?;
-        Ok(if updated == 1 { Some(track_id) } else { None })
+        if updated != 1 {
+            return Ok(None);
+        }
+        Ok(Some((track_id, player::load_snapshot(conn)?)))
     })?;
 
-    let Some(track_id) = adopted_track_id else {
+    let Some((track_id, snapshot)) = adopted else {
         return Ok(None);
     };
-    if !playback_generation_is_current(state, generation).await {
-        return Ok(None);
-    }
 
-    let _ = event_tx.send(AppEvent::TrackChanged { track_id });
-    let _ = event_tx.send(AppEvent::PlaybackStateChanged);
-    let snapshot = load_persisted_playback_snapshot(state).await?;
+    let _ = state_guard
+        .event_tx
+        .send(AppEvent::TrackChanged { track_id });
+    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     if snapshot.state.current_track.is_some() {
         tracing::info!(
             target: "noor.playback.resolve",
@@ -501,18 +545,59 @@ pub(crate) async fn resolve_or_skip_pending_current_previous(
     .await
 }
 
+pub(crate) async fn resolve_or_skip_pending_current_for_owner(
+    state: &SharedState,
+    snapshot: player::PlaybackSnapshot,
+    generation: u64,
+    context: &'static str,
+    expected_owner: Option<PendingRuntimeOwner<'_>>,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    resolve_or_skip_pending_current_in_direction_for_owner(
+        state,
+        snapshot,
+        generation,
+        context,
+        PendingAdvanceDirection::Next,
+        PendingGiveUp::StopPlayback,
+        expected_owner,
+    )
+    .await
+}
+
 pub(crate) async fn resolve_or_skip_pending_current_in_direction(
+    state: &SharedState,
+    snapshot: player::PlaybackSnapshot,
+    generation: u64,
+    context: &'static str,
+    direction: PendingAdvanceDirection,
+    give_up: PendingGiveUp,
+) -> anyhow::Result<player::PlaybackSnapshot> {
+    resolve_or_skip_pending_current_in_direction_for_owner(
+        state, snapshot, generation, context, direction, give_up, None,
+    )
+    .await
+}
+
+async fn resolve_or_skip_pending_current_in_direction_for_owner(
     state: &SharedState,
     mut snapshot: player::PlaybackSnapshot,
     generation: u64,
     context: &'static str,
     direction: PendingAdvanceDirection,
     give_up: PendingGiveUp,
+    expected_owner: Option<PendingRuntimeOwner<'_>>,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
     let mut skipped = 0usize;
     let mut busy_waits = 0usize;
 
     loop {
+        // A busy-resolver wait can outlive a same-generation decoder. Keep
+        // that terminal owner through the loop and recheck at adoption too.
+        let owner_is_current =
+            pending_runtime_owner_is_current(state, generation, expected_owner).await;
+        if !owner_is_current {
+            return load_persisted_playback_snapshot(state).await;
+        }
         if snapshot.state.current_track.is_some() || snapshot.state.current_queue_item_id.is_none()
         {
             return Ok(snapshot);
@@ -544,10 +629,23 @@ pub(crate) async fn resolve_or_skip_pending_current_in_direction(
             return load_persisted_playback_snapshot(state).await;
         }
 
-        if let Some(adopted_snapshot) =
-            adopt_resolved_current_queue_item(state, queue_item_id, generation).await?
-        {
+        let adopted = match expected_owner {
+            Some(owner) => {
+                adopt_resolved_current_queue_item_for_owner(
+                    state,
+                    queue_item_id,
+                    generation,
+                    Some(owner),
+                )
+                .await?
+            }
+            None => adopt_resolved_current_queue_item(state, queue_item_id, generation).await?,
+        };
+        if let Some(adopted_snapshot) = adopted {
             return Ok(adopted_snapshot);
+        }
+        if !pending_runtime_owner_is_current(state, generation, expected_owner).await {
+            return load_persisted_playback_snapshot(state).await;
         }
 
         if busy_waits < PLAYBACK_PENDING_BUSY_RETRY_LIMIT

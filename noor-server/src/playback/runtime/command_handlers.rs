@@ -1038,18 +1038,27 @@ pub(super) fn handle_track_terminal(
                     offset_source,
                 );
             } else {
+                let Some(source_identity) = state
+                    .engine
+                    .as_ref()
+                    .map(|engine| Arc::clone(&engine.shared.handoff_elapsed_samples))
+                else {
+                    return ControlFlow::Continue(());
+                };
                 stop_current_engine(state);
                 match outcome {
                     PlaybackTerminalReason::Finished => {
                         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
                             track_id,
                             generation,
+                            source_identity,
                         });
                     }
                     PlaybackTerminalReason::Error(message) => {
                         let _ = event_tx.send(PlaybackRuntimeEvent::TrackError {
                             track_id,
                             generation,
+                            source_identity,
                             message,
                         });
                     }
@@ -1249,7 +1258,21 @@ pub(super) fn handle_device_swap(
     desired_sample_rate: Option<u32>,
     exclusive_release_grace_secs: u32,
     exclusive_latency_mode: ExclusiveLatencyMode,
+    _released_output_identity: Option<Arc<()>>,
 ) -> ControlFlow<()> {
+    // Recovery settings can arrive after a pause or a newer user swap.
+    // Validate actor intent as well as identity before touching the device.
+    // Ordinary user swaps remain valid while paused.
+    #[cfg(target_os = "windows")]
+    if _released_output_identity.as_ref().is_some_and(|identity| {
+        state.user_paused || !state.exclusive_sink.is_current_event_identity(identity)
+    }) {
+        return ControlFlow::Continue(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    if _released_output_identity.is_some() {
+        return ControlFlow::Continue(());
+    }
     let LoopEnv {
         command_tx,
         event_tx,
@@ -1367,7 +1390,7 @@ pub(super) fn handle_device_swap(
         #[cfg(target_os = "windows")]
         {
             refresh_exclusive_sources(state);
-            state.exclusive_sink.stream = None;
+            state.exclusive_sink.retire_stream();
             match ensure_exclusive_sink_started(
                 state,
                 &new_device,

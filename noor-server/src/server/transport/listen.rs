@@ -3,6 +3,7 @@
 use crate::db::queries;
 use crate::playback::{player, queue};
 use crate::{AppEvent, SharedState};
+use std::sync::{Arc, atomic::AtomicU64};
 use tracing::error;
 
 pub(crate) async fn record_transition_if_changed(
@@ -60,11 +61,67 @@ pub(crate) async fn sync_session_after_snapshot(
     snapshot: &player::PlaybackSnapshot,
     end_reason: Option<player::ListenSessionEndReason>,
 ) {
+    sync_session_after_snapshot_for_owner(state, snapshot, end_reason, None).await;
+}
+
+pub(crate) async fn sync_session_after_snapshot_for_owner(
+    state: &SharedState,
+    snapshot: &player::PlaybackSnapshot,
+    end_reason: Option<player::ListenSessionEndReason>,
+    expected_owner: Option<(
+        u64,
+        &crate::playback::runtime::PlaybackRuntimeHandle,
+        &Arc<AtomicU64>,
+    )>,
+) -> bool {
     // Capture both the flush outcome and a "now playing" payload (if a new
     // track just started) inside the write lock, then dispatch the Last.fm
     // calls outside the lock so the spawned tasks never contend with us.
-    let (flushed_track_id, scrobble_completed_payload, now_playing_payload) = {
+    let (scrobble_completed_payload, now_playing_payload) = {
         let mut state = state.write().await;
+        // The writer can wait behind a replacement. Keep decoder ownership
+        // stable through session/history mutation and its notification.
+        let source_guard =
+            expected_owner.map(|(_, runtime, _)| runtime.lock_playback_source_identity());
+        if let Some((generation, runtime, expected_source)) = expected_owner
+            && (super::generation::current(&state) != generation
+                || !state
+                    .playback_runtime
+                    .as_ref()
+                    .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                || !source_guard
+                    .as_ref()
+                    .is_some_and(|source| Arc::ptr_eq(source, expected_source)))
+        {
+            return false;
+        }
+        let mut is_playing = snapshot.state.is_playing;
+        if expected_owner.is_some() {
+            // Pause preserves generation and source identity. Read intent and
+            // the queue anchor at the mutation boundary rather than replaying
+            // the snapshot captured before this writer wait.
+            let anchor = state.db.with_conn(|conn| {
+                conn.query_row(
+                    "SELECT current_track_id, current_queue_item_id, is_playing FROM playback_state WHERE id=1",
+                    [],
+                    |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, bool>(2)?)),
+                ).map_err(Into::into)
+            });
+            match anchor {
+                Ok((track_id, queue_item_id, playing)) => {
+                    if track_id != snapshot.state.current_track.as_ref().map(|track| track.id)
+                        || queue_item_id != snapshot.state.current_queue_item_id
+                    {
+                        return false;
+                    }
+                    is_playing = playing;
+                }
+                Err(error) => {
+                    error!("failed to validate terminal listen-session anchor: {error}");
+                    return false;
+                }
+            }
+        }
         let now = chrono::Utc::now();
 
         let outcome = if let Some(reason) = end_reason {
@@ -84,7 +141,7 @@ pub(crate) async fn sync_session_after_snapshot(
         };
 
         let mut now_playing: Option<crate::services::scrobbling::ScrobblePayload> = None;
-        if snapshot.state.is_playing {
+        if is_playing {
             if let Some(track) = snapshot.state.current_track.as_ref() {
                 let source = state
                     .db
@@ -119,19 +176,13 @@ pub(crate) async fn sync_session_after_snapshot(
             state.active_listen_session = None;
         }
 
-        (
-            outcome.flushed_track_id,
-            outcome.scrobble_completed,
-            now_playing,
-        )
+        if let Some(track_id) = outcome.flushed_track_id {
+            let _ = state
+                .event_tx
+                .send(AppEvent::ListenHistoryUpdated { track_id });
+        }
+        (outcome.scrobble_completed, now_playing)
     };
-
-    if let Some(track_id) = flushed_track_id {
-        let state_guard = state.read().await;
-        let _ = state_guard
-            .event_tx
-            .send(AppEvent::ListenHistoryUpdated { track_id });
-    }
 
     if let Some(payload) = scrobble_completed_payload {
         crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
@@ -139,6 +190,7 @@ pub(crate) async fn sync_session_after_snapshot(
     if let Some(payload) = now_playing_payload {
         crate::services::scrobbling::enqueue_now_playing(state.clone(), payload).await;
     }
+    true
 }
 
 pub(crate) async fn resume_session_after_snapshot(

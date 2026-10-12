@@ -219,6 +219,7 @@ pub(super) fn promote_next_to_active(
     *state.handoff_elapsed_source.lock().unwrap() =
         Arc::clone(&next.shared.handoff_elapsed_samples);
 
+    let source_identity = Arc::clone(&next.shared.handoff_elapsed_samples);
     let outgoing = state.engine.take();
     state.engine = Some(next);
 
@@ -230,6 +231,8 @@ pub(super) fn promote_next_to_active(
     if let Some(outgoing) = outgoing {
         let outgoing_id = outgoing.track_id;
         let outgoing_generation = outgoing.generation;
+        // Promotion already installed the incoming deck. Its identity owns
+        // the pending queue handoff, even though the outgoing track finished.
         let actual_start_ms = actual_start_ms_override.unwrap_or_else(|| {
             track_position_ms(
                 &outgoing.shared,
@@ -279,6 +282,7 @@ pub(super) fn promote_next_to_active(
         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
             track_id: outgoing_id,
             generation: outgoing_generation,
+            source_identity,
         });
     }
     #[cfg(target_os = "windows")]
@@ -335,6 +339,7 @@ pub(super) fn promote_prepared_at_boundary(
     *state.handoff_elapsed_source.lock().unwrap() =
         Arc::clone(&next.shared.handoff_elapsed_samples);
 
+    let source_identity = Arc::clone(&next.shared.handoff_elapsed_samples);
     let outgoing = state.engine.take();
     state.engine = Some(next);
 
@@ -377,6 +382,7 @@ pub(super) fn promote_prepared_at_boundary(
         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
             track_id: outgoing_id,
             generation: outgoing_generation,
+            source_identity,
         });
     }
     #[cfg(target_os = "windows")]

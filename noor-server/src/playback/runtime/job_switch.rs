@@ -91,7 +91,7 @@ pub(super) fn transition_to_job(
         state.device_sample_rate = update.sample_rate;
         #[cfg(target_os = "windows")]
         if update.force_exclusive_rebuild && state.current_exclusive {
-            state.exclusive_sink.stream = None;
+            state.exclusive_sink.retire_stream();
         }
     }
 
@@ -201,7 +201,7 @@ pub(super) fn transition_to_job(
                 let job = previous.cold_restart_job(state.user_paused);
                 previous.stop();
                 let job = job?;
-                state.exclusive_sink.clear();
+                state.exclusive_sink.clear_after_failed_start();
                 state.current_exclusive = false;
                 let engine = PlaybackEngine::start(
                     config,

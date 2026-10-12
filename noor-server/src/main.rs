@@ -42,12 +42,24 @@ pub struct StreamDisplayInfo {
     pub bit_depth: Option<i32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct NextPrebufferKey {
+    pub runtime_identity: Arc<AtomicBool>,
     pub current_track_id: i64,
     pub next_track_id: i64,
     pub generation: u64,
 }
+
+impl PartialEq for NextPrebufferKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.runtime_identity, &other.runtime_identity)
+            && self.current_track_id == other.current_track_id
+            && self.next_track_id == other.next_track_id
+            && self.generation == other.generation
+    }
+}
+
+impl Eq for NextPrebufferKey {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DropPreviewRuntimeState {
@@ -124,6 +136,8 @@ pub struct AppState {
     pub playback_runtime: Option<PlaybackRuntimeState>,
     pub playback_runtime_info: Option<PlaybackRuntimeInfo>,
     pub playback_generation: Arc<AtomicU64>,
+    /// Order generation claims with queue writes without blocking control readers.
+    pub playback_generation_admission: Arc<tokio::sync::Mutex<()>>,
     pub current_stream_display: Option<StreamDisplayInfo>,
     pub pending_stream_display: Option<StreamDisplayInfo>,
     pub next_prebuffer_inflight: Option<NextPrebufferKey>,
@@ -738,6 +752,7 @@ async fn main() -> Result<()> {
         playback_runtime: None,
         playback_runtime_info: None,
         playback_generation: Arc::new(AtomicU64::new(1)),
+        playback_generation_admission: Arc::new(tokio::sync::Mutex::new(())),
         current_stream_display: None,
         pending_stream_display: None,
         next_prebuffer_inflight: None,

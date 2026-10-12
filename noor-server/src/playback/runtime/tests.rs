@@ -3540,9 +3540,19 @@ fn automatic_crossfade_promotion_emits_timing_event() {
         PlaybackRuntimeEvent::Finished {
             track_id,
             generation,
+            source_identity,
         } => {
             assert_eq!(track_id, 1);
             assert_eq!(generation, 20);
+            assert!(Arc::ptr_eq(
+                &source_identity,
+                &state
+                    .engine
+                    .as_ref()
+                    .unwrap()
+                    .shared
+                    .handoff_elapsed_samples
+            ));
         }
         other => panic!("expected finished event, got {other:?}"),
     }
@@ -3703,9 +3713,19 @@ fn boundary_fallback_promotion_emits_missed_timing_event() {
         PlaybackRuntimeEvent::Finished {
             track_id,
             generation,
+            source_identity,
         } => {
             assert_eq!(track_id, 1);
             assert_eq!(generation, 20);
+            assert!(Arc::ptr_eq(
+                &source_identity,
+                &state
+                    .engine
+                    .as_ref()
+                    .unwrap()
+                    .shared
+                    .handoff_elapsed_samples
+            ));
         }
         other => panic!("expected finished event, got {other:?}"),
     }
@@ -4209,6 +4229,7 @@ fn buffered_source_redirect_makes_handle_read_from_new_engine() {
         buffered_source: Arc::clone(&buffered_source),
         offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
 
     assert_eq!(
@@ -4251,6 +4272,7 @@ fn get_buffered_ms_returns_zero_for_invalid_device_config() {
         buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(48_000)))),
         offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
     assert_eq!(handle.get_buffered_ms(0, 2), 0);
     assert_eq!(handle.get_buffered_ms(48_000, 0), 0);
@@ -4355,6 +4377,48 @@ fn command_error_keeps_generation_and_reader_identity_after_engine_teardown() {
             assert!(Arc::ptr_eq(&source_identity, &source));
         }
         other => panic!("expected command identity, got {other:?}"),
+    }
+}
+
+#[test]
+fn track_error_keeps_failed_decoder_identity_after_engine_teardown() {
+    let mut state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(17, 7);
+    let failed_source = Arc::clone(&engine.shared.handoff_elapsed_samples);
+    let stop = engine.shared.stop_flag();
+    state.engine = Some(engine);
+    let (event_tx, mut events) = tokio::sync::broadcast::channel(8);
+    let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let _ = handle_track_terminal(
+        &mut state,
+        &event_tx,
+        &source,
+        &source,
+        &source,
+        17,
+        7,
+        stop,
+        PlaybackTerminalReason::Error("decode failed".into()),
+    );
+    assert!(state.engine.is_none());
+    match events.try_recv().unwrap() {
+        PlaybackRuntimeEvent::TrackError {
+            track_id,
+            generation,
+            source_identity,
+            message,
+        } => {
+            assert_eq!((track_id, generation), (17, 7));
+            assert_eq!(message, "decode failed");
+            assert!(Arc::ptr_eq(&source_identity, &failed_source));
+            // The payload comes from the failed deck, rather than whatever
+            // reader happens to be published when teardown finishes.
+            assert!(!Arc::ptr_eq(
+                &source_identity,
+                &state.handoff_elapsed_source.lock().unwrap()
+            ));
+        }
+        other => panic!("expected decoder error, got {other:?}"),
     }
 }
 
@@ -4928,7 +4992,7 @@ fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {
         device_sample_rate: 48_000,
         device_channels: 2,
         #[cfg(target_os = "windows")]
-        exclusive_sink: ExclusiveRuntimeSink::new(),
+        exclusive_sink: ExclusiveRuntimeSink::new(Arc::new(Mutex::new(Arc::new(())))),
         engine: None,
         next_engine: None,
         drop_preview_engine: None,
@@ -5180,6 +5244,14 @@ fn queued_terminal_from_same_job_retired_decoder_cannot_remove_replacement() {
     retired.stop();
     state.engine = Some(test_engine_with_shared(1, 7));
     let replacement = state.engine.as_ref().unwrap().shared.stop_flag();
+    let replacement_source = Arc::clone(
+        &state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .handoff_elapsed_samples,
+    );
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
     let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     if let PlaybackRuntimeCommand::TrackTerminal {
@@ -5221,13 +5293,18 @@ fn queued_terminal_from_same_job_retired_decoder_cannot_remove_replacement() {
         PlaybackTerminalReason::Finished,
     );
     assert!(state.engine.is_none());
-    assert!(matches!(
-        event_rx.try_recv().unwrap(),
+    match event_rx.try_recv().unwrap() {
         PlaybackRuntimeEvent::Finished {
-            track_id: 1,
-            generation: 7
+            track_id,
+            generation,
+            source_identity,
+        } => {
+            assert_eq!(track_id, 1);
+            assert_eq!(generation, 7);
+            assert!(Arc::ptr_eq(&source_identity, &replacement_source));
         }
-    ));
+        other => panic!("expected Finished event, got {other:?}"),
+    }
 }
 
 #[test]
@@ -5355,6 +5432,40 @@ fn missing_output_device_swap_pauses_actual_decks_and_reports_error() {
     let volume = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
     let position = Arc::new(AtomicU64::new(0));
     let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let old_release = state.exclusive_sink.retire_stream();
+    state.exclusive_sink.retire_stream();
+    let stale_env = LoopEnv {
+        config: &mut config,
+        command_tx: &command_tx,
+        event_tx: &event_tx,
+        device: &mut device,
+        output_config: &mut output_config,
+        output_sample_format: &mut sample_format,
+        volume_ctl: &volume,
+        position_samples: &position,
+        position_source: &source,
+        buffered_source: &source,
+        offset_source: &source,
+    };
+    let _ = handle_device_swap(
+        stale_env,
+        &mut state,
+        OutputDeviceSelection::Named("noor-regression-missing-endpoint".into()),
+        true,
+        false,
+        None,
+        1,
+        ExclusiveLatencyMode::Stable,
+        Some(old_release),
+    );
+    assert!(
+        !state.user_paused,
+        "superseded recovery must be discarded before resolving its device"
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "superseded recovery must not report output errors"
+    );
     let env = LoopEnv {
         config: &mut config,
         command_tx: &command_tx,
@@ -5377,6 +5488,7 @@ fn missing_output_device_swap_pauses_actual_decks_and_reports_error() {
         None,
         1,
         ExclusiveLatencyMode::Stable,
+        None,
     );
     assert!(
         state.user_paused,
@@ -5407,6 +5519,99 @@ fn missing_output_device_swap_pauses_actual_decks_and_reports_error() {
         }
         other => panic!("expected output error, got {other:?}"),
     }
+    let current_release = state.exclusive_sink.retire_stream();
+    let paused_env = LoopEnv {
+        config: &mut config,
+        command_tx: &command_tx,
+        event_tx: &event_tx,
+        device: &mut device,
+        output_config: &mut output_config,
+        output_sample_format: &mut sample_format,
+        volume_ctl: &volume,
+        position_samples: &position,
+        position_source: &source,
+        buffered_source: &source,
+        offset_source: &source,
+    };
+    let _ = handle_device_swap(
+        paused_env,
+        &mut state,
+        OutputDeviceSelection::Named("noor-regression-missing-endpoint".into()),
+        true,
+        false,
+        None,
+        1,
+        ExclusiveLatencyMode::Stable,
+        Some(Arc::clone(&current_release)),
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "automatic recovery after pause reached device validation"
+    );
+    assert!(state.user_paused);
+    let user_env = LoopEnv {
+        config: &mut config,
+        command_tx: &command_tx,
+        event_tx: &event_tx,
+        device: &mut device,
+        output_config: &mut output_config,
+        output_sample_format: &mut sample_format,
+        volume_ctl: &volume,
+        position_samples: &position,
+        position_source: &source,
+        buffered_source: &source,
+        offset_source: &source,
+    };
+    let _ = handle_device_swap(
+        user_env,
+        &mut state,
+        OutputDeviceSelection::Named("noor-regression-missing-endpoint".into()),
+        true,
+        false,
+        None,
+        1,
+        ExclusiveLatencyMode::Stable,
+        None,
+    );
+    assert!(
+        matches!(
+            event_rx.try_recv().unwrap(),
+            PlaybackRuntimeEvent::CommandError { .. }
+        ),
+        "explicit user swap must still validate its endpoint while paused"
+    );
+    state.user_paused = false;
+    let current_env = LoopEnv {
+        config: &mut config,
+        command_tx: &command_tx,
+        event_tx: &event_tx,
+        device: &mut device,
+        output_config: &mut output_config,
+        output_sample_format: &mut sample_format,
+        volume_ctl: &volume,
+        position_samples: &position,
+        position_source: &source,
+        buffered_source: &source,
+        offset_source: &source,
+    };
+    let _ = handle_device_swap(
+        current_env,
+        &mut state,
+        OutputDeviceSelection::Named("noor-regression-missing-endpoint".into()),
+        true,
+        false,
+        None,
+        1,
+        ExclusiveLatencyMode::Stable,
+        Some(current_release),
+    );
+    assert!(
+        matches!(
+            event_rx.try_recv().unwrap(),
+            PlaybackRuntimeEvent::CommandError { .. }
+        ),
+        "current recovery must reach normal device validation"
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -6446,6 +6651,7 @@ fn offset_source_redirect_makes_handle_read_from_new_engine() {
         buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         offset_source: Arc::clone(&offset_source),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
 
     assert_eq!(handle.buffered_start_samples(), 0);

@@ -330,6 +330,19 @@ impl ExclusiveStream {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_with_teardown_check(check: impl FnOnce() + Send + 'static) -> Self {
+        let mut stream = Self::test_live_at_rate(48_000);
+        let shutdown = Arc::clone(&stream.shutdown);
+        stream.thread = Some(thread::spawn(move || {
+            while !shutdown.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            check();
+        }));
+        stream
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_released_with_fault(fault: ExclusiveRenderFault) -> Self {
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -507,6 +520,7 @@ pub fn build_exclusive_stream(
     source_bank: Arc<ExclusiveRenderSourceBank>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    output_identity: Arc<()>,
 ) -> std::result::Result<ExclusiveStream, ExclusiveInitFailure> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
@@ -537,6 +551,7 @@ pub fn build_exclusive_stream(
                     render_source_bank,
                     command_tx,
                     event_tx,
+                    output_identity,
                     shutdown_clone,
                     Arc::clone(&released_clone),
                     force_release_clone,
@@ -617,6 +632,7 @@ fn run_render_thread(
     source_bank: Arc<ExclusiveRenderSourceBank>,
     command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    output_identity: Arc<()>,
     shutdown: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
     force_release: Arc<AtomicBool>,
@@ -822,6 +838,7 @@ fn run_render_thread(
     // fault must instead pass through the identity-checked hard-pause path.
     if !shutdown.load(Ordering::SeqCst) && failure.is_none() {
         let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeReleased {
+            output_identity,
             device_name: device_label.clone(),
         });
     }
@@ -1448,7 +1465,7 @@ mod tests {
             .expect("shared config")
             .channels();
         let (command_tx, _) = mpsc::channel();
-        let (event_tx, _) = tokio::sync::broadcast::channel(32);
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(32);
 
         for (rate, idle_release) in [
             (44_100, false),
@@ -1456,6 +1473,7 @@ mod tests {
             (44_100, true),
             (96_000, false),
         ] {
+            let output_identity = Arc::new(());
             let stream = build_exclusive_stream(
                 Some(&device_id),
                 selected_name.clone(),
@@ -1466,6 +1484,7 @@ mod tests {
                 Arc::new(ExclusiveRenderSourceBank::new()),
                 command_tx.clone(),
                 event_tx.clone(),
+                Arc::clone(&output_identity),
             )
             .unwrap_or_else(|error| panic!("silent exclusive open at {rate} Hz failed: {error}"));
             assert_eq!(stream.effective_sample_rate, rate);
@@ -1486,6 +1505,21 @@ mod tests {
                 stream.take_fault().is_none(),
                 "normal release at {rate} Hz reported a device fault"
             );
+            let notification_deadline = Instant::now() + Duration::from_secs(2);
+            let notification = loop {
+                match event_rx.try_recv() {
+                    Ok(event) => break event,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                        if Instant::now() < notification_deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("native release notification missing: {error}"),
+                }
+            };
+            assert!(matches!(notification,
+                PlaybackRuntimeEvent::ExclusiveModeReleased { output_identity: released_identity, .. }
+                    if Arc::ptr_eq(&released_identity, &output_identity)));
             drop(stream);
             eprintln!(
                 "silent exclusive {rate} Hz open/release passed; idle_release={idle_release}"
@@ -1528,6 +1562,7 @@ mod tests {
             Arc::new(ExclusiveRenderSourceBank::new()),
             command_tx,
             event_tx,
+            Arc::new(()),
         );
         match result {
             Err(ExclusiveInitFailure::Other(reason)) => {
