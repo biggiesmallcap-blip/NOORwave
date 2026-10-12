@@ -1206,7 +1206,15 @@ mod tests {
                 .set_write_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
             let mut request = [0; 4096];
-            socket.read(&mut request).unwrap();
+            let mut received = 0;
+            // TCP can split the request headers across reads. Finish consuming
+            // them before responding so unread input cannot reset the socket.
+            while !request[..received].ends_with(b"\r\n\r\n") {
+                assert!(received < request.len(), "WAV fixture request is too large");
+                let count = socket.read(&mut request[received..]).unwrap();
+                assert!(count > 0, "WAV fixture request ended before its headers");
+                received += count;
+            }
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len()).unwrap();
             socket.write_all(&wav).unwrap();
         });
