@@ -1051,6 +1051,7 @@ pub(super) fn handle_track_terminal(
                         let _ = event_tx.send(PlaybackRuntimeEvent::Finished {
                             track_id,
                             generation,
+                            source_identity,
                         });
                     }
                     PlaybackTerminalReason::Error(message) => {

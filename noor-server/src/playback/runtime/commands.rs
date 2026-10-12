@@ -192,6 +192,9 @@ pub enum PlaybackRuntimeEvent {
     Finished {
         track_id: i64,
         generation: u64,
+        /// Source owning the queue handoff: finished deck at EOF, incoming
+        /// deck after prepared promotion. Retained across listener queues.
+        source_identity: Arc<AtomicU64>,
     },
     DjTransitionPromoted {
         transition_event_id: i64,

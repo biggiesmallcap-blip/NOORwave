@@ -3540,9 +3540,19 @@ fn automatic_crossfade_promotion_emits_timing_event() {
         PlaybackRuntimeEvent::Finished {
             track_id,
             generation,
+            source_identity,
         } => {
             assert_eq!(track_id, 1);
             assert_eq!(generation, 20);
+            assert!(Arc::ptr_eq(
+                &source_identity,
+                &state
+                    .engine
+                    .as_ref()
+                    .unwrap()
+                    .shared
+                    .handoff_elapsed_samples
+            ));
         }
         other => panic!("expected finished event, got {other:?}"),
     }
@@ -3703,9 +3713,19 @@ fn boundary_fallback_promotion_emits_missed_timing_event() {
         PlaybackRuntimeEvent::Finished {
             track_id,
             generation,
+            source_identity,
         } => {
             assert_eq!(track_id, 1);
             assert_eq!(generation, 20);
+            assert!(Arc::ptr_eq(
+                &source_identity,
+                &state
+                    .engine
+                    .as_ref()
+                    .unwrap()
+                    .shared
+                    .handoff_elapsed_samples
+            ));
         }
         other => panic!("expected finished event, got {other:?}"),
     }
@@ -5224,6 +5244,14 @@ fn queued_terminal_from_same_job_retired_decoder_cannot_remove_replacement() {
     retired.stop();
     state.engine = Some(test_engine_with_shared(1, 7));
     let replacement = state.engine.as_ref().unwrap().shared.stop_flag();
+    let replacement_source = Arc::clone(
+        &state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .handoff_elapsed_samples,
+    );
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
     let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     if let PlaybackRuntimeCommand::TrackTerminal {
@@ -5265,13 +5293,18 @@ fn queued_terminal_from_same_job_retired_decoder_cannot_remove_replacement() {
         PlaybackTerminalReason::Finished,
     );
     assert!(state.engine.is_none());
-    assert!(matches!(
-        event_rx.try_recv().unwrap(),
+    match event_rx.try_recv().unwrap() {
         PlaybackRuntimeEvent::Finished {
-            track_id: 1,
-            generation: 7
+            track_id,
+            generation,
+            source_identity,
+        } => {
+            assert_eq!(track_id, 1);
+            assert_eq!(generation, 7);
+            assert!(Arc::ptr_eq(&source_identity, &replacement_source));
         }
-    ));
+        other => panic!("expected Finished event, got {other:?}"),
+    }
 }
 
 #[test]

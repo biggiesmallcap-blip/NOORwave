@@ -339,6 +339,206 @@ async fn retired_decoder_track_error_listener_cannot_clear_same_runtime_restart(
 }
 
 #[tokio::test]
+async fn retired_decoder_finished_listener_cannot_advance_same_runtime_restart() {
+    let (state, handle, _, _) = cpal_fault_fixture().await;
+    let (before, mut events) = {
+        let mut guard = state.write().await;
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "fresh decoder".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        let before = guard.db.with_conn(player::load_snapshot).unwrap();
+        let events = guard.event_tx.subscribe();
+        (before, events)
+    };
+    let stale_source = handle.playback_source_identity();
+    handle.test_replace_playback_source();
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Finished {
+            track_id: 1,
+            generation: 0,
+            source_identity: stale_source,
+        })
+    );
+    assert!(handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+            output_identity: handle.test_exclusive_event_identity(),
+            device_name: "listener barrier".into(),
+            transport_format: "test format".into(),
+        }
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                events.recv().await.unwrap(),
+                AppEvent::AudioExclusiveEngaged { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+
+    let guard = state.read().await;
+    assert!(
+        guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire),
+        "retired decoder terminal cleared fresh audio activity"
+    );
+    assert_eq!(
+        guard.current_stream_display.as_ref().unwrap().audio_quality,
+        "fresh decoder"
+    );
+    let after = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert_eq!(
+        after.state.current_queue_item_id,
+        before.state.current_queue_item_id
+    );
+    assert_eq!(after.state.is_playing, before.state.is_playing);
+    assert_eq!(after.queue.len(), before.queue.len());
+}
+
+#[tokio::test]
+async fn current_decoder_finished_listener_advances_queue() {
+    let (state, handle, _, _) = cpal_fault_fixture().await;
+    let mut events = state.read().await.event_tx.subscribe();
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Finished {
+            track_id: 1,
+            generation: 0,
+            source_identity: handle.playback_source_identity(),
+        })
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(events.recv().await.unwrap(), AppEvent::PlaybackStateChanged) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+
+    let guard = state.read().await;
+    assert!(
+        !guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .active_track_id,
+        None
+    );
+    let snapshot = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert!(!snapshot.state.is_playing);
+    assert!(snapshot.state.current_track.is_none());
+}
+
+#[tokio::test]
+async fn promoted_decoder_finished_listener_advances_to_prepared_track() {
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    let mut events = {
+        let mut guard = state.write().await;
+        guard
+            .db
+            .with_conn(|conn| player::enqueue_track(conn, 2, "test"))
+            .unwrap();
+        guard
+            .tidal
+            .set_tokens_for_test(Some(tidal_auth::TidalTokens {
+                access_token: "test-token".into(),
+                refresh_token: "refresh-token".into(),
+                token_type: "Bearer".into(),
+                expires_in: 3600,
+                user_id: "test-user".into(),
+                country_code: "US".into(),
+                auth_flow: Some("pkce".into()),
+            }));
+        guard.playback_runtime = Some(PlaybackRuntimeState {
+            access_token: "test-token".into(),
+            handle: handle.clone(),
+        });
+        guard.event_tx.subscribe()
+    };
+    // The runtime has promoted the next decoder, while SQLite still names
+    // the outgoing row until its Finished notification is processed.
+    handle.test_replace_playback_source();
+    let runtime_thread = std::thread::spawn(move || {
+        loop {
+            match command_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                playback_runtime::PlaybackRuntimeCommand::RequestReady => {}
+                playback_runtime::PlaybackRuntimeCommand::TrackStatus {
+                    track_id,
+                    generation,
+                    respond_to,
+                } => {
+                    assert_eq!(track_id, 2);
+                    assert_eq!(generation, 0);
+                    respond_to
+                        .send(playback_runtime::PlaybackTrackStatus::Active)
+                        .unwrap();
+                }
+                playback_runtime::PlaybackRuntimeCommand::Switch(job) => {
+                    assert_eq!(job.track.id, 2);
+                    break;
+                }
+                other => panic!("unexpected promotion command: {other:?}"),
+            }
+        }
+    });
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Finished {
+            track_id: 1,
+            generation: 0,
+            source_identity: handle.playback_source_identity(),
+        })
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                events.recv().await.unwrap(),
+                AppEvent::TrackChanged { track_id: 2 }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+    runtime_thread.join().unwrap();
+    let guard = state.read().await;
+    let snapshot = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert_eq!(snapshot.state.current_track.as_ref().unwrap().id, 2);
+    assert!(snapshot.state.is_playing);
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .active_track_id,
+        Some(2)
+    );
+}
+
+#[tokio::test]
 async fn retired_runtime_track_error_cannot_clear_replacement_or_advance_queue() {
     for message in ["active decode failed", "DASH stream prebuffer failed"] {
         let (state, handle, _, _) = cpal_fault_fixture().await;

@@ -289,25 +289,37 @@ pub(crate) fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::Finished {
                     track_id,
                     generation,
+                    source_identity,
                 }) => {
                     // A late terminal from the previous track or runtime must
                     // not mark a newer, already audible track as paused.
-                    let state_guard = state.read().await;
-                    if current_playback_generation(&state_guard) != generation
-                        || !state_guard
-                            .playback_runtime
-                            .as_ref()
-                            .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
-                    {
+                    let terminal_is_current = {
+                        let state_guard = state.read().await;
+                        let source_guard = handle.lock_playback_source_identity();
+                        let current = current_playback_generation(&state_guard) == generation
+                            && state_guard
+                                .playback_runtime
+                                .as_ref()
+                                .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                            && Arc::ptr_eq(&source_guard, &source_identity);
+                        if current {
+                            state_guard
+                                .audio_active
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        current
+                    };
+                    if !terminal_is_current {
                         continue;
                     }
-                    state_guard
-                        .audio_active
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
-                    drop(state_guard);
-                    if let Err(error) =
-                        handle_runtime_finished_with_retry(state.clone(), track_id, generation)
-                            .await
+                    if let Err(error) = handle_runtime_finished_with_retry_for_owner(
+                        state.clone(),
+                        track_id,
+                        generation,
+                        Some(&handle),
+                        Some(&source_identity),
+                    )
+                    .await
                     {
                         let message =
                             format!("Failed to advance playback after track end: {error}");
@@ -1451,10 +1463,43 @@ pub(crate) async fn switch_runtime_to_snapshot_current(
 /// recoverable (sleep + retry the same track once); any other failure is
 /// track-specific (skip to the next item). Only gives up when the continuation
 /// is exhausted or MAX_CONSEC_FAILURES distinct tracks fail in a row.
+#[cfg(test)]
 pub(crate) async fn handle_runtime_finished(
     state: SharedState,
     finished_track_id: i64,
     generation: u64,
+) -> anyhow::Result<()> {
+    handle_runtime_finished_for_owner(state, finished_track_id, generation, None, None).await
+}
+
+fn runtime_finish_owner_is_current(
+    state_guard: &crate::AppState,
+    generation: u64,
+    expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    expected_source: Option<&Arc<std::sync::atomic::AtomicU64>>,
+) -> bool {
+    if current_playback_generation(state_guard) != generation {
+        return false;
+    }
+    match (expected_runtime, expected_source) {
+        (None, None) => true,
+        (Some(runtime), Some(source_identity)) => {
+            state_guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                && Arc::ptr_eq(&runtime.lock_playback_source_identity(), source_identity)
+        }
+        _ => false,
+    }
+}
+
+async fn handle_runtime_finished_for_owner(
+    state: SharedState,
+    finished_track_id: i64,
+    generation: u64,
+    expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    expected_source: Option<&Arc<std::sync::atomic::AtomicU64>>,
 ) -> anyhow::Result<()> {
     {
         let state_guard = state.read().await;
@@ -1473,6 +1518,21 @@ pub(crate) async fn handle_runtime_finished(
             );
             return Ok(());
         }
+        if !runtime_finish_owner_is_current(
+            &state_guard,
+            generation,
+            expected_runtime,
+            expected_source,
+        ) {
+            tracing::warn!(
+                target: "noor.playback.advance",
+                event = "runtime_finished_stale_source",
+                finished_track_id,
+                generation,
+                "end-of-track advance dropped: playback source changed; queue left unchanged"
+            );
+            return Ok(());
+        }
     }
     tracing::info!(
         target: "noor.playback.advance",
@@ -1487,6 +1547,31 @@ pub(crate) async fn handle_runtime_finished(
 
     let snapshot = {
         let state_guard = state.read().await;
+        // Keep the source lock while the queue row is advanced. A same-runtime
+        // decoder restart uses this mutex before replacing its identity.
+        let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
+        let owner_is_current = current_playback_generation(&state_guard) == generation
+            && match (expected_runtime, expected_source, source_guard.as_ref()) {
+                (None, None, None) => true,
+                (Some(runtime), Some(expected_source), Some(current_source)) => {
+                    state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                        && Arc::ptr_eq(current_source, expected_source)
+                }
+                _ => false,
+            };
+        if !owner_is_current {
+            tracing::warn!(
+                target: "noor.playback.advance",
+                event = "runtime_finished_stale_source_before_queue_advance",
+                finished_track_id,
+                generation,
+                "end-of-track advance dropped before queue mutation: playback source changed"
+            );
+            return Ok(());
+        }
         let cleared = recently_cleared(&state_guard);
         state_guard.db.with_conn(|conn| {
             let current_track_id = player::current_track_id(conn)?;
@@ -1530,13 +1615,17 @@ pub(crate) async fn handle_runtime_finished(
 
     let snapshot =
         resolve_or_skip_pending_current(&state, snapshot, generation, "runtime_finished").await?;
-    if !playback_generation_is_current(&state, generation).await {
+    let owner_is_current = {
+        let state_guard = state.read().await;
+        runtime_finish_owner_is_current(&state_guard, generation, expected_runtime, expected_source)
+    };
+    if !owner_is_current {
         tracing::warn!(
             target: "noor.playback.advance",
             event = "runtime_finished_stale_after_resolve",
             finished_track_id,
             generation,
-            "end-of-track advance dropped after pending resolve: generation moved on"
+            "end-of-track advance dropped after pending resolve: playback ownership changed"
         );
         return Ok(());
     }
@@ -1546,6 +1635,20 @@ pub(crate) async fn handle_runtime_finished(
         Some(player::ListenSessionEndReason::QueueEnded)
     };
     sync_session_after_snapshot(&state, &snapshot, end_reason).await;
+    let owner_is_current = {
+        let state_guard = state.read().await;
+        runtime_finish_owner_is_current(&state_guard, generation, expected_runtime, expected_source)
+    };
+    if !owner_is_current {
+        tracing::warn!(
+            target: "noor.playback.advance",
+            event = "runtime_finished_stale_after_session_sync",
+            finished_track_id,
+            generation,
+            "end-of-track runtime switch dropped after session sync: playback ownership changed"
+        );
+        return Ok(());
+    }
     switch_runtime_to_snapshot_current(&state, &snapshot, generation).await
 }
 
@@ -1616,13 +1719,23 @@ pub(crate) async fn mark_armed_dj_transition_manual_seek_suppressed_if_needed(
     Ok(())
 }
 
-pub(crate) async fn handle_runtime_finished_with_retry(
+async fn handle_runtime_finished_with_retry_for_owner(
     state: SharedState,
     finished_track_id: i64,
     generation: u64,
+    expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    expected_source: Option<&Arc<std::sync::atomic::AtomicU64>>,
 ) -> anyhow::Result<()> {
     for attempt in 0..=PLAYBACK_FINISH_DB_LOCK_RETRY_LIMIT {
-        match handle_runtime_finished(state.clone(), finished_track_id, generation).await {
+        match handle_runtime_finished_for_owner(
+            state.clone(),
+            finished_track_id,
+            generation,
+            expected_runtime,
+            expected_source,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(error)
                 if sqlite_database_locked(&error)
@@ -1835,7 +1948,14 @@ pub(crate) async fn handle_runtime_track_error(
         "runtime track error; advancing queue"
     );
     report_playback_failure(&state, message);
-    handle_runtime_finished_with_retry(state, failed_track_id, generation).await
+    handle_runtime_finished_with_retry_for_owner(
+        state,
+        failed_track_id,
+        generation,
+        Some(expected_runtime),
+        Some(expected_source),
+    )
+    .await
 }
 
 pub(crate) async fn handle_prepared_runtime_track_error_for_runtime(
