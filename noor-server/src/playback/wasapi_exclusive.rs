@@ -1932,7 +1932,7 @@ mod tests {
         let bank = ExclusiveRenderSourceBank::new();
         let shared = test_shared_state(1, 1);
         shared.paused.store(false, Ordering::Relaxed);
-        shared.buffer.lock().expect("buffer").samples = vec![0.5; 8];
+        shared.buffer.lock().expect("buffer").samples = vec![0.5; 8].into();
         bank.set_sources(vec![ExclusiveRenderSource {
             role: ExclusiveRenderRole::Active,
             shared: Arc::clone(&shared),

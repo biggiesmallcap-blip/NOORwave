@@ -3,6 +3,7 @@ use super::timeline::AtomicHandoffTimeline;
 use crate::playback::gapless::GaplessPlan;
 use crate::playback::player::PlaybackSourceKind;
 use anyhow::{Result, anyhow};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use tracing::warn;
@@ -180,6 +181,30 @@ fn step_gain(current: f32, target: f32, step: f32) -> f32 {
     }
 }
 
+/// Longest the render path waits for the PCM lock before giving up a period.
+/// Decoder appends and O(1) compaction hold it for microseconds; this stays
+/// far inside any device period, including low-latency exclusive mode.
+const RENDER_LOCK_SPIN: std::time::Duration = std::time::Duration::from_micros(100);
+
+fn try_lock_for_render(
+    buffer: &Mutex<PlaybackBuffer>,
+) -> std::sync::TryLockResult<std::sync::MutexGuard<'_, PlaybackBuffer>> {
+    let mut started = None;
+    loop {
+        match buffer.try_lock() {
+            Err(std::sync::TryLockError::WouldBlock)
+                if started
+                    .get_or_insert_with(std::time::Instant::now)
+                    .elapsed()
+                    < RENDER_LOCK_SPIN =>
+            {
+                std::hint::spin_loop();
+            }
+            result => return result,
+        }
+    }
+}
+
 fn write_output_buffer<T>(
     data: &mut [T],
     shared: &Arc<PlaybackSharedState>,
@@ -226,11 +251,12 @@ fn write_output_buffer<T>(
     let transport_step = transport_ramp_step(shared.device_sample_rate);
 
     // Decoder append/compaction and DJ publication can hold this lock. Waiting
-    // here would miss the device deadline. Silence preserves the cursor and
-    // envelope until the next callback can consume the same samples.
+    // without bound would miss the device deadline, so spin briefly for the
+    // usual microsecond holds and only then render silence; silence preserves
+    // the cursor and envelope until the next callback consumes the same samples.
     // Notifications share this buffer's fixed mailbox, so seeks and buffer
     // replacement can retire them under the same lock as the PCM cursor.
-    let mut guard = match shared.buffer.try_lock() {
+    let mut guard = match try_lock_for_render(&shared.buffer) {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::WouldBlock) => {
             shared
@@ -1060,8 +1086,8 @@ impl PlaybackSharedState {
             let mut original = prefix
                 .take()
                 .ok_or_else(|| anyhow!("handoff source prefix missing"))?;
-            original.extend_from_slice(&guard.samples[remainder_at.min(guard.samples.len())..]);
-            guard.samples = original;
+            original.extend(guard.samples.range(remainder_at.min(guard.samples.len())..));
+            guard.samples = original.into();
             timeline.output_origin.saturating_mul(channels)
         } else {
             prefix.take();
@@ -1184,9 +1210,21 @@ impl PlaybackSharedState {
             self.position_offset_samples
                 .store(offset + skip as u64, Ordering::Relaxed);
         }
-        guard.samples.extend_from_slice(&samples[skip..]);
+        guard.samples.extend(&samples[skip..]);
         self.publish_buffered_samples(guard.samples.len());
         Ok(guard.samples.len())
+    }
+
+    /// Reserve the steady-state window once, before decoding. Growth after
+    /// that would reallocate and copy every buffered sample under the lock.
+    pub(crate) fn reserve_buffer_capacity(&self, samples: usize) -> Result<()> {
+        let mut guard = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        let additional = samples.saturating_sub(guard.samples.len());
+        guard.samples.reserve(additional);
+        Ok(())
     }
 
     pub(crate) fn unread_buffered_samples(&self) -> Result<usize> {
@@ -1248,7 +1286,10 @@ impl PlaybackSharedState {
 pub(crate) struct PlaybackBuffer {
     notifications: [Option<RtNotification>; 32],
     pending_notifications: Arc<AtomicBool>,
-    pub(crate) samples: Vec<f32>,
+    /// A ring so dropping consumed history is O(1). With a Vec, compaction
+    /// moved the whole retained+lookahead window (tens of MB) while holding
+    /// the lock the audio callback needs.
+    pub(crate) samples: VecDeque<f32>,
     pub(crate) read_pos: usize,
     pub(crate) start_threshold_samples: usize,
     pub(crate) started: bool,
@@ -1281,7 +1322,7 @@ impl PlaybackBuffer {
         Self {
             notifications: [None; 32],
             pending_notifications: Arc::new(AtomicBool::new(false)),
-            samples: Vec::new(),
+            samples: VecDeque::new(),
             read_pos: 0,
             start_threshold_samples,
             started: false,
@@ -1302,7 +1343,7 @@ impl PlaybackBuffer {
         let available = remaining.min(data.len());
         for (dst, &sample) in data
             .iter_mut()
-            .zip(self.samples[self.read_pos..self.read_pos + available].iter())
+            .zip(self.samples.range(self.read_pos..self.read_pos + available))
         {
             *dst = convert(sample);
         }
@@ -1646,7 +1687,7 @@ mod tests {
         const SAMPLES: usize = 128;
         {
             let mut buffer = shared.buffer.lock().unwrap();
-            buffer.samples = vec![0.25; BLOCKS * SAMPLES];
+            buffer.samples = vec![0.25; BLOCKS * SAMPLES].into();
             buffer.started = true;
             buffer.started_notified = true;
         }
@@ -1846,7 +1887,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().unwrap();
-            buffer.samples = vec![-1.0, -0.5, 0.0, 0.5, 1.0, 0.0];
+            buffer.samples = vec![-1.0, -0.5, 0.0, 0.5, 1.0, 0.0].into();
             buffer.mark_finished();
         }
         let (command_tx, _) = mpsc::channel();
@@ -1900,7 +1941,7 @@ mod tests {
         ];
         {
             let mut buffer = shared.buffer.lock().unwrap();
-            buffer.samples = pcm.to_vec();
+            buffer.samples = pcm.to_vec().into();
             buffer.mark_finished();
         }
         let (command_tx, _) = mpsc::channel();
@@ -1933,7 +1974,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().unwrap();
-            buffer.samples = vec![0.7; 192_000];
+            buffer.samples = vec![0.7; 192_000].into();
             buffer.mark_finished();
         }
         assert!(shared.begin_fade_out());
@@ -1951,7 +1992,7 @@ mod tests {
         shared.position_samples.store(48_000, Ordering::Relaxed);
         {
             let mut buffer = shared.buffer.lock().unwrap();
-            buffer.samples = vec![0.7; 192_000];
+            buffer.samples = vec![0.7; 192_000].into();
             buffer.mark_finished();
         }
         shared.paused.store(true, Ordering::SeqCst);
@@ -2060,7 +2101,7 @@ mod tests {
             .store(0.5f32.to_bits(), Ordering::Relaxed);
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; 16];
+            buffer.samples = vec![1.0; 16].into();
         }
 
         let output = drain_gain(&shared, 8);
@@ -2077,7 +2118,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; 1024];
+            buffer.samples = vec![1.0; 1024].into();
         }
         // Slam the control to silence mid-stream: the mute case, and the
         // harshest step the old flat-multiply produced.
@@ -2117,7 +2158,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; 2048];
+            buffer.samples = vec![1.0; 2048].into();
         }
         shared.volume_ctl.store(0.0f32.to_bits(), Ordering::Relaxed);
 
@@ -2201,7 +2242,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; 4096];
+            buffer.samples = vec![1.0; 4096].into();
         }
         user_pause(&shared);
 
@@ -2233,7 +2274,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; 8192];
+            buffer.samples = vec![1.0; 8192].into();
         }
         user_pause(&shared);
 
@@ -2271,7 +2312,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; 512];
+            buffer.samples = vec![1.0; 512].into();
         }
         shared.paused.store(true, Ordering::SeqCst);
 
@@ -2301,7 +2342,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; 64];
+            buffer.samples = vec![1.0; 64].into();
         }
         shared.paused.store(true, Ordering::SeqCst);
         shared.paused.store(false, Ordering::SeqCst);
@@ -2319,7 +2360,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; 4096];
+            buffer.samples = vec![1.0; 4096].into();
         }
         user_pause(&shared);
         let down = frame_gains(&drain_gain(&shared, 128));
@@ -2375,7 +2416,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![0.1, 0.2];
+            buffer.samples = vec![0.1, 0.2].into();
         }
         let (command_tx, _) = mpsc::channel();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
@@ -2404,7 +2445,7 @@ mod tests {
         shared.suppress_started_event();
         {
             let mut buffer = shared.buffer.lock().expect("buffer");
-            buffer.samples = vec![0.1, 0.2];
+            buffer.samples = vec![0.1, 0.2].into();
         }
         let (command_tx, _) = mpsc::channel();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
@@ -2487,7 +2528,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[0.25, -0.5, 0.75, -1.0]);
+            buffer.samples.extend(&[0.25, -0.5, 0.75, -1.0]);
             buffer.mark_finished();
         }
         let (command_tx, _) = mpsc::channel();
@@ -2504,7 +2545,7 @@ mod tests {
         let shared = test_shared_state();
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[0.125, 0.25, 0.5, 1.0]);
+            buffer.samples.extend(&[0.125, 0.25, 0.5, 1.0]);
             buffer.mark_finished();
         }
         let (command_tx, _) = mpsc::channel();
@@ -2559,7 +2600,7 @@ mod tests {
         // 30s into the segment, 30s remaining, xfade=13s — gain must be 1.0.
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+            buffer.samples.extend(&[1.0, 1.0, 1.0, 1.0]);
         }
 
         let (command_tx, _) = mpsc::channel();
@@ -2592,7 +2633,7 @@ mod tests {
         outgoing.crossfade_samples.store(XFADE, Ordering::Relaxed);
         {
             let mut buffer = outgoing.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; XFADE as usize];
+            buffer.samples = vec![1.0; XFADE as usize].into();
         }
 
         // Incoming deck: fade-in branch from position 0.
@@ -2601,7 +2642,7 @@ mod tests {
         incoming.fadein_start_samples.store(0, Ordering::Relaxed);
         {
             let mut buffer = incoming.buffer.lock().expect("buffer");
-            buffer.samples = vec![1.0; XFADE as usize];
+            buffer.samples = vec![1.0; XFADE as usize].into();
         }
 
         let (command_tx, _command_rx) = mpsc::channel();
@@ -2664,7 +2705,7 @@ mod tests {
 
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+            buffer.samples.extend(&[0.5, 0.5, 0.5, 0.5]);
         }
 
         let (command_tx, command_rx) = mpsc::channel();
@@ -2690,7 +2731,7 @@ mod tests {
         shared.crossfade_samples.store(500, Ordering::Relaxed);
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+            buffer.samples.extend(&[0.5, 0.5, 0.5, 0.5]);
         }
 
         let (command_tx, command_rx) = mpsc::channel();
@@ -2730,7 +2771,7 @@ mod tests {
             .store(9_800, Ordering::Relaxed);
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+            buffer.samples.extend(&[0.5, 0.5, 0.5, 0.5]);
         }
 
         let (command_tx, command_rx) = mpsc::channel();
@@ -2748,7 +2789,7 @@ mod tests {
         shared.position_samples.store(9_800, Ordering::Relaxed);
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+            buffer.samples.extend(&[0.5, 0.5, 0.5, 0.5]);
         }
         render_and_drain(&mut out, &shared, &command_tx, &event_tx);
         match command_rx.try_recv().expect("crossfade command") {
@@ -2773,7 +2814,7 @@ mod tests {
         shared.position_samples.store(720, Ordering::Relaxed);
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+            buffer.samples.extend(&[1.0, 1.0, 1.0, 1.0]);
         }
 
         let (command_tx, _) = mpsc::channel();
@@ -2793,7 +2834,7 @@ mod tests {
         shared.position_samples.store(2_000, Ordering::Relaxed);
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+            buffer.samples.extend(&[1.0, 1.0, 1.0, 1.0]);
         }
         render_and_drain(&mut out, &shared, &command_tx, &event_tx);
         assert_eq!(out, [0.0, 0.0, 0.0, 0.0]);
@@ -2812,7 +2853,7 @@ mod tests {
             .store(false, Ordering::Relaxed);
         {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
-            buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
+            buffer.samples.extend(&[0.5, 0.5, 0.5, 0.5]);
         }
 
         let (command_tx, command_rx) = mpsc::channel();
@@ -2838,7 +2879,7 @@ mod tests {
     #[test]
     fn seek_to_decoded_position_applies_immediately() {
         let mut buffer = PlaybackBuffer::new(0);
-        buffer.samples = vec![0.0; 1_000];
+        buffer.samples = vec![0.0; 1_000].into();
         buffer.started = true;
 
         assert!(buffer.seek_to(400));
@@ -2850,7 +2891,7 @@ mod tests {
     #[test]
     fn seek_to_undecoded_position_is_rejected_until_finished() {
         let mut buffer = PlaybackBuffer::new(0);
-        buffer.samples = vec![0.0; 1_000];
+        buffer.samples = vec![0.0; 1_000].into();
         buffer.started = true;
         buffer.read_pos = 100;
 
@@ -2861,7 +2902,7 @@ mod tests {
     #[test]
     fn seek_to_end_of_finished_buffer_applies() {
         let mut buffer = PlaybackBuffer::new(0);
-        buffer.samples = vec![0.0; 1_000];
+        buffer.samples = vec![0.0; 1_000].into();
         buffer.started = true;
         buffer.finished = true;
 

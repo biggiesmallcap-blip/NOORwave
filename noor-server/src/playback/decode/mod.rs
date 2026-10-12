@@ -793,6 +793,18 @@ fn decode_and_buffer_job_with_resampler(
                 .make(&track.codec_params, &DecoderOptions::default())
                 .context("failed to build Symphonia decoder")?;
 
+            if !config.dj_analysis_only {
+                // Steady state holds the high-water lookahead plus up to twice
+                // the retained history before compaction.
+                let window_secs = PLAYBACK_DECODE_HIGH_WATER_SECS
+                    + 2 * (PLAYBACK_BUFFER_RETAIN_BEHIND_MS as u64).div_ceil(1000);
+                shared.reserve_buffer_capacity(decoded_output_samples_for_secs(
+                    window_secs,
+                    shared.target_sample_rate.load(Ordering::Relaxed).max(1),
+                    device_channels,
+                ))?;
+            }
+
             // ── Pre-loop: passive analysis capture ──────────────────────────────────────
             let mut analysis_sent = false;
             let mut analysis_buf: Vec<f32> = Vec::new();

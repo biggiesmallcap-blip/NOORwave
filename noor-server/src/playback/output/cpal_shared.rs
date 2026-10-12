@@ -374,17 +374,22 @@ mod tests {
         )
     }
 
+    /// WASAPI device removal always carries the HRESULT text; only a
+    /// default-device change arrives without a message.
+    fn device_removed() -> cpal::Error {
+        cpal::Error::with_message(
+            cpal::ErrorKind::DeviceNotAvailable,
+            "The audio endpoint device has been unplugged",
+        )
+    }
+
     #[test]
     fn cpal_error_callback_retains_identity_for_runtime_reconciliation() {
         let (command_tx, command_rx) = mpsc::channel();
         let shared = shared(command_tx);
         let live = Arc::new(AtomicBool::new(true));
         let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
-        emit_cpal_stream_error(
-            &shared,
-            &callback,
-            cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
-        );
+        emit_cpal_stream_error(&shared, &callback, device_removed());
         assert!(command_rx.try_recv().is_err());
         match callback.take_command(&shared).unwrap() {
             PlaybackRuntimeCommand::CpalOutputError {
@@ -410,18 +415,10 @@ mod tests {
         let shared = shared(command_tx);
         let live = Arc::new(AtomicBool::new(false));
         let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
-        emit_cpal_stream_error(
-            &shared,
-            &callback,
-            cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
-        );
+        emit_cpal_stream_error(&shared, &callback, device_removed());
         live.store(true, Ordering::Release);
         shared.stopped.store(true, Ordering::Release);
-        emit_cpal_stream_error(
-            &shared,
-            &callback,
-            cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
-        );
+        emit_cpal_stream_error(&shared, &callback, device_removed());
         assert!(command_rx.try_recv().is_err());
         assert!(callback.take_command(&shared).is_none());
     }

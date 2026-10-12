@@ -548,9 +548,7 @@ fn runtime_constructs_mixer_from_decoded_transition_windows() {
     let active = test_engine_with_shared(1, 20);
     {
         let mut buffer = active.shared.buffer.lock().expect("active buffer");
-        buffer
-            .samples
-            .extend_from_slice(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+        buffer.samples.extend(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
         buffer.read_pos = 2;
     }
 
@@ -559,9 +557,7 @@ fn runtime_constructs_mixer_from_decoded_transition_windows() {
         .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
     {
         let mut buffer = next.shared.buffer.lock().expect("next buffer");
-        buffer
-            .samples
-            .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
+        buffer.samples.extend(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
     }
 
     state.engine = Some(active);
@@ -590,7 +586,7 @@ fn runtime_rebuilds_mixer_from_latest_active_read_position() {
         let mut buffer = active.shared.buffer.lock().expect("active buffer");
         buffer
             .samples
-            .extend_from_slice(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4]);
+            .extend(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4]);
     }
 
     let mut next = test_engine_with_shared(2, 21);
@@ -598,9 +594,7 @@ fn runtime_rebuilds_mixer_from_latest_active_read_position() {
         .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
     {
         let mut buffer = next.shared.buffer.lock().expect("next buffer");
-        buffer
-            .samples
-            .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
+        buffer.samples.extend(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
     }
 
     state.engine = Some(active);
@@ -784,7 +778,7 @@ fn handoff_mixer_preserves_unfinished_next_estimated_total() {
         let mut buffer = next.shared.buffer.lock().expect("next buffer");
         buffer
             .samples
-            .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+            .extend(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
     }
 
     state.engine = Some(active);
@@ -840,7 +834,7 @@ fn installs_rate_adjusted_handoff_remainder_from_consumed_frames() {
     let next = state.next_engine.as_ref().expect("next engine");
     let buffer = next.shared.buffer.lock().expect("buffer lock");
     assert_eq!(buffer.samples.len(), 10);
-    assert_samples_close(&buffer.samples[4..], &[0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+    assert_samples_close(buffer.samples.range(4..), &[0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
     assert_eq!(next.shared.total_samples.load(Ordering::Relaxed), 10);
 }
 
@@ -872,7 +866,7 @@ fn handoff_mixer_preserves_unfinished_next_buffer() {
         let mut buffer = next.shared.buffer.lock().expect("next buffer");
         buffer
             .samples
-            .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+            .extend(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
     }
 
     state.engine = Some(active);
@@ -1281,7 +1275,14 @@ fn unverified_preview_clears_stale_render_without_handoff_fallback() {
     let mut state = verified_preview_fixture();
     prepare_drop_preview_mixer(&mut state, 1024).unwrap();
     let preview = state.drop_preview_engine.as_ref().unwrap();
-    preview.shared.buffer.lock().unwrap().samples.fill(0.2);
+    preview
+        .shared
+        .buffer
+        .lock()
+        .unwrap()
+        .samples
+        .iter_mut()
+        .for_each(|sample| *sample = 0.2);
     assert_eq!(
         prepare_drop_preview_mixer(&mut state, 1024),
         Err(DjRuntimeRendererReason::MixerRejected)
@@ -1684,7 +1685,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
         next.shared
             .total_samples
             .store(192_000 * 2, Ordering::Relaxed);
-        next.shared.buffer.lock().unwrap().samples = original_b[..160_000 * 2].to_vec();
+        next.shared.buffer.lock().unwrap().samples = original_b[..160_000 * 2].to_vec().into();
         state.engine = Some(active);
         state.next_engine = Some(next);
         assert!(prepare_dj_mixer_for_pair(&mut state, 1024).is_ok());
@@ -1716,7 +1717,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
         // buffer, then EOF publishes offset + output-buffer length.
         {
             let mut guard = incoming.shared.buffer.lock().unwrap();
-            guard.samples.extend_from_slice(&original_b[160_000 * 2..]);
+            guard.samples.extend(&original_b[160_000 * 2..]);
             guard.mark_finished();
             let total = incoming
                 .shared
@@ -1827,7 +1828,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
             .load(Ordering::Relaxed);
         assert_eq!(
             incoming.shared.buffer.lock().unwrap().samples,
-            original_b[restored_offset as usize..]
+            original_b[restored_offset as usize..].to_vec()
         );
         incoming
             .shared
@@ -1863,7 +1864,7 @@ fn callback_countdown_target_uses_decoded_end_and_survives_dispatch_delay() {
         .shared
         .position_samples
         .store(402_850 * 96, Ordering::Relaxed);
-    active.shared.buffer.lock().unwrap().samples = vec![0.2; 256];
+    active.shared.buffer.lock().unwrap().samples = vec![0.2; 256].into();
     let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
     transition.fire_ahead_ms = 150;
     transition.anchor_start_ms = None;
@@ -2286,7 +2287,7 @@ fn long_bass_mix_verifies_musical_prefixes_before_using_a_protected_overlap() {
         let mut next = test_engine_with_shared(2, 21);
         next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
         // The short-window cases deliberately never emit decode EOF.
-        next.shared.buffer.lock().unwrap().samples = kicks(incoming_seconds, None, None);
+        next.shared.buffer.lock().unwrap().samples = kicks(incoming_seconds, None, None).into();
         state.engine = Some(active);
         state.next_engine = Some(next);
         let buffer = crossfade_readiness_snapshot(state.next_engine.as_ref().unwrap()).unwrap();
@@ -3983,7 +3984,7 @@ fn write_output_f32_drains_ready_buffer_at_96khz() {
     ));
     {
         let mut buffer = shared.buffer.lock().unwrap();
-        buffer.samples.extend_from_slice(&[0.25, -0.25, 0.5, -0.5]);
+        buffer.samples.extend(&[0.25, -0.25, 0.5, -0.5]);
         buffer.mark_finished();
     }
 
@@ -4015,7 +4016,7 @@ fn write_output_f32_outputs_silence_when_paused_at_96khz() {
     shared.paused.store(true, Ordering::SeqCst);
     {
         let mut buffer = shared.buffer.lock().unwrap();
-        buffer.samples.extend_from_slice(&[0.25, -0.25, 0.5, -0.5]);
+        buffer.samples.extend(&[0.25, -0.25, 0.5, -0.5]);
         buffer.mark_finished();
     }
 
@@ -4519,7 +4520,7 @@ fn crossfade_promotion_gate_accepts_next_deck_that_cannot_cover_the_fade() {
     let (unread, ready) = {
         let mut buf = next_shared.buffer.lock().unwrap();
         let threshold = buf.start_threshold_samples;
-        buf.samples = vec![0.1f32; threshold];
+        buf.samples = vec![0.1f32; threshold].into();
         (buf.samples.len() - buf.read_pos, buf.is_ready())
     };
 
@@ -4882,7 +4883,7 @@ fn stall_tracker_ignores_finished_engine_still_draining() {
     {
         let mut guard = engine.shared.buffer.lock().unwrap();
         guard.started = true;
-        guard.samples = vec![0.0; 4_800];
+        guard.samples = vec![0.0; 4_800].into();
         guard.read_pos = 0;
         guard.mark_finished();
     }
@@ -4927,7 +4928,7 @@ fn stall_tracker_force_advances_finished_drained_engine() {
     {
         let mut guard = engine.shared.buffer.lock().unwrap();
         guard.started = true;
-        guard.samples = vec![0.0; 4_800];
+        guard.samples = vec![0.0; 4_800].into();
         guard.read_pos = 4_800; // fully drained
         guard.mark_finished();
         guard.finished_notified = true; // terminal already consumed and lost
@@ -6405,7 +6406,7 @@ fn early_gridless_preparation_waits_for_length_and_renders_the_tail_not_the_open
     let active = state.engine.as_ref().unwrap();
     let mut samples = vec![0.2; 6 * 96_000];
     samples.extend(vec![0.7; 96_000]);
-    active.shared.buffer.lock().unwrap().samples = samples;
+    active.shared.buffer.lock().unwrap().samples = samples.into();
     active
         .shared
         .total_samples
@@ -6418,7 +6419,7 @@ fn early_gridless_preparation_waits_for_length_and_renders_the_tail_not_the_open
         .buffer
         .lock()
         .unwrap()
-        .samples = vec![0.3; 2 * 96_000];
+        .samples = vec![0.3; 2 * 96_000].into();
     assert!(can_prepare_dj_mixer_before_fire(&state));
     prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
     let rendered = state.dj.prepared_mixer.as_ref().unwrap();
@@ -6444,7 +6445,7 @@ fn rhythmic_tail_snapshot_retains_fractional_millisecond_frames_at_eof() {
     transition.anchor_start_ms = None;
     transition.program.resolve_at = 371_618; // 7.7420417s at 48 kHz.
     let total_frames = 10 * 48_000;
-    active.shared.buffer.lock().unwrap().samples = vec![0.2; total_frames * 2];
+    active.shared.buffer.lock().unwrap().samples = vec![0.2; total_frames * 2].into();
     active
         .shared
         .total_samples
@@ -6534,13 +6535,17 @@ fn state_with_ready_dj_pair() -> PlaybackRuntimeLoopState {
 
 fn finish_engine_buffer(engine: &PlaybackEngine, samples: &[f32]) {
     let mut buffer = engine.shared.buffer.lock().expect("buffer lock");
-    buffer.samples.extend_from_slice(samples);
+    buffer.samples.extend(samples);
     buffer.mark_finished();
 }
 
-fn assert_samples_close(actual: &[f32], expected: &[f32]) {
+fn assert_samples_close<'a>(
+    actual: impl IntoIterator<Item = &'a f32, IntoIter: ExactSizeIterator>,
+    expected: &[f32],
+) {
+    let actual = actual.into_iter();
     assert_eq!(actual.len(), expected.len());
-    for (actual, expected) in actual.iter().zip(expected) {
+    for (actual, expected) in actual.zip(expected) {
         assert!(
             (*actual - *expected).abs() < 1e-6,
             "expected {expected}, got {actual}"
