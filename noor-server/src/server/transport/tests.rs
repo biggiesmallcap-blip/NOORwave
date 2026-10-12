@@ -4727,6 +4727,137 @@ async fn current_terminal_snapshot_lookup_publishes_once_and_honors_pause() {
 }
 
 #[tokio::test]
+async fn terminal_session_sync_uses_current_intent_and_queue_anchor() {
+    for change in ["playing", "paused", "anchor", "queue_row"] {
+        let (state, runtime, gate) = near_end_fixture(false).await;
+        let resumed_at = {
+            let mut guard = state.write().await;
+            guard.active_listen_session = Some(player::ActiveListenSession::start(
+                1,
+                chrono::Utc::now() - chrono::Duration::seconds(8),
+                crate::db::models::ListenSource::Manual,
+                None,
+            ));
+            guard.active_listen_session.as_ref().unwrap().resumed_at
+        };
+        let reader = state.read().await;
+        let previous = reader.db.with_conn(player::load_snapshot).unwrap();
+        let mut events = reader.event_tx.subscribe();
+        let listener = spawn_playback_runtime_listener(state.clone(), runtime.handle.clone());
+        assert!(runtime.handle.test_publish_event(
+            playback_runtime::PlaybackRuntimeEvent::Finished {
+                track_id: 1,
+                generation: 0,
+                source_identity: runtime.handle.playback_source_identity(),
+            }
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let advanced = reader.db.with_conn(player::load_snapshot).unwrap();
+        assert_eq!(advanced.state.current_track.as_ref().unwrap().id, 2);
+        match change {
+            "paused" => {
+                reader.db.with_conn(player::pause).unwrap();
+            }
+            "anchor" => {
+                reader.db.with_conn(|conn| {
+                    conn.execute("UPDATE playback_state SET current_track_id=1, current_queue_item_id=?1 WHERE id=1", [previous.state.current_queue_item_id])?;
+                    Ok(())
+                }).unwrap();
+            }
+            "queue_row" => {
+                reader
+                    .db
+                    .with_conn(|conn| {
+                        conn.execute(
+                            "UPDATE playback_state SET current_queue_item_id=NULL WHERE id=1",
+                            [],
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            _ => {}
+        }
+        drop(reader);
+        if matches!(change, "playing" | "paused") {
+            tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+                .await
+                .unwrap();
+        } else {
+            assert!(runtime.handle.test_publish_event(
+                playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                    output_identity: runtime.handle.test_exclusive_event_identity(),
+                    device_name: "listener barrier".into(),
+                    transport_format: "test format".into(),
+                }
+            ));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !matches!(
+                    events.recv().await.unwrap(),
+                    AppEvent::AudioExclusiveEngaged { .. }
+                ) {}
+            })
+            .await
+            .unwrap();
+        }
+        let guard = state.read().await;
+        let rows: i64 = guard
+            .db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM listen_history WHERE track_id=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        match change {
+            "playing" => {
+                let session = guard.active_listen_session.as_ref().unwrap();
+                assert_eq!(session.track_id, 2);
+                assert!(session.resumed_at.is_some());
+                assert_eq!(rows, 1);
+            }
+            "paused" => {
+                assert!(
+                    guard.active_listen_session.is_none(),
+                    "paused handoff started a running listen session"
+                );
+                assert_eq!(rows, 1);
+            }
+            _ => {
+                let session = guard
+                    .active_listen_session
+                    .as_ref()
+                    .expect("obsolete anchor flushed the active session");
+                assert_eq!(session.track_id, 1);
+                assert_eq!(session.resumed_at, resumed_at);
+                assert_eq!(rows, 0);
+                assert_eq!(
+                    guard.db.with_conn(player::current_track_id).unwrap(),
+                    Some(if change == "anchor" { 1 } else { 2 })
+                );
+                assert!(
+                    runtime.commands.try_recv().is_err(),
+                    "obsolete anchor dispatched audio"
+                );
+            }
+        }
+        drop(guard);
+        listener.abort();
+        assert!(listener.await.unwrap_err().is_cancelled());
+        gate.release.notify_one();
+    }
+}
+
+#[tokio::test]
 async fn near_end_resolution_cannot_dispatch_to_replaced_runtime_or_publish_its_metadata() {
     let (state, old, source) = near_end_fixture(false).await;
     let pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, old.handle.clone()));

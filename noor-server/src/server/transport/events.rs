@@ -1718,7 +1718,7 @@ async fn handle_runtime_finished_for_owner(
     } else {
         Some(player::ListenSessionEndReason::QueueEnded)
     };
-    sync_session_after_snapshot_for_owner(
+    if !sync_session_after_snapshot_for_owner(
         &state,
         &snapshot,
         end_reason,
@@ -1726,7 +1726,10 @@ async fn handle_runtime_finished_for_owner(
             .zip(expected_source)
             .map(|(runtime, source)| (generation, runtime, source)),
     )
-    .await;
+    .await
+    {
+        return Ok(());
+    }
     let owner_is_current = {
         let state_guard = state.read().await;
         runtime_finish_owner_is_current(&state_guard, generation, expected_runtime, expected_source)
