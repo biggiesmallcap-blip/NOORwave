@@ -125,6 +125,8 @@
 	import { videoSession } from '$lib/stores/video_session';
 	import { isVideoSectionPath } from '$lib/video/section';
 	import VideoDock from '$lib/components/video/VideoDock.svelte';
+	import { handleVideoShortcut } from '$lib/video/controls';
+	import { installVideoMediaKeys } from '$lib/tauri/video_media_keys';
 	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 
 	let { children } = $props();
@@ -445,12 +447,14 @@
 		};
 
 		window.addEventListener('keydown', handleGlobalKeydown);
+		const cleanupVideoMediaKeys = installVideoMediaKeys();
 		window.addEventListener('wheel', handleGlobalWheel, { passive: false });
 		window.addEventListener('focus', refreshTidalAfterWake);
 		window.addEventListener('online', refreshTidalAfterWake);
 		document.addEventListener('visibilitychange', refreshTidalWhenVisible);
 		return () => {
 			window.removeEventListener('keydown', handleGlobalKeydown);
+			cleanupVideoMediaKeys();
 			window.removeEventListener('wheel', handleGlobalWheel);
 			window.removeEventListener('focus', refreshTidalAfterWake);
 			window.removeEventListener('online', refreshTidalAfterWake);
@@ -503,6 +507,7 @@
 	}
 
 	function handleGlobalKeydown(event: KeyboardEvent) {
+		if (event.defaultPrevented) return;
 		if (videoQueueDrawerOpen && event.key === 'Escape') {
 			event.preventDefault();
 			videoQueueDrawerOpen = false;
@@ -559,6 +564,8 @@
 		}
 
 		if (shortcutsBlocked()) return;
+		if (!((event.key === ' ' || event.key === 'Spacebar') && spaceActivatesFocusedControl(event.target as HTMLElement | null))
+			&& handleVideoShortcut(event)) return;
 
 		if (event.key === 'q' || event.key === 'Q') {
 			event.preventDefault();

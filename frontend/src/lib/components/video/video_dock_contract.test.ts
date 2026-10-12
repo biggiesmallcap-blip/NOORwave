@@ -17,6 +17,12 @@ describe('persistent video dock contract', () => {
 		expect(layout).toContain('<VideoDock />');
 	});
 
+	test('loading another stream keeps the session mounted and fullscreen active', () => {
+		expect(dock).toContain('let active = $derived($videoSession.active);');
+		expect(dock).toContain("src={$videoSession.streamUrl ?? ''}");
+		expect(dock).not.toContain('$videoSession.active && Boolean($videoSession.streamUrl)');
+	});
+
 	test('docks into the watch page stage, corner player everywhere else', () => {
 		// Full mode follows the published stage, not the path: only the watch
 		// page publishes one, and a stage with no size (hidden under search

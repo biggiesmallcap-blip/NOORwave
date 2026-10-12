@@ -4,9 +4,12 @@
 	import type Hls from 'hls.js';
 	import type { VideoQualityMode } from '$lib/api/client';
 	import { isPlaying, togglePlayback } from '$lib/stores/player';
+	import FullscreenVideoQueue from './FullscreenVideoQueue.svelte';
+	import { handleVideoShortcut, registerVideoControls, type VideoControl } from '$lib/video/controls';
 
 	type Props = {
 		src: string;
+		streamError?: string | null;
 		poster?: string | null;
 		title?: string;
 		artist?: string | null;
@@ -34,6 +37,7 @@
 
 	let {
 		src,
+		streamError = null,
 		poster = null,
 		title = 'Video',
 		artist = null,
@@ -65,6 +69,7 @@
 	let unsupported = $state(false);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let displayError = $derived(streamError ?? error);
 	let playing = $state(false);
 	let duration = $state(0);
 	let currentTime = $state(0);
@@ -74,6 +79,8 @@
 	let levels = $state<{ index: number; label: string }[]>([]);
 	let selectedLevel = $state(-1);
 	let chromeVisible = $state(true);
+	let queueOpen = $state(false);
+	let queueButton: HTMLButtonElement | null = $state(null);
 	let upNextVisible = $state(false);
 	let retryUsed = false;
 	let mounted = false;
@@ -153,7 +160,7 @@
 
 	function scheduleChromeHide() {
 		clearChromeTimer();
-		if (!fullscreen || !playing) return;
+		if (!fullscreen || !playing || queueOpen) return;
 		chromeHideTimer = setTimeout(() => {
 			chromeVisible = false;
 			chromeHideTimer = null;
@@ -200,6 +207,11 @@
 		retryUsed = resumeAt > 0 ? retryUsed : false;
 		videoEl.removeAttribute('src');
 		videoEl.load();
+		playing = false;
+		currentTime = 0;
+		duration = 0;
+		upNextVisible = false;
+		if (!nextSrc) return;
 
 		if (HlsClass.isSupported()) {
 			const instance = new HlsClass({ enableWorker: true });
@@ -315,27 +327,46 @@
 
 	function handleKeydown(event: KeyboardEvent) {
 		if (skipTypingTarget(event.target)) return;
-		if (event.key === ' ') {
+		if (event.key === 'Escape' && queueOpen) {
 			event.preventDefault();
-			togglePlay();
-		} else if (event.key.toLowerCase() === 'f') {
-			event.preventDefault();
-			void toggleFullscreen();
-		} else if (event.key.toLowerCase() === 'm') {
-			event.preventDefault();
-			toggleMute();
-		} else if (event.key === 'ArrowLeft') {
-			event.preventDefault();
-			seek(Math.max(0, currentTime - 10));
-		} else if (event.key === 'ArrowRight') {
-			event.preventDefault();
-			seek(Math.min(duration || currentTime + 10, currentTime + 10));
+			event.stopPropagation();
+			closeQueue();
+			return;
 		}
+		if (event.key === ' ' && event.target instanceof HTMLElement && event.target.closest('button, a[href]')) return;
+		if (handleVideoShortcut(event)) event.stopPropagation();
 	}
+
+	function closeQueue() {
+		queueOpen = false;
+		queueButton?.focus();
+		revealChrome();
+	}
+
+	function handleControl(action: VideoControl): boolean {
+		switch (action) {
+			case 'toggle': togglePlay(); break;
+			case 'fullscreen': void toggleFullscreen(); break;
+			case 'mute': toggleMute(); break;
+			case 'seek-back': seek(Math.max(0, currentTime - 10)); break;
+			case 'seek-forward': seek(Math.min(duration || currentTime + 10, currentTime + 10)); break;
+			case 'volume-up': setVolume(volume + 0.05); break;
+			case 'volume-down': setVolume(volume - 0.05); break;
+			case 'queue':
+				if (!fullscreen) return false;
+				queueOpen = !queueOpen;
+				break;
+		}
+		revealChrome();
+		return true;
+	}
+
+	$effect(() => registerVideoControls(handleControl));
 
 	onMount(async () => {
 		mounted = true;
 		const mod = await import('hls.js');
+		if (!mounted) return;
 		HlsClass = mod.default;
 		restoreVolume();
 		fullscreenListener = () => {
@@ -359,8 +390,12 @@
 	});
 
 	$effect(() => {
-		if (!mounted || !src || src === currentSrc) return;
+		if (!mounted || src === currentSrc) return;
 		void load(src);
+	});
+
+	$effect(() => {
+		if (!fullscreen) queueOpen = false;
 	});
 
 	$effect(() => {
@@ -448,23 +483,29 @@
 			muted = videoEl?.muted ?? muted;
 			persistVolume();
 		}}
-		onerror={() => handleFatalError('This video could not be loaded.')}
+		onerror={() => { if (src) handleFatalError('This video could not be loaded.'); }}
 		onclick={handleSurfaceClick}
 		ondblclick={handleSurfaceDoubleClick}
 	></video>
 
-	{#if loading && !error && !unsupported}
+	{#if loading && !displayError && !unsupported}
 		<div class="status" role="status" aria-live="polite">Loading video…</div>
 	{/if}
 
-	{#if error}
-		<div class="status error" role="alert">{error}</div>
+	{#if displayError}
+		<div class="status error" role="alert">{displayError}</div>
 	{/if}
 
 	<div class="top-meta">
 		<strong>{title}</strong>
 		{#if artist}<span>{artist}</span>{/if}
 	</div>
+
+	{#if fullscreen}
+		<button bind:this={queueButton} type="button" class="queue-toggle" onclick={() => handleControl('queue')}
+			aria-label="Video queue" aria-expanded={queueOpen} aria-controls="fullscreen-video-queue" title="Video queue (Q)">Queue</button>
+		{#if queueOpen}<FullscreenVideoQueue onClose={closeQueue} />{/if}
+	{/if}
 
 	{#if autoplayNext && upNextTitle && upNextVisible}
 		<div class="up-next-pill">
@@ -687,7 +728,8 @@
 	}
 
 	.chrome-hidden .top-meta,
-	.chrome-hidden .controls {
+	.chrome-hidden .controls,
+	.chrome-hidden .queue-toggle {
 		opacity: 0;
 		pointer-events: none;
 	}
@@ -766,6 +808,19 @@
 
 	.fullscreen {
 		border-radius: 0;
+	}
+
+	.queue-toggle {
+		position: absolute;
+		z-index: 3;
+		top: var(--space-4);
+		right: var(--space-4);
+		min-height: 36px;
+		padding: 0 var(--space-3);
+		border-radius: 999px;
+		background: rgb(0 0 0 / 76%);
+		color: white;
+		transition: opacity var(--motion-base);
 	}
 
 	@keyframes up-next-drop {

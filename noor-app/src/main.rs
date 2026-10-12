@@ -58,6 +58,7 @@ fn main() {
         .manage(lifecycle.clone() as Arc<remote_lifecycle::RemoteLifecycle>)
         .manage(startup::StartupRuntime::new(launch_mode))
         .manage(video_fullscreen::VideoFullscreen::default())
+        .manage(media_keys::VideoMediaKeys::default())
         .invoke_handler(tauri::generate_handler![
             commands::check_for_updates_now,
             commands::get_update_state,
@@ -71,6 +72,7 @@ fn main() {
             startup::get_startup_state,
             startup::set_start_at_login,
             video_fullscreen::set_video_fullscreen,
+            media_keys::set_video_media_active,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

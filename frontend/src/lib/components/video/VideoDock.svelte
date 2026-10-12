@@ -52,7 +52,9 @@
 	// page publishes one, and a stage hidden under search results (zero size)
 	// drops the player to the corner instead of shrinking it to nothing.
 	let onWatchPage = $derived(page.url.pathname === WATCH_PATH);
-	let active = $derived($videoSession.active && Boolean($videoSession.streamUrl));
+	// Stream URLs are cleared while switching videos. The session stays mounted
+	// throughout that gap so fullscreen, focus and the player element survive.
+	let active = $derived($videoSession.active);
 	/** Set by the frame loop: the panel's artwork slot exists and is big enough
 	 *  to watch in (the bottom layout's 96 px thumbnail is not). */
 	let panelUsable = $state(false);
@@ -710,7 +712,8 @@
 	>
 		<div class="player-surface" aria-hidden={mode === 'mini' && collapsed}>
 			<VideoPlayer
-				src={$videoSession.streamUrl!}
+				src={$videoSession.streamUrl ?? ''}
+				streamError={$videoSession.error}
 				poster={$videoSession.current?.artwork_url}
 				title={$videoSession.current?.title ?? 'Video'}
 				artist={$videoSession.current?.artist_name ?? null}

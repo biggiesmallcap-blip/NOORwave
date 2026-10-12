@@ -14,6 +14,7 @@ fn main() {
         "get_startup_state",
         "set_start_at_login",
         "set_video_fullscreen",
+        "set_video_media_active",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to build Tauri app permissions");
