@@ -909,6 +909,15 @@ export const api = {
 		});
 	},
 
+	/** Save an ordered snapshot to TIDAL and its linked local playlist. */
+	createTidalPlaylist(name: string, trackIds: number[], tidalTrackIds: number[]) {
+		return fetchApi<{ playlist: Playlist }>('/api/playlists', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ name, track_ids: trackIds, tidal_track_ids: tidalTrackIds, sync_to_tidal: true }),
+			timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS,
+		});
+	},
+
 	/** Delete any playlist. TIDAL-mirrored ones are deleted on TIDAL too. */
 	deletePlaylist(id: number) {
 		return fetchApi<{ deleted: boolean }>(`/api/playlists/${id}`, undefined, {
@@ -1223,10 +1232,10 @@ export const api = {
 		}
 	},
 
-	getTidalPlaylistTracks(tidalUuid: string) {
+	getTidalPlaylistTracks(tidalUuid: string, refresh = false) {
 		return fetchApi<{ tracks: TidalPlayable[] }>(
 			`/api/tidal/playlists/${tidalUuid}/tracks`,
-			undefined,
+			refresh ? { refresh: 'true' } : undefined,
 			{ timeoutMs: BULK_QUEUE_API_TIMEOUT_MS },
 		);
 	},

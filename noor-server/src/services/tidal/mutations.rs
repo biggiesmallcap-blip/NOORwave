@@ -2,6 +2,112 @@ use anyhow::Result;
 
 use super::client::TidalClient;
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "The unfinished TIDAL playlist {playlist_uuid} could not be removed. Check your TIDAL playlists before retrying."
+)]
+pub struct UnfinishedPlaylist {
+    pub playlist_uuid: String,
+    #[source]
+    source: anyhow::Error,
+}
+
+/// Create a named snapshot in the user's collection, preserving repeated tracks.
+pub async fn create_playlist_snapshot(
+    client: &TidalClient,
+    title: &str,
+    description: Option<&str>,
+    track_ids: &[i64],
+) -> Result<String> {
+    check_library_writes()?;
+    create_playlist_snapshot_at(client, title, description, track_ids).await
+}
+
+async fn create_playlist_snapshot_at(
+    client: &TidalClient,
+    title: &str,
+    description: Option<&str>,
+    track_ids: &[i64],
+) -> Result<String> {
+    anyhow::ensure!(!track_ids.is_empty(), "Cannot save an empty snapshot");
+    let country_code = client.country_code();
+    let response = client
+        .send_authed(|http, api_base, bearer| {
+            let base = api_base.trim_end_matches("/v1");
+            http.put(format!(
+                "{base}/v2/my-collection/playlists/folders/create-playlist"
+            ))
+            .header("Authorization", bearer)
+            .query(&[
+                ("name", title),
+                ("description", description.unwrap_or_default()),
+                ("folderId", "root"),
+                ("countryCode", country_code),
+            ])
+        })
+        .await?;
+    let body: serde_json::Value = checked_playlist_response(response).await?.json().await?;
+    let uuid = body
+        .pointer("/data/uuid")
+        .and_then(|value| value.as_str())
+        .filter(|uuid| !uuid.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("TIDAL did not return the created playlist id"))?
+        .to_string();
+    let populate = async {
+        for batch in track_ids.chunks(100) {
+            let etag = get_playlist_etag(client, &uuid).await?;
+            let ids = batch
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let response = client
+                .send_authed(|http, api_base, bearer| {
+                    http.post(format!("{api_base}/playlists/{uuid}/items"))
+                        .header("Authorization", bearer)
+                        .header("If-None-Match", &etag)
+                        .query(&[("countryCode", country_code)])
+                        .form(&[
+                            ("trackIds", ids.as_str()),
+                            ("onDupes", "ADD"),
+                            ("onArtifactNotFound", "FAIL"),
+                        ])
+                })
+                .await?;
+            let body: serde_json::Value = checked_playlist_response(response).await?.json().await?;
+            let added = body.get("addedItemIds").and_then(|value| value.as_array());
+            anyhow::ensure!(
+                added.is_some_and(|items| items.len() == batch.len()),
+                "TIDAL did not save every track in the snapshot"
+            );
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = populate {
+        if delete_playlist(client, &uuid).await.is_err() {
+            return Err(UnfinishedPlaylist {
+                playlist_uuid: uuid,
+                source: error,
+            }
+            .into());
+        }
+        return Err(error);
+    }
+    Ok(uuid)
+}
+
+async fn checked_playlist_response(response: reqwest::Response) -> Result<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let retry_after = crate::services::tidal::backoff::retry_after_secs(response.headers());
+    let body = response.text().await.unwrap_or_default();
+    crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
+    anyhow::bail!("TIDAL playlist error {status}: {body}")
+}
+
 fn writes_allowed(policy: Option<&str>, development: bool) -> bool {
     match policy {
         Some("allow") => true,
@@ -29,6 +135,116 @@ pub(crate) fn check_library_writes() -> Result<()> {
 
 #[cfg(test)]
 mod write_policy_tests {
+    struct NoRefresh;
+    #[async_trait::async_trait]
+    impl crate::services::tidal::session::TokenRefresher for NoRefresh {
+        async fn refresh(
+            &self,
+            _: &crate::services::tidal::auth::TidalTokens,
+        ) -> anyhow::Result<crate::services::tidal::auth::TidalTokens> {
+            anyhow::bail!("Unexpected token refresh in snapshot fixture")
+        }
+    }
+    #[tokio::test]
+    async fn playlist_snapshot_save_populates_with_etag_and_cleans_up_partial_saves() {
+        use axum::{Router, body::Body, http::Request};
+        use std::sync::{Arc, Mutex};
+        for (partial, cleanup_fails) in [(false, false), (true, false), (true, true)] {
+            let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+            let recorded = calls.clone();
+            let app = Router::new().fallback(move |request: Request<Body>| {
+                let recorded = recorded.clone();
+                async move {
+                    let method = request.method().to_string();
+                    let uri = request.uri().to_string();
+                    let etag = request
+                        .headers()
+                        .get("If-None-Match")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let body = axum::body::to_bytes(request.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    recorded.lock().unwrap().push(format!(
+                        "{method} {uri} {etag} {}",
+                        String::from_utf8_lossy(&body)
+                    ));
+                    let json = match method.as_str() {
+                        "PUT" => r#"{"data":{"uuid":"saved-uuid"}}"#,
+                        "GET" => "{}",
+                        "POST" if partial => r#"{"addedItemIds":[42]}"#,
+                        "POST" => r#"{"addedItemIds":[42,17,42]}"#,
+                        _ => "{}",
+                    };
+                    let status = if method == "DELETE" && cleanup_fails {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        axum::http::StatusCode::OK
+                    };
+                    (
+                        status,
+                        [("content-type", "application/json"), ("etag", "revision-1")],
+                        json,
+                    )
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let session = crate::services::tidal::session::TidalSession::new(
+                crate::services::tidal::session::TidalSessionConfig {
+                    api_http: reqwest::Client::new(),
+                    api_base: format!("http://{address}/v1"),
+                    refresher: Arc::new(NoRefresh),
+                    store: None,
+                    events: None,
+                },
+                Some(crate::services::tidal::auth::TidalTokens {
+                    access_token: "test-token".into(),
+                    refresh_token: "test-refresh".into(),
+                    token_type: "Bearer".into(),
+                    expires_in: 3600,
+                    user_id: "test".into(),
+                    country_code: "AU".into(),
+                    auth_flow: Some("pkce".into()),
+                }),
+            );
+            let result = super::create_playlist_snapshot_at(
+                &session.client().unwrap(),
+                "Saved mix",
+                None,
+                &[42, 17, 42],
+            )
+            .await;
+            let calls = calls.lock().unwrap();
+            assert!(calls[0].contains(
+                "PUT /v2/my-collection/playlists/folders/create-playlist?name=Saved+mix"
+            ));
+            assert!(calls[2].contains("revision-1 trackIds=42%2C17%2C42"));
+            assert!(calls[2].contains("onDupes=ADD"));
+            assert!(calls[2].contains("onArtifactNotFound=FAIL"));
+            if partial {
+                assert!(result.is_err());
+                assert!(calls[3].starts_with("DELETE /v1/playlists/saved-uuid"));
+                if cleanup_fails {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .downcast_ref::<super::UnfinishedPlaylist>()
+                            .is_some()
+                    );
+                }
+            } else {
+                assert_eq!(result.unwrap(), "saved-uuid");
+                assert_eq!(calls.len(), 3);
+            }
+            server.abort();
+        }
+    }
+
     #[test]
     fn development_denies_writes_and_installed_explicit_actions_remain_enabled() {
         assert!(!super::writes_allowed(None, true));
@@ -146,17 +362,20 @@ pub async fn add_to_playlist(
         .collect::<Vec<_>>()
         .join(",");
     let country_code = client.country_code().to_string();
-    let resp = client
-        .send_authed(|http, api_base, bearer| {
-            http.post(format!(
-                "{}/playlists/{}/items?countryCode={}",
-                api_base, playlist_uuid, country_code
-            ))
-            .header("Authorization", bearer)
-            .form(&[("trackIds", ids.clone())])
-        })
-        .await?;
-    ensure_success(resp).await
+    check_library_writes()?;
+    with_playlist_etag(client, playlist_uuid, |http, api_base, bearer, etag| {
+        http.post(format!(
+            "{api_base}/playlists/{playlist_uuid}/items?countryCode={country_code}"
+        ))
+        .header("Authorization", bearer)
+        .header("If-None-Match", etag)
+        .form(&[
+            ("trackIds", ids.as_str()),
+            ("onDupes", "SKIP"),
+            ("onArtifactNotFound", "FAIL"),
+        ])
+    })
+    .await
 }
 
 pub async fn remove_favorite_tracks(

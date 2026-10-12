@@ -29,9 +29,10 @@ describe('context menu icon contracts', () => {
 	test('TIDAL playlist actions use a glyph icon', () => {
 		const source = readFileSync(join(sourceRoot, 'lib/components/search/TidalDiscoverShelves.svelte'), 'utf8');
 
-		expect(source).toContain("label: 'Play playlist'");
-		expect(source).toContain("icon: '▶'");
-		expect(source).not.toContain("icon: 'Play'");
+		expect(source).toContain('buildTidalCollectionMenu(');
+		const builder = readFileSync(join(sourceRoot, 'lib/player/tidal_collection_menu.ts'), 'utf8');
+		expect(builder).toContain("label: 'Play', icon: '▶'");
+		expect(builder).not.toContain("icon: 'Play'");
 	});
 
 	test('source is free of UTF-8-as-Latin1 mojibake', () => {

@@ -823,19 +823,11 @@ async fn do_tidal_sync(
                         )
                         .ok();
                     conn.execute(
-                        "INSERT INTO playlists (tidal_uuid, name, description, track_count, tidal_last_updated, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?5, datetime('now')))
-                         ON CONFLICT(tidal_uuid) DO UPDATE SET
-                           name = excluded.name,
-                           description = excluded.description,
-                           track_count = excluded.track_count,
-                           tidal_last_updated = excluded.tidal_last_updated,
-                           updated_at = COALESCE(excluded.tidal_last_updated, playlists.updated_at)",
+                        TIDAL_PLAYLIST_INDEX_UPSERT,
                         rusqlite::params![
                             playlist.uuid,
                             playlist.title,
                             playlist.description,
-                            remote_count,
                             remote_last_updated,
                         ],
                     )?;
@@ -858,7 +850,16 @@ async fn do_tidal_sync(
                 let tracks =
                     fetch_tidal_playlist_tracks(client, &playlist.uuid, &check_cancel).await?;
                 let s = state.read().await;
-                s.db.with_conn(|conn| replace_playlist_tracks(conn, pid, &tracks))?;
+                s.db.with_conn(|conn| {
+                    replace_playlist_tracks(conn, pid, &tracks)?;
+                    // Only a completed pull acknowledges the remote revision.
+                    // Otherwise a failed fetch makes the next incremental sync skip stale tracks.
+                    conn.execute(
+                        "UPDATE playlists SET tidal_last_updated = ?2 WHERE id = ?1",
+                        rusqlite::params![pid, remote_last_updated],
+                    )?;
+                    Ok(())
+                })?;
             }
             stats.playlists += 1;
             // Playlists phase: 0.45 to 0.55; enrichment takes 0.55 to 0.99.
@@ -1510,6 +1511,13 @@ fn normalize_tidal_timestamp(raw: Option<&str>) -> Option<String> {
 /// for a playlist we have never seen. Re-pull whenever TIDAL reports a change,
 /// whenever the counts disagree, and whenever either side's timestamp is
 /// missing - an unknown is not evidence that nothing changed.
+const TIDAL_PLAYLIST_INDEX_UPSERT: &str = "INSERT INTO playlists (tidal_uuid, name, description, track_count, tidal_last_updated, updated_at)
+    VALUES (?1, ?2, ?3, 0, NULL, COALESCE(?4, datetime('now')))
+    ON CONFLICT(tidal_uuid) DO UPDATE SET
+        name = excluded.name,
+        description = excluded.description,
+        updated_at = COALESCE(?4, playlists.updated_at)";
+
 fn playlist_needs_pull(
     previous: Option<(Option<&str>, i64)>,
     remote_last_updated: Option<&str>,
@@ -1527,6 +1535,48 @@ fn playlist_needs_pull(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_index_does_not_acknowledge_tracks_before_a_successful_pull() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE playlists (tidal_uuid TEXT UNIQUE, name TEXT, description TEXT, track_count INTEGER, tidal_last_updated TEXT, updated_at TEXT);
+            INSERT INTO playlists VALUES ('mix-snapshot', 'Before', NULL, 2, 'old', 'old');").unwrap();
+        conn.execute(
+            TIDAL_PLAYLIST_INDEX_UPSERT,
+            rusqlite::params!["mix-snapshot", "After", "description", "new"],
+        )
+        .unwrap();
+        // The track request can fail here. Retrying must still see a changed revision.
+        let (seen, count): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT tidal_last_updated, track_count FROM playlists",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(seen.as_deref(), Some("old"));
+        assert_eq!(count, 2);
+        assert!(playlist_needs_pull(
+            Some((seen.as_deref(), count)),
+            Some("new"),
+            3
+        ));
+        // A new playlist also remains unacknowledged until its tracks land.
+        conn.execute(
+            TIDAL_PLAYLIST_INDEX_UPSERT,
+            rusqlite::params!["fresh", "Fresh", "", "new"],
+        )
+        .unwrap();
+        let (seen, count): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT tidal_last_updated, track_count FROM playlists WHERE tidal_uuid='fresh'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(seen.is_none());
+        assert_eq!(count, 0);
+    }
     use crate::db::queries::SyncInfo;
     use crate::services::tidal::client::TidalArtist;
     use std::collections::HashMap;

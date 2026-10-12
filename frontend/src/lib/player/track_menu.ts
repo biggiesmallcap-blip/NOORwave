@@ -11,12 +11,14 @@ import {
 	startSongRadio,
 	toggleTrackFavorite,
 	playTidalTrackNow,
+	playQueueItemNow,
 	playTidalTrackNext,
 	addTidalTrackToQueue,
 	startTidalSongRadio,
 	toggleTidalTrackFavorite,
 } from '$lib/stores/player';
-import type { TidalPlayable } from '$lib/api/client';
+import { api, type TidalPlayable } from '$lib/api/client';
+import { choosePlaylist } from '$lib/stores/add_to_playlist';
 import { canPlayTrack, getPlayableLabel } from '$lib/player/playable';
 import { downloadTrack, downloadTidalTrack, type DownloadFormat } from '$lib/stores/downloads';
 import { notForMeMenuItem } from '$lib/player/not_for_me';
@@ -150,6 +152,9 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 	const hasAlbum = !options.hideAlbumActions && track.album_id != null;
 	const hasArtist = !options.hideArtistActions && track.artist_id != null && track.artist_id > 0;
 	const isQueueItem = options.queueItemId != null;
+	if (isQueueItem) {
+		items.push({ label: 'Play now', icon: '▶', onSelect: () => void playQueueItemNow(options.queueItemId!) });
+	}
 
 	items.push({
 		label: isQueueItem ? 'Move next' : 'Play next',
@@ -219,6 +224,8 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 			icon: '＋',
 			submenu: options.addToPlaylistSubmenu
 		});
+	} else if (!options.remoteRoutes) {
+		items.push({ label: 'Add to playlist', icon: '＋', onSelect: () => choosePlaylist(track.title, async () => [track.id]) });
 	}
 
 	if (!options.remoteRoutes) {
@@ -252,7 +259,10 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 	const playable = canPlayTrack(track);
 	const playableLabel = getPlayableLabel(track);
 	const queueItemId = options.queueItemId;
+	const inQueue = options.inQueue || queueItemId != null;
 	const items: MenuItem[] = [
+		{ label: 'Play now', icon: '▶', disabled: !playable, hint: playable ? undefined : playableLabel,
+			onSelect: () => queueItemId != null ? void playQueueItemNow(queueItemId) : void playTidalTrackNow(track) },
 		queueItemId != null
 			? {
 					label: 'Move next',
@@ -266,7 +276,7 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 					hint: playable ? undefined : playableLabel,
 					onSelect: () => void playTidalTrackNext(track),
 				},
-		...(options.inQueue
+		...(inQueue
 			? []
 			: [{
 					label: 'Add to queue',
@@ -308,20 +318,18 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 	// id first (same trick as song radio / download), so the user is never stuck
 	// with no way to like the song.
 	const isFavorite = track.is_favorite ?? false;
+	if (!options.remoteRoutes && playable) {
+		items.push({ label: 'Add to playlist', icon: '＋', onSelect: () => choosePlaylist(track.title, async () => {
+			const { local_id } = await api.importTidalTrackForRadio(track);
+			return [local_id];
+		}) });
+	}
 	items.push({
 		label: isFavorite ? 'Remove from favourites' : 'Add to favourites',
 		icon: isFavorite ? '♥' : '♡',
 		onSelect: () => void toggleTidalTrackFavorite(track, isFavorite),
 	});
 	items.push(SEPARATOR);
-
-	items.push({
-		label: 'Play now',
-		icon: '▶',
-		disabled: !playable,
-		hint: playable ? undefined : playableLabel,
-		onSelect: () => void playTidalTrackNow(track),
-	});
 
 	// Download to disk works for any TIDAL track, library or not: the server imports it
 	// on demand to mint a local id. Desktop-only, same as the library menu.
