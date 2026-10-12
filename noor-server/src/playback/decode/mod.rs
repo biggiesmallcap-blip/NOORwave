@@ -429,6 +429,24 @@ pub(crate) fn decode_and_buffer_job(
     device_sample_rate: u32,
     device_channels: u16,
 ) -> Result<()> {
+    decode_and_buffer_job_with_resampler(
+        config,
+        job,
+        shared,
+        device_sample_rate,
+        device_channels,
+        StreamResampler::new,
+    )
+}
+
+fn decode_and_buffer_job_with_resampler(
+    config: PlaybackRuntimeConfig,
+    job: PreparedPlaybackJob,
+    shared: Arc<PlaybackSharedState>,
+    device_sample_rate: u32,
+    device_channels: u16,
+    mut make_resampler: impl FnMut(u32, u32, usize) -> Result<StreamResampler>,
+) -> Result<()> {
     match job.source {
         PlaybackSourceRequest::LocalLibrary => {
             return Err(anyhow!(
@@ -921,7 +939,7 @@ pub(crate) fn decode_and_buffer_job(
                         // line is worse than a visible track error, and the
                         // terminal-error path advances the queue anyway.
                         resampler = Some(
-                            StreamResampler::new(
+                            make_resampler(
                                 decoded_sample_rate,
                                 live_target_rate,
                                 device_channels as usize,
@@ -934,7 +952,7 @@ pub(crate) fn decode_and_buffer_job(
                         );
                     }
                     match resampler.as_mut() {
-                        Some(r) => r.process(&channelized),
+                        Some(r) => r.process(&channelized)?,
                         None => channelized,
                     }
                 };
@@ -971,16 +989,12 @@ pub(crate) fn decode_and_buffer_job(
                 }
             }
 
-            // Flush any residual samples held in the resampler at end-of-stream
-            // so the final fraction of a chunk doesn't get truncated.
+            // Drain the filter's delayed frames as well as residual input.
+            // EOF on a full input chunk still has a tail to deliver.
             if let Some(r) = resampler.as_mut() {
-                let tail = r.flush();
+                let tail = r.flush()?;
                 if !tail.is_empty() {
-                    let mut guard = shared
-                        .buffer
-                        .lock()
-                        .map_err(|_| anyhow!("playback buffer poisoned"))?;
-                    guard.samples.extend_from_slice(&tail);
+                    shared.append_decoded_samples(&tail)?;
                 }
             }
 
@@ -1124,6 +1138,173 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn resampled_http_wav_reaches_finished_pcm_buffer() {
+        for frames in [1, 1024, 1025, 4096, 4099] {
+            decode_resampled_http_wav(frames, false);
+        }
+    }
+
+    #[test]
+    fn resampled_http_wav_failure_cannot_publish_clean_eof() {
+        // One full chunk fails during a packet; a short clip fails in EOF
+        // draining. Both run the same decoder body used by playback.
+        for frames in [1024, 13] {
+            decode_resampled_http_wav(frames, true);
+        }
+    }
+
+    fn decode_resampled_http_wav(frames: usize, broken_resampler: bool) {
+        use crate::playback::player::ResolvedStream;
+        use crate::services::tidal::stream::{StreamInfo, StreamRequest};
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicU32, AtomicU64};
+
+        let mut samples: Vec<i16> = (0..frames)
+            .map(|frame| ((frame as f32 * 0.03).sin() * 12_000.0) as i16)
+            .collect();
+        samples[frames - 1] = 16_000;
+        let data_len = (samples.len() * 2) as u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&88_200u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for sample in &samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/resampler.wav", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("WAV fixture accept failed: {error}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let mut received = 0;
+            // TCP can split the request headers across reads. Finish consuming
+            // them before responding so unread input cannot reset the socket.
+            while !request[..received].ends_with(b"\r\n\r\n") {
+                assert!(received < request.len(), "WAV fixture request is too large");
+                let count = socket.read(&mut request[received..]).unwrap();
+                assert!(count > 0, "WAV fixture request ended before its headers");
+                received += count;
+            }
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len()).unwrap();
+            socket.write_all(&wav).unwrap();
+        });
+        let mut job = PreparedPlaybackJob::test_fixture(1, 7);
+        job.source = PlaybackSourceRequest::TidalStream(StreamRequest::new(1, "LOSSLESS"));
+        job.resolved_stream = Some(ResolvedStream {
+            info: StreamInfo {
+                url,
+                segment_urls: vec![],
+                segment_offsets_ms: vec![],
+                track_id: 1,
+                audio_quality: "LOSSLESS".into(),
+                codec: "wav".into(),
+                sample_rate: Some(44_100),
+                bit_depth: Some(16),
+            },
+            resolved_at: Instant::now(),
+        });
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(PlaybackSharedState::new(
+            1,
+            7,
+            job.source_kind(),
+            GaplessPlan::disabled(),
+            48_000,
+            2,
+            None,
+            command_tx,
+            Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        let config = PlaybackRuntimeConfig::new(reqwest::Client::new(), "test", None);
+        let result = if broken_resampler {
+            decode_and_buffer_job_with_resampler(
+                config,
+                job,
+                shared.clone(),
+                48_000,
+                2,
+                |in_rate, out_rate, channels| {
+                    let mut resampler = StreamResampler::new(in_rate, out_rate, channels)?;
+                    resampler.test_truncate_output_buffer();
+                    Ok(resampler)
+                },
+            )
+        } else {
+            decode_and_buffer_job(config, job, shared.clone(), 48_000, 2)
+        };
+        server.join().unwrap();
+        if broken_resampler {
+            let error = result.unwrap_err();
+            let context = if frames < 1024 {
+                "rubato EOF drain failed"
+            } else {
+                "rubato packet processing failed"
+            };
+            assert!(error.to_string().contains(context), "{error:#}");
+            assert!(!shared.buffer.lock().unwrap().finished);
+            assert_eq!(shared.total_samples.load(Ordering::Acquire), 0);
+            assert!(!command_rx.try_iter().any(|command| matches!(
+                command,
+                PlaybackRuntimeCommand::NextDecodeComplete { .. }
+            )));
+            return;
+        }
+        result.unwrap();
+        let stereo: Vec<f32> = samples
+            .iter()
+            .flat_map(|sample| {
+                let sample = *sample as f32 / 32_768.0;
+                [sample, sample]
+            })
+            .collect();
+        let mut expected = StreamResampler::new(44_100, 48_000, 2).unwrap();
+        let mut expected_samples = expected.process(&stereo).unwrap();
+        expected_samples.extend(expected.flush().unwrap());
+        let guard = shared.buffer.lock().unwrap();
+        assert!(guard.finished);
+        assert_eq!(
+            guard.samples.len(),
+            (frames * 48_000 + 44_100 / 2) / 44_100 * 2
+        );
+        assert!(guard.samples.iter().any(|sample| sample.abs() > 0.1));
+        assert_eq!(guard.samples, expected_samples);
+        assert_eq!(
+            shared.total_samples.load(Ordering::Acquire),
+            guard.samples.len() as u64
+        );
+    }
 
     fn test_track(track_id: i64) -> Track {
         Track {

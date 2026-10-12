@@ -53,6 +53,14 @@ pub fn global() -> &'static SpectrumCapture {
     CAPTURE.get_or_init(SpectrumCapture::empty)
 }
 
+/// Capture only after the background task or WS reader initializes the ring.
+/// The first audio callback must not allocate or wait for singleton setup.
+pub(crate) fn capture_output(interleaved: &[f32], channels: u16, sample_rate: u32) {
+    if let Some(capture) = CAPTURE.get() {
+        capture.push(interleaved, channels, sample_rate);
+    }
+}
+
 impl SpectrumCapture {
     fn empty() -> Self {
         SpectrumCapture {

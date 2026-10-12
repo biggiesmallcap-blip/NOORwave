@@ -1887,6 +1887,12 @@ fn callback_countdown_target_uses_decoded_end_and_survives_dispatch_delay() {
         &command_tx,
         &event_tx,
     );
+    state
+        .engine
+        .as_ref()
+        .unwrap()
+        .shared
+        .drain_rt_notifications(&command_tx, &event_tx);
     let captured_target = match command_rx.try_recv().unwrap() {
         PlaybackRuntimeCommand::CrossfadeStart {
             trigger_target_samples,
@@ -4104,6 +4110,7 @@ fn shared_state_emits_finished_terminal_command() {
             track_id,
             generation,
             outcome,
+            ..
         } => {
             assert_eq!(track_id, 42);
             assert_eq!(generation, 0);
@@ -4142,6 +4149,7 @@ fn shared_state_emits_error_terminal_command() {
             track_id,
             generation,
             outcome,
+            ..
         } => {
             assert_eq!(track_id, 7);
             assert_eq!(generation, 0);
@@ -4251,19 +4259,102 @@ fn get_buffered_ms_returns_zero_for_invalid_device_config() {
 #[test]
 fn report_runtime_command_error_emits_error_event() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    let mut state = test_runtime_loop_state();
 
-    report_runtime_command_error(
+    fail_runtime_command(
+        &mut state,
         &event_tx,
         "Play",
         anyhow::anyhow!("output device rejected stream"),
     );
 
     match event_rx.try_recv().expect("error event should be emitted") {
-        PlaybackRuntimeEvent::Error { message } => {
+        PlaybackRuntimeEvent::CommandError { message, .. } => {
             assert!(message.contains("Play failed"));
             assert!(message.contains("output device rejected stream"));
         }
         other => panic!("expected error event, got {other:?}"),
+    }
+}
+
+#[test]
+fn command_failure_hard_pauses_every_deck_before_reporting_error() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(1, 7));
+    state.next_engine = Some(test_engine_with_shared(2, 7));
+    state.fading_out_engine = Some(test_engine_with_shared(3, 7));
+    state.drop_preview_engine = Some(test_engine_with_shared(4, 7));
+    for engine in [
+        &state.engine,
+        &state.next_engine,
+        &state.fading_out_engine,
+        &state.drop_preview_engine,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        engine
+            .shared
+            .append_decoded_samples(&[0.25, -0.25, 0.5, -0.5])
+            .unwrap();
+        engine.shared.position_samples.store(96, Ordering::Relaxed);
+        engine.shared.begin_fade_out();
+    }
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    fail_runtime_command(
+        &mut state,
+        &event_tx,
+        "Resume",
+        anyhow::anyhow!("overlapping output failed"),
+    );
+    assert!(state.user_paused, "command failure must latch pause intent");
+    for engine in [
+        &state.engine,
+        &state.next_engine,
+        &state.fading_out_engine,
+        &state.drop_preview_engine,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(engine.shared.paused.load(Ordering::SeqCst));
+        assert!(!engine.shared.pause_fade_armed.load(Ordering::Relaxed));
+        assert!(!engine.shared.stopped.load(Ordering::Acquire));
+        assert_eq!(engine.shared.position_samples.load(Ordering::Relaxed), 96);
+        assert_eq!(engine.shared.buffer.lock().unwrap().samples.len(), 4);
+    }
+    assert!(matches!(
+        event_rx.try_recv().unwrap(),
+        PlaybackRuntimeEvent::CommandError { .. }
+    ));
+}
+
+#[test]
+fn command_error_keeps_generation_and_reader_identity_after_engine_teardown() {
+    let mut state = test_runtime_loop_state();
+    state.requested_generation = Some(7);
+    let engine = test_engine_with_shared(17, 7);
+    let source = Arc::clone(&engine.shared.handoff_elapsed_samples);
+    *state.handoff_elapsed_source.lock().unwrap() = Arc::clone(&source);
+    state.engine = Some(engine);
+    stop_all_engines(&mut state);
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    fail_runtime_command(
+        &mut state,
+        &event_tx,
+        "Play",
+        anyhow::anyhow!("cold start failed"),
+    );
+    match event_rx.try_recv().unwrap() {
+        PlaybackRuntimeEvent::CommandError {
+            generation,
+            source_identity,
+            ..
+        } => {
+            assert_eq!(generation, Some(7));
+            assert!(Arc::ptr_eq(&source_identity, &source));
+        }
+        other => panic!("expected command identity, got {other:?}"),
     }
 }
 
@@ -4831,6 +4922,7 @@ fn stall_tracker_ignores_paused_finished_drained_engine() {
 
 fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {
     PlaybackRuntimeLoopState {
+        requested_generation: None,
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
         device_name: "test".to_string(),
         device_sample_rate: 48_000,
@@ -4851,6 +4943,537 @@ fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {
         user_paused: false,
         silent_start_streak: 0,
     }
+}
+
+#[test]
+fn cpal_output_fault_hard_pauses_graph_without_finishing_queue() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(1, 7));
+    state.next_engine = Some(test_engine_with_shared(2, 7));
+    state.fading_out_engine = Some(test_engine_with_shared(3, 7));
+    state.drop_preview_engine = Some(test_engine_with_shared(4, 7));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    let stop = state.fading_out_engine.as_ref().unwrap().shared.stop_flag();
+    let output_live = Arc::new(AtomicBool::new(true));
+    state.engine.as_ref().unwrap().shared.begin_fade_out();
+
+    handle_cpal_output_error(
+        &mut state,
+        &event_tx,
+        3,
+        7,
+        Arc::clone(&stop),
+        Arc::clone(&output_live),
+        "device removed".into(),
+    );
+    handle_cpal_output_error(
+        &mut state,
+        &event_tx,
+        3,
+        7,
+        stop,
+        output_live,
+        "repeated driver error".into(),
+    );
+
+    assert!(state.user_paused);
+    for engine in [
+        &state.engine,
+        &state.next_engine,
+        &state.fading_out_engine,
+        &state.drop_preview_engine,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(engine.shared.paused.load(Ordering::Acquire));
+        assert!(!engine.shared.pause_fade_armed.load(Ordering::Acquire));
+        assert!(!engine.shared.stopped.load(Ordering::Acquire));
+    }
+    match event_rx.try_recv().unwrap() {
+        PlaybackRuntimeEvent::OutputFault {
+            active_track_id,
+            active_decoder_stop,
+            ..
+        } => {
+            assert_eq!(active_track_id, Some(1));
+            assert!(Arc::ptr_eq(
+                &active_decoder_stop.unwrap(),
+                &state.engine.as_ref().unwrap().shared.stopped
+            ));
+        }
+        other => panic!("expected typed fault, got {other:?}"),
+    }
+    assert!(event_rx.try_recv().is_err());
+}
+
+#[test]
+fn cpal_callback_fault_reaches_runtime_before_queued_resume() {
+    use crate::playback::output::cpal_shared::{CpalCallbackState, emit_cpal_stream_error};
+    let mut state = test_runtime_loop_state();
+    let mut engine = test_engine_with_shared(1, 7);
+    let live = Arc::new(AtomicBool::new(true));
+    let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
+    engine.test_attach_fault_mailbox(Arc::clone(&callback));
+    emit_cpal_stream_error(
+        &engine.shared,
+        &callback,
+        cpal::Error::with_message(
+            cpal::ErrorKind::DeviceNotAvailable,
+            "native driver disconnected",
+        ),
+    );
+    state.engine = Some(engine);
+    let (command_tx, command_rx) = mpsc::channel();
+    command_tx.send(PlaybackRuntimeCommand::Resume).unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    match receive_runtime_command(&state, &command_rx, &command_tx, &event_tx, Duration::ZERO)
+        .unwrap()
+    {
+        PlaybackRuntimeCommand::CpalOutputError {
+            track_id,
+            generation,
+            decoder_stop,
+            output_live,
+            message,
+        } => {
+            assert!(message.contains("native driver disconnected"));
+            assert!(Arc::ptr_eq(&output_live, &live));
+            handle_cpal_output_error(
+                &mut state,
+                &event_tx,
+                track_id,
+                generation,
+                decoder_stop,
+                output_live,
+                message,
+            );
+        }
+        other => panic!("fault must precede Resume, got {other:?}"),
+    }
+    assert!(state.user_paused);
+    assert!(state.engine.as_ref().unwrap().output_faulted);
+    assert!(matches!(
+        event_rx.try_recv().unwrap(),
+        PlaybackRuntimeEvent::OutputFault { .. }
+    ));
+    assert!(matches!(
+        receive_runtime_command(&state, &command_rx, &command_tx, &event_tx, Duration::ZERO)
+            .unwrap(),
+        PlaybackRuntimeCommand::Resume
+    ));
+    assert!(
+        callback
+            .take_command(&state.engine.as_ref().unwrap().shared)
+            .is_none()
+    );
+}
+
+#[test]
+fn delayed_cpal_output_fault_does_not_pause_replacement_or_new_output() {
+    let mut state = test_runtime_loop_state();
+    let retired = test_engine_with_shared(1, 7);
+    state.engine = Some(test_engine_with_shared(1, 7));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    handle_cpal_output_error(
+        &mut state,
+        &event_tx,
+        1,
+        7,
+        retired.shared.stop_flag(),
+        Arc::new(AtomicBool::new(true)),
+        "old decoder".into(),
+    );
+    let current_stop = state.engine.as_ref().unwrap().shared.stop_flag();
+    handle_cpal_output_error(
+        &mut state,
+        &event_tx,
+        1,
+        7,
+        current_stop,
+        Arc::new(AtomicBool::new(false)),
+        "old output".into(),
+    );
+    assert!(!state.user_paused);
+    assert!(
+        !state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::Acquire)
+    );
+    assert!(event_rx.try_recv().is_err());
+}
+
+#[test]
+fn cpal_fault_resume_rebuilds_failed_output_before_any_deck_can_unpause() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(1, 7));
+    state.next_engine = Some(test_engine_with_shared(2, 7));
+    state.fading_out_engine = Some(test_engine_with_shared(3, 7));
+    let (event_tx, _) = tokio::sync::broadcast::channel(8);
+    let stop = state.next_engine.as_ref().unwrap().shared.stop_flag();
+    handle_cpal_output_error(
+        &mut state,
+        &event_tx,
+        2,
+        7,
+        stop,
+        Arc::new(AtomicBool::new(true)),
+        "prepared endpoint failed".into(),
+    );
+    let mut rebuilt = Vec::new();
+    recover_faulted_shared_outputs(&mut state, |engine| {
+        assert!(engine.shared.paused.load(Ordering::Acquire));
+        rebuilt.push(engine.track_id);
+        Ok(48_000)
+    })
+    .unwrap();
+    assert_eq!(rebuilt, vec![2]);
+    assert!(!state.next_engine.as_ref().unwrap().output_faulted);
+    assert!(state.user_paused);
+    for engine in [&state.engine, &state.next_engine, &state.fading_out_engine]
+        .into_iter()
+        .flatten()
+    {
+        assert!(engine.shared.paused.load(Ordering::Acquire));
+    }
+    state.engine.as_mut().unwrap().output_faulted = true;
+    assert!(
+        recover_faulted_shared_outputs(&mut state, |_| Err(anyhow!("still disconnected"))).is_err()
+    );
+    assert!(state.engine.as_ref().unwrap().output_faulted);
+    assert!(
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::Acquire)
+    );
+}
+
+#[test]
+fn queued_terminal_from_same_job_retired_decoder_cannot_remove_replacement() {
+    let mut state = test_runtime_loop_state();
+    let (command_tx, command_rx) = mpsc::channel();
+    let old_shared = Arc::new(PlaybackSharedState::new(
+        1,
+        7,
+        PlaybackSourceKind::TidalStream,
+        GaplessPlan::disabled(),
+        48_000,
+        2,
+        None,
+        command_tx,
+        Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(0)),
+    ));
+    let mut retired = PlaybackEngine::test_with_shared(1, 7, Arc::clone(&old_shared));
+    old_shared
+        .signal_terminal(PlaybackTerminalReason::Error("old failure".into()))
+        .unwrap();
+    retired.stop();
+    state.engine = Some(test_engine_with_shared(1, 7));
+    let replacement = state.engine.as_ref().unwrap().shared.stop_flag();
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    if let PlaybackRuntimeCommand::TrackTerminal {
+        track_id,
+        generation,
+        decoder_stop,
+        outcome,
+    } = command_rx.try_recv().unwrap()
+    {
+        let _ = handle_track_terminal(
+            &mut state,
+            &event_tx,
+            &source,
+            &source,
+            &source,
+            track_id,
+            generation,
+            decoder_stop,
+            outcome,
+        );
+    } else {
+        panic!("expected terminal");
+    }
+    assert!(Arc::ptr_eq(
+        &replacement,
+        &state.engine.as_ref().unwrap().shared.stopped
+    ));
+    assert!(!replacement.load(Ordering::Acquire));
+    assert!(event_rx.try_recv().is_err());
+    let _ = handle_track_terminal(
+        &mut state,
+        &event_tx,
+        &source,
+        &source,
+        &source,
+        1,
+        7,
+        replacement,
+        PlaybackTerminalReason::Finished,
+    );
+    assert!(state.engine.is_none());
+    assert!(matches!(
+        event_rx.try_recv().unwrap(),
+        PlaybackRuntimeEvent::Finished {
+            track_id: 1,
+            generation: 7
+        }
+    ));
+}
+
+#[test]
+fn terminal_identity_selects_correct_slot_when_repeat_track_decks_share_job_ids() {
+    for finish_active in [true, false] {
+        let mut state = test_runtime_loop_state();
+        state.engine = Some(test_engine_with_shared(1, 7));
+        state.fading_out_engine = Some(test_engine_with_shared(1, 7));
+        let terminal_stop = if finish_active {
+            state.engine.as_ref()
+        } else {
+            state.fading_out_engine.as_ref()
+        }
+        .unwrap()
+        .shared
+        .stop_flag();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+        let _ = handle_track_terminal(
+            &mut state,
+            &event_tx,
+            &source,
+            &source,
+            &source,
+            1,
+            7,
+            terminal_stop,
+            PlaybackTerminalReason::Finished,
+        );
+        assert_eq!(state.engine.is_none(), finish_active);
+        assert_eq!(state.fading_out_engine.is_some(), finish_active);
+        assert_eq!(event_rx.try_recv().is_ok(), finish_active);
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn exclusive_output_fault_poll_pauses_graph_once_without_queue_advance() {
+    use crate::playback::wasapi_exclusive::{ExclusiveRenderFault, ExclusiveStream};
+    for fault in [
+        ExclusiveRenderFault::EventTimeout,
+        ExclusiveRenderFault::EventWaitFailed,
+        ExclusiveRenderFault::DeviceWriteFailed,
+        ExclusiveRenderFault::RendererPanicked,
+    ] {
+        let mut state = test_runtime_loop_state();
+        state.current_exclusive = true;
+        state.engine = Some(test_engine_with_shared(1, 7));
+        state.next_engine = Some(test_engine_with_shared(2, 7));
+        state.fading_out_engine = Some(test_engine_with_shared(3, 7));
+        state.exclusive_sink.stream = Some(ExclusiveStream::test_released_with_fault(fault));
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        poll_exclusive_output_fault(&mut state, &event_tx);
+        assert!(state.user_paused);
+        for engine in [&state.engine, &state.next_engine, &state.fading_out_engine]
+            .into_iter()
+            .flatten()
+        {
+            assert!(engine.shared.paused.load(Ordering::Acquire));
+            assert!(!engine.shared.stopped.load(Ordering::Acquire));
+        }
+        assert!(state.exclusive_sink.needs_rebuild());
+        match event_rx.try_recv().unwrap() {
+            PlaybackRuntimeEvent::OutputFault {
+                active_track_id,
+                output_live,
+                message,
+                ..
+            } => {
+                assert_eq!(active_track_id, Some(1));
+                assert!(output_live.load(Ordering::Acquire));
+                assert_eq!(message, fault.user_message());
+            }
+            other => panic!("expected output fault, got {other:?}"),
+        }
+        poll_exclusive_output_fault(&mut state, &event_tx);
+        assert!(event_rx.try_recv().is_err());
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn normal_exclusive_release_does_not_pause_as_a_fault() {
+    use crate::playback::wasapi_exclusive::{ExclusiveRenderFault, ExclusiveStream};
+    let mut state = test_runtime_loop_state();
+    state.current_exclusive = true;
+    state.engine = Some(test_engine_with_shared(1, 7));
+    let stream = ExclusiveStream::test_released_with_fault(ExclusiveRenderFault::EventTimeout);
+    assert!(stream.take_fault().is_some());
+    state.exclusive_sink.stream = Some(stream);
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    poll_exclusive_output_fault(&mut state, &event_tx);
+    assert!(!state.user_paused);
+    assert!(
+        !state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::Acquire)
+    );
+    assert!(event_rx.try_recv().is_err());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires a Windows output endpoint for the public DeviceSwap environment"]
+fn missing_output_device_swap_pauses_actual_decks_and_reports_error() {
+    let mut device = cpal::default_host()
+        .default_output_device()
+        .expect("Windows output endpoint");
+    let supported = device.default_output_config().expect("output config");
+    let mut output_config = supported.config();
+    let mut sample_format = supported.sample_format();
+    let mut config = PlaybackRuntimeConfig::new(reqwest::Client::new(), "test", None);
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(1, 7));
+    state.next_engine = Some(test_engine_with_shared(2, 7));
+    state.fading_out_engine = Some(test_engine_with_shared(3, 7));
+    state.drop_preview_engine = Some(test_engine_with_shared(4, 7));
+    state.current_device_selection = OutputDeviceSelection::Named("old endpoint".into());
+    let (command_tx, _) = mpsc::channel();
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    let volume = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+    let position = Arc::new(AtomicU64::new(0));
+    let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let env = LoopEnv {
+        config: &mut config,
+        command_tx: &command_tx,
+        event_tx: &event_tx,
+        device: &mut device,
+        output_config: &mut output_config,
+        output_sample_format: &mut sample_format,
+        volume_ctl: &volume,
+        position_samples: &position,
+        position_source: &source,
+        buffered_source: &source,
+        offset_source: &source,
+    };
+    let _ = handle_device_swap(
+        env,
+        &mut state,
+        OutputDeviceSelection::Named("noor-regression-missing-endpoint".into()),
+        false,
+        false,
+        None,
+        1,
+        ExclusiveLatencyMode::Stable,
+    );
+    assert!(
+        state.user_paused,
+        "failed requested swap must latch transport pause"
+    );
+    assert_eq!(state.device_name, "test");
+    assert!(
+        matches!(&state.current_device_selection, OutputDeviceSelection::Named(name) if name == "old endpoint")
+    );
+    for engine in [
+        &state.engine,
+        &state.next_engine,
+        &state.fading_out_engine,
+        &state.drop_preview_engine,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(engine.shared.paused.load(Ordering::Acquire));
+        assert!(!engine.shared.stopped.load(Ordering::Acquire));
+        let mut data = [1.0_f32; 8];
+        write_output_f32(&mut data, &engine.shared, &command_tx, &event_tx);
+        assert_eq!(data, [0.0; 8]);
+    }
+    match event_rx.try_recv().expect("user-visible failure") {
+        PlaybackRuntimeEvent::CommandError { message, .. } => {
+            assert!(message.contains("output is unavailable"))
+        }
+        other => panic!("expected output error, got {other:?}"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires a Windows endpoint for the public sink environment; opens no stream"]
+fn existing_exclusive_sink_reports_actual_rate_when_request_changes() {
+    let device = cpal::default_host()
+        .default_output_device()
+        .expect("output endpoint");
+    let config = device.default_output_config().unwrap().config();
+    let mut state = test_runtime_loop_state();
+    state.exclusive_sink.stream =
+        Some(crate::playback::wasapi_exclusive::ExclusiveStream::test_live_at_rate(44_100));
+    let (command_tx, _) = mpsc::channel();
+    let (event_tx, _) = tokio::sync::broadcast::channel(8);
+    let rate = ensure_exclusive_sink_started(
+        &mut state,
+        &device,
+        &config,
+        Some(96_000),
+        1,
+        ExclusiveLatencyMode::Stable,
+        command_tx,
+        event_tx,
+    )
+    .unwrap();
+    assert_eq!(
+        rate, 44_100,
+        "reusing a sink must preserve its actual clock"
+    );
+}
+
+#[test]
+fn queued_control_precedes_callback_mailbox_and_seek_retires_transition() {
+    let mut state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(1, 7);
+    engine.shared.append_decoded_samples(&[0.25; 64]).unwrap();
+    engine.shared.total_samples.store(64, Ordering::Relaxed);
+    engine.shared.crossfade_samples.store(64, Ordering::Relaxed);
+    state.engine = Some(engine);
+    let shared = &state.engine.as_ref().unwrap().shared;
+    let (command_tx, command_rx) = mpsc::channel();
+    let (event_tx, _) = tokio::sync::broadcast::channel(8);
+    write_output_f32(&mut [0.0; 8], shared, &command_tx, &event_tx);
+    command_tx.send(PlaybackRuntimeCommand::Pause).unwrap();
+    assert!(matches!(
+        receive_runtime_command(
+            &state,
+            &command_rx,
+            &command_tx,
+            &event_tx,
+            Duration::from_millis(1)
+        )
+        .unwrap(),
+        PlaybackRuntimeCommand::Pause
+    ));
+    shared.apply_in_buffer_seek(16).unwrap();
+    assert!(matches!(
+        receive_runtime_command(
+            &state,
+            &command_rx,
+            &command_tx,
+            &event_tx,
+            Duration::from_millis(1)
+        ),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
 }
 
 #[test]
@@ -4916,7 +5539,7 @@ fn handle_panic_in_runtime_loop_clears_state_and_emits_error() {
 #[test]
 fn runtime_recovery_composes_after_command_error_and_panic() {
     // Composition-level integration test for Phase B/C resilience: prove
-    // that the runtime's recovery primitives (report_runtime_command_error,
+    // that the runtime's recovery primitives (fail_runtime_command,
     // stop_all_engines, handle_panic_in_runtime_loop) compose so the
     // runtime stays responsive across a command-error AND a panic in the
     // same session. A future plan will extract dispatch_command from
@@ -4930,12 +5553,17 @@ fn runtime_recovery_composes_after_command_error_and_panic() {
 
     // 1. Simulate a Play command that returned Err: report the error and
     //    tear down engines (same sequence as run_runtime_loop's Play arm).
-    report_runtime_command_error(&event_tx, "Play", anyhow::anyhow!("transition failed"));
+    fail_runtime_command(
+        &mut state,
+        &event_tx,
+        "Play",
+        anyhow::anyhow!("transition failed"),
+    );
     stop_all_engines(&mut state);
     assert!(state.engine.is_none(), "engine slot cleared after error");
     assert!(state.next_engine.is_none(), "next slot cleared after error");
     match event_rx.try_recv().expect("error event") {
-        PlaybackRuntimeEvent::Error { message } => {
+        PlaybackRuntimeEvent::CommandError { message, .. } => {
             assert!(message.contains("Play failed"));
         }
         other => panic!("expected error event, got {other:?}"),
@@ -4991,6 +5619,397 @@ fn test_engine_with_shared(track_id: i64, generation: u64) -> PlaybackEngine {
             Arc::new(AtomicU64::new(0)),
         )),
     )
+}
+
+#[test]
+fn poisoned_pcm_recovery_job_preserves_source_position_and_segment_identity() {
+    let engine = test_engine_with_shared(17, 9);
+    engine
+        .shared
+        .segment_offsets_ms
+        .set(vec![0, 1000, 2000, 3000])
+        .unwrap();
+    engine
+        .shared
+        .source_position_samples
+        .store(2500 * 48_000 * 2 / 1000, Ordering::Relaxed);
+    let shared = Arc::clone(&engine.shared);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = shared.buffer.lock().unwrap();
+            panic!("injected renderer panic while holding PCM");
+        })
+        .join()
+        .is_err()
+    );
+    assert!(engine.shared.buffer.is_poisoned());
+    let (job, target_ms) = engine.recovery_restart_job().unwrap();
+    assert_eq!(target_ms, 2500);
+    assert_eq!((job.track.id, job.generation), (17, 9));
+    assert_eq!(
+        (job.start_from_segment_index, job.start_from_offset_ms),
+        (2, 2000)
+    );
+    assert!(
+        job.start_paused,
+        "new decoder must stay silent until recovery is armed"
+    );
+}
+
+#[test]
+fn poisoned_pcm_recovery_replaces_decoder_before_resume_and_keeps_current_job() {
+    let mut state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(17, 9);
+    engine
+        .shared
+        .source_position_samples
+        .store(96, Ordering::Relaxed);
+    let old_shared = Arc::clone(&engine.shared);
+    let shared = Arc::clone(&old_shared);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = shared.buffer.lock().unwrap();
+            panic!("injected PCM poison");
+        })
+        .join()
+        .is_err()
+    );
+    state.engine = Some(engine);
+    state.next_engine = Some(test_engine_with_shared(18, 9));
+    assert!(
+        recover_poisoned_pcm(&mut state, |state, job| {
+            assert_eq!((job.track.id, job.generation), (17, 9));
+            stop_all_engines(state);
+            let mut replacement = test_engine_with_shared(job.track.id, job.generation);
+            replacement
+                .shared
+                .paused
+                .store(job.start_paused, Ordering::SeqCst);
+            replacement.job = job;
+            state.engine = Some(replacement);
+            Ok(())
+        })
+        .unwrap()
+    );
+    let replacement = state.engine.as_ref().unwrap();
+    assert!(!Arc::ptr_eq(&old_shared, &replacement.shared));
+    assert!(old_shared.stopped.load(Ordering::Acquire));
+    assert!(!replacement.shared.buffer.is_poisoned());
+    assert!(replacement.shared.paused.load(Ordering::SeqCst));
+    assert_eq!(
+        replacement
+            .shared
+            .source_position_samples
+            .load(Ordering::Relaxed),
+        96
+    );
+    assert!(state.next_engine.is_none());
+    assert!(
+        !recover_poisoned_pcm(&mut state, |_, _| panic!(
+            "healthy decoder should not restart"
+        ))
+        .unwrap()
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "opens silent output on NOOR_AUDIO_SMOKE_DEVICE; requires idle audio hardware"]
+fn poisoned_pcm_resume_silent_native_smoke() {
+    use cpal::traits::HostTrait;
+    use std::io::{Read, Write};
+    let selected = std::env::var("NOOR_AUDIO_SMOKE_DEVICE").expect("explicit silent-test endpoint");
+    let mut candidates = cpal::default_host()
+        .output_devices()
+        .unwrap()
+        .filter(|device| {
+            device
+                .id()
+                .is_ok_and(|id| id.id() == selected || id.to_string() == selected)
+        });
+    let mut device = candidates.next().expect("selected endpoint");
+    assert!(
+        candidates.next().is_none(),
+        "test endpoint must be unambiguous"
+    );
+    let selection = OutputDeviceSelection::Named(device.id().unwrap().to_string());
+    let supported = device.default_output_config().unwrap();
+    let mut output_config = supported.config();
+    let mut format = supported.sample_format();
+    let rate = output_config.sample_rate;
+    let channels = output_config.channels;
+    let bytes = rate * u32::from(channels) * 2;
+    let mut wav = Vec::with_capacity(44 + bytes as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + bytes).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&bytes.to_le_bytes());
+    wav.extend_from_slice(&(channels * 2).to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&bytes.to_le_bytes());
+    wav.resize(44 + bytes as usize, 0);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/silent.wav", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("silent fixture accept failed: {error}"),
+            }
+        };
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = [0; 4096];
+        let mut received = 0;
+        // Consume complete headers before closing the HTTP fixture so a split
+        // request cannot leave unread input that resets the socket.
+        while !request[..received].ends_with(b"\r\n\r\n") {
+            assert!(
+                received < request.len(),
+                "silent fixture request is too large"
+            );
+            let count = socket.read(&mut request[received..]).unwrap();
+            assert!(count > 0, "silent fixture request ended before its headers");
+            received += count;
+        }
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len()).unwrap();
+        socket.write_all(&wav).unwrap();
+    });
+    let mut state = test_runtime_loop_state();
+    state.device_sample_rate = rate;
+    state.device_channels = channels;
+    state.current_device_selection = selection;
+    state.current_exclusive = true;
+    state.user_paused = true;
+    let mut old = test_engine_with_shared(17, 9);
+    old.job.source = crate::playback::player::PlaybackSourceRequest::TidalStream(
+        StreamRequest::new(17, "LOSSLESS"),
+    );
+    old.job.track.duration_ms = Some(1000);
+    old.job.resolved_stream = Some(crate::playback::player::ResolvedStream {
+        info: StreamInfo {
+            url,
+            segment_urls: vec![],
+            segment_offsets_ms: vec![],
+            track_id: 17,
+            audio_quality: "LOSSLESS".into(),
+            codec: "wav".into(),
+            sample_rate: Some(i32::try_from(rate).unwrap()),
+            bit_depth: Some(16),
+        },
+        resolved_at: Instant::now(),
+    });
+    old.shared
+        .source_position_samples
+        .store(48_000, Ordering::Relaxed);
+    old.shared.paused.store(true, Ordering::SeqCst);
+    let old_shared = Arc::clone(&old.shared);
+    let poison = Arc::clone(&old_shared);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poison.buffer.lock().unwrap();
+            panic!("injected native recovery PCM poison");
+        })
+        .join()
+        .is_err()
+    );
+    state.engine = Some(old);
+    let (command_tx, _) = mpsc::channel();
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
+    let mut config = PlaybackRuntimeConfig::new(reqwest::Client::new(), "test", None);
+    let volume = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+    let position = Arc::new(AtomicU64::new(0));
+    let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let buffered = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let offset = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let _ = handle_resume(
+        LoopEnv {
+            config: &mut config,
+            command_tx: &command_tx,
+            event_tx: &event_tx,
+            device: &mut device,
+            output_config: &mut output_config,
+            output_sample_format: &mut format,
+            volume_ctl: &volume,
+            position_samples: &position,
+            position_source: &source,
+            buffered_source: &buffered,
+            offset_source: &offset,
+        },
+        &mut state,
+    );
+    let replacement = state.engine.as_ref().expect("recovered decoder");
+    assert!(!Arc::ptr_eq(&old_shared, &replacement.shared));
+    assert!(old_shared.stopped.load(Ordering::Acquire));
+    assert!(!replacement.shared.buffer.is_poisoned());
+    assert_eq!((replacement.track_id, replacement.generation), (17, 9));
+    assert!(!state.user_paused);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while replacement
+        .shared
+        .source_position_samples
+        .load(Ordering::Acquire)
+        <= u64::from(rate) * u64::from(channels) / 2
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        replacement
+            .shared
+            .source_position_samples
+            .load(Ordering::Acquire)
+            > u64::from(rate) * u64::from(channels) / 2,
+        "native output never consumed recovered PCM"
+    );
+    assert!(Arc::ptr_eq(
+        &source.lock().unwrap(),
+        &replacement.shared.source_position_samples
+    ));
+    assert!(
+        std::iter::from_fn(|| event_rx.try_recv().ok())
+            .any(|event| matches!(event, PlaybackRuntimeEvent::Resumed { track_id: Some(17) }))
+    );
+    stop_all_engines(&mut state);
+    state.exclusive_sink.clear();
+    server.join().unwrap();
+}
+
+#[test]
+fn live_exclusive_retry_preserves_cached_pcm_rate_until_next_track() {
+    let mut state = test_runtime_loop_state();
+    state.current_sample_rate_follow = true;
+    let engine = test_engine_with_shared(1, 10);
+    engine
+        .shared
+        .append_decoded_samples(&[0.1, -0.1, 0.2, -0.2])
+        .unwrap();
+    engine
+        .shared
+        .position_samples
+        .store(96_000, Ordering::Relaxed);
+    state.engine = Some(engine);
+    let requested = device_swap_target_sample_rate(Some(96_000), true, true, 48_000, 48_000);
+    let safe_rate = preserve_live_output_sample_rate(requested, true, state.device_sample_rate);
+    assert_eq!(safe_rate, Some(48_000));
+    let active = state.engine.as_ref().unwrap();
+    assert_eq!(
+        active.shared.position_samples.load(Ordering::Relaxed),
+        96_000
+    );
+    assert_eq!(
+        active.shared.buffer.lock().unwrap().samples,
+        [0.1, -0.1, 0.2, -0.2]
+    );
+    assert_eq!(
+        transition_output_sample_rate(Some(96_000), true, 48_000),
+        Some(96_000)
+    );
+    assert_eq!(
+        preserve_live_output_sample_rate(Some(96_000), false, 48_000),
+        Some(96_000)
+    );
+}
+
+#[test]
+fn video_exclusive_release_latches_pause_for_prepared_promotion() {
+    let mut state = test_runtime_loop_state();
+    state.current_exclusive = true;
+    state.engine = Some(test_engine_with_shared(1, 10));
+    state.next_engine = Some(test_engine_with_shared(2, 10));
+    state.fading_out_engine = Some(test_engine_with_shared(3, 10));
+    state.drop_preview_engine = Some(test_engine_with_shared(4, 10));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    handle_release_exclusive_now(&mut state, &event_tx);
+    assert!(matches!(
+        event_rx
+            .try_recv()
+            .expect("release must reconcile public pause before the endpoint is released"),
+        PlaybackRuntimeEvent::Paused { track_id: Some(1) }
+    ));
+    assert!(state.user_paused);
+    assert!(
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::SeqCst)
+    );
+    assert!(
+        state
+            .fading_out_engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::SeqCst)
+    );
+    assert!(
+        state
+            .drop_preview_engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::SeqCst)
+    );
+
+    let (command_tx, _) = mpsc::channel();
+    let handle = PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    adopt_predecoded_next_engine(
+        &mut state,
+        &handle.position_source,
+        &handle.buffered_source,
+        &handle.offset_source,
+    );
+    assert_eq!(state.engine.as_ref().unwrap().track_id, 2);
+    assert!(
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::SeqCst)
+    );
+}
+
+#[test]
+fn video_exclusive_release_is_noop_for_shared_output() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(1, 10));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    handle_release_exclusive_now(&mut state, &event_tx);
+    assert!(matches!(
+        event_rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert!(!state.user_paused);
+    assert!(
+        !state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::SeqCst)
+    );
 }
 
 #[test]

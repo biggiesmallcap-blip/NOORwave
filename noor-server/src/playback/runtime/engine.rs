@@ -3,20 +3,24 @@ use super::commands::{PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackTerm
 use super::shared::{PlaybackSharedState, estimate_total_samples_from_duration_ms};
 use crate::playback::decode::decode_and_buffer_job;
 use crate::playback::output::cpal_shared::{
-    SwapBackend, build_started_output_stream_with_rate_fallback, output_rate_fallback_config,
-    swap_stream_plan,
+    CpalOutputStream, SwapBackend, build_started_output_stream_with_rate_fallback,
+    output_rate_fallback_config, swap_stream_plan,
 };
 use crate::playback::player::{PlaybackSourceRequest, PreparedPlaybackJob};
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::DeviceTrait;
-use cpal::{SampleFormat, Stream, StreamConfig};
+use cpal::{SampleFormat, StreamConfig};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use tracing::{error, warn};
 
 enum OutputStream {
-    Cpal { _stream: Stream },
+    Cpal {
+        _stream: CpalOutputStream,
+    },
+    #[cfg(test)]
+    FaultMailbox(Arc<crate::playback::output::cpal_shared::CpalCallbackState>),
 }
 
 pub(super) struct SwapPauseGuard {
@@ -54,6 +58,7 @@ pub(super) struct PlaybackEngine {
     pub(super) track_id: i64,
     pub(super) generation: u64,
     stream: Option<OutputStream>,
+    pub(super) output_faulted: bool,
     pub(super) decoder_thread: Option<JoinHandle<()>>,
     pub(super) shared: Arc<PlaybackSharedState>,
     /// When this engine was constructed. The runtime's advance-cascade
@@ -75,7 +80,62 @@ fn join_decoder_thread_in_background(track_id: i64, handle: JoinHandle<()>) {
         });
 }
 
+pub(super) fn require_decoded_output_rate(
+    shared: &PlaybackSharedState,
+    output_rate: u32,
+) -> Result<()> {
+    let decoded_rate = shared.target_sample_rate.load(Ordering::Relaxed);
+    if output_rate != decoded_rate {
+        return Err(anyhow!(
+            "Decoded audio uses {decoded_rate} Hz, but the output requires {output_rate} Hz. Restart playback to change the output rate safely."
+        ));
+    }
+    Ok(())
+}
+
 impl PlaybackEngine {
+    pub(super) fn recovery_restart_job(&self) -> Result<(PreparedPlaybackJob, u64)> {
+        let rate = self.shared.target_sample_rate.load(Ordering::Relaxed);
+        let channels = u64::from(self.shared.device_channels);
+        if rate == 0 || channels == 0 {
+            return Err(anyhow!(
+                "Cannot recover playback without a valid audio clock"
+            ));
+        }
+        let position = self.shared.source_position_samples.load(Ordering::Acquire);
+        let target_ms =
+            u64::try_from(u128::from(position) * 1000 / (u128::from(rate) * u128::from(channels)))?;
+        let mut job = self.job.clone();
+        job.start_paused = true;
+        job.prepared_transition = None;
+        let segment = self.shared.segment_offsets_ms.get().and_then(|offsets| {
+            offsets
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, offset)| **offset <= target_ms)
+        });
+        let (index, offset) = segment.map_or((0, 0), |(index, offset)| (index, *offset));
+        job.start_from_segment_index = index;
+        job.start_from_offset_ms = offset;
+        Ok((job, target_ms))
+    }
+    pub(super) fn take_output_error(&self) -> Option<PlaybackRuntimeCommand> {
+        match self.stream.as_ref()? {
+            OutputStream::Cpal { _stream } => _stream.take_error(&self.shared),
+            #[cfg(test)]
+            OutputStream::FaultMailbox(callback) => callback.take_command(&self.shared),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_attach_fault_mailbox(
+        &mut self,
+        callback: Arc<crate::playback::output::cpal_shared::CpalCallbackState>,
+    ) {
+        self.stream = Some(OutputStream::FaultMailbox(callback));
+    }
+
     #[cfg(test)]
     pub(super) fn test_with_shared(
         track_id: i64,
@@ -86,6 +146,7 @@ impl PlaybackEngine {
             track_id,
             generation,
             stream: None,
+            output_faulted: false,
             decoder_thread: None,
             shared,
             job: PreparedPlaybackJob::test_fixture(track_id, generation),
@@ -300,6 +361,7 @@ impl PlaybackEngine {
             track_id,
             generation,
             stream: None,
+            output_faulted: false,
             decoder_thread: Some(decoder_thread),
             shared,
             job,
@@ -315,6 +377,25 @@ impl PlaybackEngine {
         // wait on the audio thread to observe the pause.
         self.shared.begin_fade_out();
         Ok(())
+    }
+
+    pub(super) fn cold_restart_job(&self, start_paused: bool) -> Result<PreparedPlaybackJob> {
+        let baseline = self
+            .job
+            .start_from_offset_ms
+            .saturating_mul(u64::from(
+                self.shared.target_sample_rate.load(Ordering::Relaxed),
+            ))
+            .saturating_mul(u64::from(self.shared.device_channels.max(1)))
+            / 1000;
+        if self.shared.source_position_samples.load(Ordering::Relaxed) != baseline {
+            return Err(anyhow!(
+                "Output rate changed after audio started. Restart playback to change the rate safely."
+            ));
+        }
+        let mut job = self.job.clone();
+        job.start_paused = start_paused;
+        Ok(job)
     }
 
     pub(super) fn resume(&self) -> Result<()> {
@@ -358,10 +439,23 @@ impl PlaybackEngine {
         }
 
         let shared_plan = swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Shared);
+        require_decoded_output_rate(&self.shared, shared_plan.stream_config.sample_rate)?;
+        let fallback_config = device
+            .default_output_config()
+            .map(|config| config.config())
+            .unwrap_or_else(|_| output_config.clone());
+        // A new mix rate requires a fresh decoder. Never reinterpret already
+        // buffered PCM at a different rate during a live stream swap.
+        let fallback_config =
+            if fallback_config.sample_rate == shared_plan.stream_config.sample_rate {
+                fallback_config
+            } else {
+                shared_plan.stream_config.clone()
+            };
         let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
             device,
             &shared_plan.stream_config,
-            output_config,
+            &fallback_config,
             output_sample_format,
             Arc::clone(&self.shared),
             command_tx,
@@ -377,6 +471,7 @@ impl PlaybackEngine {
                 .store(target_sample_rate, Ordering::Relaxed);
         }
         self.stream = Some(OutputStream::Cpal { _stream: stream });
+        self.output_faulted = false;
         pause_guard.restore();
         Ok(active_plan.stream_config.sample_rate)
     }
@@ -408,6 +503,41 @@ mod tests {
     }
 
     #[test]
+    fn live_rate_guard_preserves_buffered_pcm_and_absolute_position() {
+        let shared = test_shared_state();
+        shared
+            .append_decoded_samples(&[0.1, -0.2, 0.3, -0.4])
+            .unwrap();
+        shared.position_samples.store(96_000, Ordering::Relaxed);
+        let before = shared.buffer.lock().unwrap().samples.clone();
+        assert!(require_decoded_output_rate(&shared, 96_000).is_err());
+        assert_eq!(shared.buffer.lock().unwrap().samples, before);
+        assert_eq!(shared.position_samples.load(Ordering::Relaxed), 96_000);
+        assert_eq!(shared.target_sample_rate.load(Ordering::Relaxed), 48_000);
+        assert!(require_decoded_output_rate(&shared, 48_000).is_ok());
+    }
+
+    #[test]
+    fn cold_restart_job_preserves_segment_offset_and_pause_at_new_rate() {
+        let shared = test_shared_state();
+        let mut engine = PlaybackEngine::test_with_shared(1, 1, Arc::clone(&shared));
+        engine.job.start_from_segment_index = 4;
+        engine.job.start_from_offset_ms = 2500;
+        shared
+            .source_position_samples
+            .store(240_000, Ordering::Relaxed);
+        let job = engine.cold_restart_job(true).unwrap();
+        assert_eq!(job.start_from_segment_index, 4);
+        assert_eq!(job.start_from_offset_ms, 2500);
+        assert!(job.start_paused);
+        assert_eq!(job.start_from_offset_ms * 96_000 * 2 / 1000, 480_000);
+        shared
+            .source_position_samples
+            .store(240_002, Ordering::Relaxed);
+        assert!(engine.cold_restart_job(true).is_err());
+    }
+
+    #[test]
     fn stop_marks_engine_stopped_without_waiting_for_decoder_thread() {
         let shared = test_shared_state();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -424,6 +554,7 @@ mod tests {
             track_id: 1,
             generation: 1,
             stream: None,
+            output_faulted: false,
             decoder_thread: Some(decoder_thread),
             shared: Arc::clone(&shared),
             job: PreparedPlaybackJob::test_fixture(1, 1),

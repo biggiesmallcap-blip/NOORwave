@@ -69,14 +69,54 @@ pub(super) fn stop_all_engines(state: &mut PlaybackRuntimeLoopState) {
     fade_out_and_stop(retiring);
 }
 
-pub(super) fn report_runtime_command_error(
+fn report_runtime_command_error(
+    state: &PlaybackRuntimeLoopState,
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     command_name: &str,
     error: anyhow::Error,
 ) {
     let message = format!("{command_name} failed: {error}");
     warn!("{message}");
-    let _ = event_tx.send(PlaybackRuntimeEvent::Error { message });
+    let source_identity = Arc::clone(
+        &state
+            .handoff_elapsed_source
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()),
+    );
+    let generation = state
+        .engine
+        .as_ref()
+        .map(|engine| engine.generation)
+        .or(state.requested_generation);
+    let _ = event_tx.send(PlaybackRuntimeEvent::CommandError {
+        generation,
+        source_identity,
+        message,
+    });
+}
+
+pub(super) fn fail_runtime_command(
+    state: &mut PlaybackRuntimeLoopState,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    command_name: &str,
+    error: anyhow::Error,
+) {
+    // Error consumers pause DB/UI state. Make the audio graph agree before
+    // publishing, without relying on a failed output to finish a fade.
+    state.user_paused = true;
+    for engine in [
+        &state.engine,
+        &state.next_engine,
+        &state.fading_out_engine,
+        &state.drop_preview_engine,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        engine.shared.disarm_pause_fade();
+        engine.shared.paused.store(true, Ordering::SeqCst);
+    }
+    report_runtime_command_error(state, event_tx, command_name, error);
 }
 
 /// Surface a decode/source failure on the pre-buffered next track without

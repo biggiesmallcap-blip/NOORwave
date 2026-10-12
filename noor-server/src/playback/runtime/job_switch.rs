@@ -19,6 +19,9 @@ pub(super) fn transition_to_job(
     offset_source: &Arc<Mutex<Arc<AtomicU64>>>,
     force_restart: bool,
 ) -> Result<()> {
+    // Retain identity even when a failed cold start removes every engine.
+    state.requested_generation = Some(job.generation);
+    let entry_output_rate = state.device_sample_rate;
     // No-op when state.engine is already playing the requested track. This
     // happens after a crossfade swap: promote_next_to_active emitted Finished
     // for the OUTGOING track, which caused routes to call switch_to(NEW track)
@@ -60,6 +63,7 @@ pub(super) fn transition_to_job(
     let mut retiring: Vec<PlaybackEngine> = Vec::new();
     retiring.extend(state.engine.take());
     retiring.extend(state.fading_out_engine.take());
+    retiring.extend(state.drop_preview_engine.take());
     fade_out_and_stop(retiring);
 
     // Reset position counter to the new engine's offset baseline (option C:
@@ -105,7 +109,7 @@ pub(super) fn transition_to_job(
                 e.track_id == job.track.id
                     && e.generation == job.generation
                     && prepared_engine_matches_output_rate(
-                        e.shared.device_sample_rate,
+                        e.shared.target_sample_rate.load(Ordering::Relaxed),
                         job.output_sample_rate,
                         state.current_sample_rate_follow,
                     )
@@ -139,51 +143,6 @@ pub(super) fn transition_to_job(
             *state.handoff_elapsed_source.lock().unwrap() =
                 Arc::clone(&eng.shared.handoff_elapsed_samples);
             state.engine = Some(eng);
-
-            #[cfg(target_os = "windows")]
-            {
-                refresh_exclusive_sources(state);
-                match ensure_exclusive_sink_started(
-                    state,
-                    device,
-                    output_config,
-                    exclusive_rebuild_rate(
-                        state.current_sample_rate_follow,
-                        state.device_sample_rate,
-                    ),
-                    state.current_exclusive_release_grace_secs,
-                    state.current_exclusive_latency_mode.clone(),
-                    command_tx.clone(),
-                    event_tx.clone(),
-                ) {
-                    Ok(actual_rate) => {
-                        output_config.sample_rate = actual_rate;
-                        state.device_sample_rate = actual_rate;
-                    }
-                    Err(err) => {
-                        warn!(
-                            "transition_to_job: exclusive sink failed; falling back to shared: {err:?}"
-                        );
-                        if let Some(engine) = state.engine.as_mut() {
-                            let actual_rate = engine.swap_stream(
-                                device,
-                                output_config,
-                                output_sample_format,
-                                command_tx.clone(),
-                                event_tx.clone(),
-                                false,
-                                exclusive_rebuild_rate(
-                                    state.current_sample_rate_follow,
-                                    state.device_sample_rate,
-                                ),
-                                state.current_exclusive_release_grace_secs,
-                            )?;
-                            output_config.sample_rate = actual_rate;
-                            state.device_sample_rate = actual_rate;
-                        }
-                    }
-                }
-            }
         } else {
             let eng = PlaybackEngine::start(
                 config,
@@ -209,7 +168,70 @@ pub(super) fn transition_to_job(
             state.engine = Some(eng);
         }
     }
-    if output_state_update.is_some_and(|update| update.notify_ready) {
+    #[cfg(target_os = "windows")]
+    if state.current_exclusive {
+        refresh_exclusive_sources(state);
+        let desired_rate =
+            exclusive_rebuild_rate(state.current_sample_rate_follow, state.device_sample_rate);
+        match ensure_exclusive_sink_started(
+            state,
+            device,
+            output_config,
+            desired_rate,
+            state.current_exclusive_release_grace_secs,
+            state.current_exclusive_latency_mode.clone(),
+            command_tx.clone(),
+            event_tx.clone(),
+        ) {
+            Ok(actual_rate) => {
+                output_config.sample_rate = actual_rate;
+                state.device_sample_rate = actual_rate;
+            }
+            Err(error) => {
+                warn!(
+                    "transition_to_job: exclusive sink failed; falling back to shared: {error:?}"
+                );
+                // No audio has started on this cold/adopted deck. Reconstruct
+                // the decoder at the negotiated shared rate rather than play
+                // its native-rate buffer at the device's different mix rate.
+                let mut previous = state
+                    .engine
+                    .take()
+                    .ok_or_else(|| anyhow!("missing active decoder for shared fallback"))?;
+                let job = previous.cold_restart_job(state.user_paused);
+                previous.stop();
+                let job = job?;
+                state.exclusive_sink.clear();
+                state.current_exclusive = false;
+                let engine = PlaybackEngine::start(
+                    config,
+                    command_tx,
+                    device,
+                    output_config,
+                    output_sample_format,
+                    job,
+                    event_tx.clone(),
+                    state.device_sample_rate,
+                    state.device_channels,
+                    Arc::clone(volume_ctl),
+                    Arc::clone(position_samples),
+                )?;
+                let actual_rate = engine.shared.device_sample_rate;
+                *position_source.lock().unwrap() =
+                    Arc::clone(&engine.shared.source_position_samples);
+                *buffered_source.lock().unwrap() = Arc::clone(&engine.shared.buffered_samples);
+                *offset_source.lock().unwrap() = Arc::clone(&engine.shared.source_offset_samples);
+                *state.handoff_elapsed_source.lock().unwrap() =
+                    Arc::clone(&engine.shared.handoff_elapsed_samples);
+                state.engine = Some(engine);
+                output_config.sample_rate = actual_rate;
+                state.device_sample_rate = actual_rate;
+            }
+        }
+    }
+    if output_state_update.is_some_and(|update| update.notify_ready)
+        || state.device_sample_rate != entry_output_rate
+    {
         let _ = event_tx.send(PlaybackRuntimeEvent::Ready {
             device_name: state.device_name.clone(),
             sample_rate: state.device_sample_rate,

@@ -44,6 +44,28 @@ pub struct PlaybackRuntimeHandle {
 
 impl PlaybackRuntimeHandle {
     #[cfg(test)]
+    pub(crate) fn playback_source_identity(&self) -> Arc<AtomicU64> {
+        // This reader moves with every active decoder, including same-track
+        // restarts. Its Arc identity matters here, rather than its value.
+        Arc::clone(&self.lock_playback_source_identity())
+    }
+
+    /// Publication only replaces a valid Arc, so recovering this reader's
+    /// poisoned mutex preserves a usable identity without touching PCM.
+    pub(crate) fn lock_playback_source_identity(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Arc<AtomicU64>> {
+        self.handoff_elapsed_source
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_replace_playback_source(&self) {
+        *self.handoff_elapsed_source.lock().unwrap() = Arc::new(AtomicU64::new(u64::MAX));
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_publish_event(&self, event: PlaybackRuntimeEvent) -> bool {
         self.event_tx.send(event).is_ok()
     }
