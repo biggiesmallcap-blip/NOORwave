@@ -555,6 +555,15 @@ async fn main() -> Result<()> {
     if let Err(error) = db.with_conn(services::radio_config::apply_quality_defaults_once) {
         tracing::warn!(%error, "Radio quality defaults not applied");
     }
+    // Genre rows the old fuzzy matcher wrote by swapping a word ("new wave" ->
+    // New Age). Once per install; a failure retries on the next start.
+    match db.with_conn(|conn| {
+        genre::repair::repair_word_swaps_once(conn, genre::builder::embedded_builder().catalog())
+    }) {
+        Ok(Some(stats)) => tracing::info!(?stats, "genre word-swap repair applied"),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "genre word-swap repair failed"),
+    }
     // The audio runtime is ephemeral, but the queue is durable session state.
     // Boot paused at the beginning of the current row; the resume route rebuilds
     // the runtime on demand. Queue rows and the playhead therefore survive quit /
