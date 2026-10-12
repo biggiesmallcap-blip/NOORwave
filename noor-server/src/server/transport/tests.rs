@@ -541,6 +541,154 @@ async fn terminal_mismatch_flush_rechecks_owner_after_waiting_for_writer() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_queue_write_serializes_generation_claim() {
+    use futures::FutureExt;
+    use std::sync::{Mutex, OnceLock};
+    struct BusyGate {
+        entered: tokio::sync::Notify,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    static GATE: OnceLock<Mutex<Option<Arc<BusyGate>>>> = OnceLock::new();
+    fn blocked_write(_: i32) -> bool {
+        let gate = GATE
+            .get()
+            .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
+        let Some(gate) = gate else {
+            return false;
+        };
+        gate.entered.notify_one();
+        gate.release
+            .lock()
+            .ok()
+            .is_some_and(|receiver| receiver.recv_timeout(Duration::from_secs(3)).is_ok())
+    }
+    struct ScratchDatabase(std::path::PathBuf);
+    impl Drop for ScratchDatabase {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut name = self.0.as_os_str().to_os_string();
+                name.push(suffix);
+                let _ = std::fs::remove_file(std::path::PathBuf::from(name));
+            }
+        }
+    }
+    let scratch = ScratchDatabase(std::env::temp_dir().join(format!(
+            "noor-terminal-generation-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )));
+    let db = Database::open(&scratch.0).unwrap();
+    db.run_migrations().unwrap();
+    seed_basic_tracks(&db);
+    db.with_conn(|conn| {
+        let queue = player::enqueue_track(conn, 1, "test")?;
+        conn.execute("UPDATE playback_state SET current_track_id=1, current_queue_item_id=?1, is_playing=1 WHERE id=1", [queue[0].id])?;
+        Ok(())
+    }).unwrap();
+    let (state, _, _, _) = cpal_fault_fixture().await;
+    let (command_tx, _commands) = std::sync::mpsc::channel();
+    let handle = playback_runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    {
+        let mut guard = state.write().await;
+        guard.db = db.clone();
+        guard.playback_runtime.as_mut().unwrap().handle = handle.clone();
+    }
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(BusyGate {
+        entered: tokio::sync::Notify::new(),
+        release: Mutex::new(release_rx),
+    });
+    *GATE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(gate.clone());
+    db.with_conn(|conn| {
+        conn.busy_handler(Some(blocked_write))?;
+        Ok(())
+    })
+    .unwrap();
+    let competing = db.open_isolated().unwrap();
+    competing.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut events = state.read().await.event_tx.subscribe();
+    let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+    assert!(
+        handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::Finished {
+            track_id: 1,
+            generation: 0,
+            source_identity: handle.playback_source_identity(),
+        })
+    );
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .unwrap();
+    // Poll on this task while the listener is inside SQLite's actual write.
+    // Ready proves admission raced the mutation; Pending proves exclusion.
+    let claim = super::generation::bump(&state);
+    tokio::pin!(claim);
+    let early = claim.as_mut().now_or_never();
+    let excluded = early.is_none();
+    let reissue_excluded = super::generation::claim_if_current(&state, 0)
+        .now_or_never()
+        .is_none();
+    let control_ready = matches!(
+        super::runtime::current(&state).now_or_never(),
+        Some(Some(_))
+    );
+    competing.execute_batch("ROLLBACK").unwrap();
+    release_tx.send(()).unwrap();
+    let claimed = match early {
+        Some(value) => value,
+        None => tokio::time::timeout(Duration::from_secs(2), claim.as_mut())
+            .await
+            .unwrap(),
+    };
+    assert_eq!(claimed, 1);
+    assert!(handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+            output_identity: handle.test_exclusive_event_identity(),
+            device_name: "listener barrier".into(),
+            transport_format: "test format".into(),
+        }
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(
+            events.recv().await.unwrap(),
+            AppEvent::AudioExclusiveEngaged { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+    db.with_conn(|conn| {
+        conn.busy_handler(None)?;
+        Ok(())
+    })
+    .unwrap();
+    *GATE.get().unwrap().lock().unwrap() = None;
+    let snapshot = db.with_conn(player::load_snapshot).unwrap();
+    assert!(snapshot.state.current_queue_item_id.is_none());
+    assert!(!snapshot.state.is_playing);
+    assert_eq!(super::generation::claim_if_current(&state, 0).await, None);
+    assert_eq!(
+        super::generation::claim_if_current(&state, 1).await,
+        Some(2)
+    );
+    assert!(
+        excluded,
+        "new generation was admitted while the old terminal queue write was blocked"
+    );
+    assert!(
+        reissue_excluded,
+        "quality generation claim bypassed queue admission"
+    );
+    assert!(
+        control_ready,
+        "queue admission blocked access to pause/resume controls during the database wait"
+    );
+}
+
 #[tokio::test]
 async fn promoted_decoder_finished_listener_advances_to_prepared_track() {
     let (state, _, _, _) = cpal_fault_fixture().await;

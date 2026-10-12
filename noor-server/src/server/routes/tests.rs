@@ -1522,6 +1522,7 @@ pub(in crate::server) fn fresh_test_state(db: Database) -> crate::AppState {
         playback_runtime: None,
         playback_runtime_info: None,
         playback_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        playback_generation_admission: Arc::new(tokio::sync::Mutex::new(())),
         current_stream_display: None,
         pending_stream_display: None,
         next_prebuffer_inflight: None,

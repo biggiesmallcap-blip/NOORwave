@@ -233,6 +233,7 @@ fn fresh_test_state_with_dj_tx(
         playback_runtime: None,
         playback_runtime_info: None,
         playback_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        playback_generation_admission: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         current_stream_display: None,
         pending_stream_display: None,
         next_prebuffer_inflight: None,

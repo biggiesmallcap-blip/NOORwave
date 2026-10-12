@@ -1605,6 +1605,10 @@ async fn handle_runtime_finished_for_owner(
     }
 
     let snapshot = {
+        // Serialize generation claims with queue mutation without excluding
+        // state readers used to retrieve pause/resume controls during DB waits.
+        let admission = state.read().await.playback_generation_admission.clone();
+        let _admission = admission.lock().await;
         let state_guard = state.read().await;
         // Keep the source lock while the queue row is advanced. A same-runtime
         // decoder restart uses this mutex before replacing its identity.
