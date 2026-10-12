@@ -64,6 +64,20 @@ impl GenreResolution {
 /// different word ("wave"/"age" 0.72, "bounce"/"house" 0.70).
 const FUZZY_WORD_MIN: f64 = 0.90;
 
+/// Tags one letter away from a genre that mean something else: places and
+/// nationalities ("american" is not Americana), and lookalike words. Exact and
+/// alias matches still apply; only the fuzzy fallback skips these.
+const FUZZY_FALSE_FRIENDS: &[&str] = &[
+    "american",
+    "america",
+    "asia",
+    "tropicalia",
+    "latvian rock",
+    "organ house",
+    "modern",
+    "blue",
+];
+
 /// Fuzzy matching corrects spelling; it never swaps a word. Both sides need
 /// the same number of words, and each word must equal or nearly spell the word
 /// in the same position: "new wave" shares "new" with "New Age" and scored
@@ -286,7 +300,7 @@ impl GenreCatalog {
     }
 
     fn best_fuzzy_match(&self, normalized: &str) -> Option<GenreMatch> {
-        if normalized.len() < 4 {
+        if normalized.len() < 4 || FUZZY_FALSE_FRIENDS.contains(&normalized) {
             return None;
         }
 
@@ -501,5 +515,32 @@ mod tests {
         ] {
             assert_eq!(resolved(&catalog, raw).as_deref(), Some(want), "{raw}");
         }
+    }
+
+    #[test]
+    fn places_and_lookalikes_do_not_fuzzy_match() {
+        let catalog = GenreCatalog::from_embedded();
+        for (raw, wrong) in [
+            ("american", "Americana"),
+            ("america", "Americana"),
+            ("asia", "Asian"),
+            ("tropicalia", "Tropical"),
+            ("latvian rock", "Latin Rock"),
+            ("organ house", "Organic House"),
+            ("modern", "Modernist"),
+            ("blue", "Blues"),
+        ] {
+            assert_ne!(
+                resolved(&catalog, raw).as_deref(),
+                Some(wrong),
+                "{raw} must not become {wrong}"
+            );
+        }
+        // Exact names still resolve.
+        assert_eq!(
+            resolved(&catalog, "americana").as_deref(),
+            Some("Americana")
+        );
+        assert_eq!(resolved(&catalog, "blues").as_deref(), Some("Blues"));
     }
 }
