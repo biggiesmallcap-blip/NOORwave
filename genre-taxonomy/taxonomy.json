@@ -115,6 +115,7 @@
         { "name": "Garage Rock" },
         { "name": "Post-Rock" },
         { "name": "Post-Punk" },
+        { "name": "New Wave" },
         { "name": "Post-Hardcore" },
         { "name": "Screamo" },
         { "name": "Art Rock" },
@@ -160,6 +161,7 @@
       "children": [
         { "name": "Dance Pop" },
         { "name": "Synthpop" },
+        { "name": "New Wave" },
         { "name": "Teen Pop" },
         { "name": "Electropop" },
         { "name": "Art Pop" },

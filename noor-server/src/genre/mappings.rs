@@ -543,4 +543,35 @@ mod tests {
         );
         assert_eq!(resolved(&catalog, "blues").as_deref(), Some("Blues"));
     }
+    #[test]
+    fn collision_tags_resolve_to_their_real_genre() {
+        let catalog = GenreCatalog::from_embedded();
+        for (raw, want) in [
+            ("new wave", "New Wave"),
+            ("chicago house", "House"),
+            ("psychedelic trance", "Psytrance"),
+            ("progressive psytrance", "Psytrance"),
+            ("melodic trance", "Trance"),
+            ("ska punk", "Punk Rock"),
+            ("glitch hop", "Glitch"),
+            ("rhythm n blues", "Rhythm and Blues"),
+            ("lo-fi hiphop", "Lo-Fi Hip-Hop"),
+            ("bubblegum", "Bubblegum Pop"),
+            ("afro-cuban jazz", "Afro-Cuban"),
+            ("symphonic prog", "Symphonic Rock"),
+            ("video game", "Video Game Music"),
+            ("atmospheric dnb", "Atmospheric Drum and Bass"),
+            // Legitimate New Age stays New Age.
+            ("new age", "New Age"),
+        ] {
+            assert_eq!(resolved(&catalog, raw).as_deref(), Some(want), "{raw}");
+        }
+        let paths = catalog
+            .entry("New Wave")
+            .expect("New Wave is canonical")
+            .paths
+            .clone();
+        assert!(paths.iter().any(|p| p.join(" > ") == "Rock > New Wave"));
+        assert!(paths.iter().any(|p| p.join(" > ") == "Pop > New Wave"));
+    }
 }
