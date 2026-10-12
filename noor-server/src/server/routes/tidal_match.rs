@@ -324,6 +324,10 @@ pub(crate) fn select_best_tidal_match(
     let mut scored: Vec<Scored> = results
         .into_iter()
         .filter_map(|track| {
+            if !artist_identity_matches(pending_artist, track.artist_name.as_deref().unwrap_or(""))
+            {
+                return None;
+            }
             let (cand_base, class) = classify_candidate(&track);
             let score = score_tidal_candidate(
                 track.artist_name.as_deref().unwrap_or(""),
