@@ -3998,6 +3998,89 @@ async fn near_end_fixture(
 }
 
 #[tokio::test]
+async fn delayed_unplayable_lookup_cannot_skip_new_generation_queue() {
+    let (state, runtime, gate) = near_end_fixture(true).await;
+    let listener = spawn_playback_runtime_listener(state.clone(), runtime.handle.clone());
+    assert!(runtime.handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::TrackError {
+            track_id: 1,
+            generation: 0,
+            source_identity: runtime.handle.playback_source_identity(),
+            message: "active decode failed".into(),
+        }
+    ));
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .unwrap();
+    let (before, mut events) = {
+        let mut guard = state.write().await;
+        guard
+            .playback_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        runtime.handle.test_replace_playback_source();
+        guard
+            .audio_active
+            .store(true, std::sync::atomic::Ordering::Release);
+        let info = guard.playback_runtime_info.as_mut().unwrap();
+        info.active_track_id = Some(2);
+        info.last_error = None;
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "new generation".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        (
+            guard.db.with_conn(player::load_snapshot).unwrap(),
+            guard.event_tx.subscribe(),
+        )
+    };
+    gate.release.notify_one();
+    assert!(runtime.handle.test_publish_event(
+        playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+            output_identity: runtime.handle.test_exclusive_event_identity(),
+            device_name: "listener barrier".into(),
+            transport_format: "test format".into(),
+        }
+    ));
+    let mut stale_events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(event, AppEvent::AudioExclusiveEngaged { .. }) {
+                break;
+            }
+            stale_events.push(event);
+        }
+    })
+    .await
+    .unwrap();
+    listener.abort();
+    assert!(listener.await.unwrap_err().is_cancelled());
+    let guard = state.read().await;
+    let after = guard.db.with_conn(player::load_snapshot).unwrap();
+    assert_eq!(
+        after.state.current_queue_item_id, before.state.current_queue_item_id,
+        "stale unavailable-track result advanced the replacement queue"
+    );
+    assert_eq!(after.state.is_playing, before.state.is_playing);
+    assert_eq!(after.queue.len(), before.queue.len());
+    assert_eq!(
+        guard.current_stream_display.as_ref().unwrap().audio_quality,
+        "new generation"
+    );
+    assert!(
+        guard
+            .audio_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        stale_events.is_empty(),
+        "stale recovery published {stale_events:?}"
+    );
+    assert!(runtime.commands.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn near_end_resolution_cannot_dispatch_to_replaced_runtime_or_publish_its_metadata() {
     let (state, old, source) = near_end_fixture(false).await;
     let pending = tokio::spawn(handle_near_end(state.clone(), 1, 0, old.handle.clone()));

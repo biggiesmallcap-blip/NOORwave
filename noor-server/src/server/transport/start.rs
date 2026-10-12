@@ -112,14 +112,18 @@ async fn start_track_inner(
             return Err(StartError::Superseded);
         }
     }
+    // A failed lookup can trigger caller-side skip or pause recovery. Validate
+    // ownership before returning that error, just as for a successful result.
+    let observed_generation = match start_generation {
+        Generation::Claimed(claimed) => claimed,
+        Generation::ClaimWhenReady { observed } => observed,
+    };
+    if !generation::is_current(state, observed_generation).await {
+        return Err(StartError::Superseded);
+    }
     let stream_info = resolved.map_err(StartError::Stream)?;
     let start_generation = match start_generation {
-        Generation::Claimed(claimed) => {
-            if !generation::is_current(state, claimed).await {
-                return Err(StartError::Superseded);
-            }
-            claimed
-        }
+        Generation::Claimed(claimed) => claimed,
         Generation::ClaimWhenReady { observed } => generation::claim_if_current(state, observed)
             .await
             .ok_or(StartError::Superseded)?,
@@ -351,6 +355,31 @@ mod tests {
             other => panic!("expected Stream, got {other:?}"),
         }
         assert!(fx.commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_lookup_failure_is_superseded_before_recovery() {
+        for quality_reissue in [false, true] {
+            let fx = fixture(
+                Some(99101),
+                ScriptedStreamSource::new(vec![Err(StreamResolveError::StreamRejected {
+                    message: "track-specific rejection".into(),
+                })]),
+            )
+            .await;
+            let old = generation::bump(&fx.state).await;
+            let current = generation::bump(&fx.state).await;
+            let start_request = if quality_reissue {
+                reissue(&fx.track, old)
+            } else {
+                request(&fx.track, old, Dispatch::Switch)
+            };
+            let result = start_track(&fx.state, start_request).await;
+            assert!(matches!(result, Err(StartError::Superseded)), "{result:?}");
+            assert_eq!(generation::observe(&fx.state).await, current);
+            assert!(fx.commands.try_recv().is_err());
+            assert!(fx.state.read().await.current_stream_display.is_none());
+        }
     }
 
     #[tokio::test]
