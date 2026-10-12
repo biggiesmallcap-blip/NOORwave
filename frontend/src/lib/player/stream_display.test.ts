@@ -31,7 +31,31 @@ describe('formatPlayerStreamDetail', () => {
 			exclusiveEngaged: true,
 		});
 
-		expect(label).toBe('192 kHz \u00b7 24-bit \u00b7 Excl');
+		expect(label).toBe('96 kHz output \u00b7 192 kHz / 24-bit source \u00b7 Excl');
+	});
+
+	test('keeps matching source and output rates compact', () => {
+		expect(formatPlayerStreamDetail({
+			stream: { sample_rate: 96_000, bit_depth: 24 },
+			runtime: { sample_rate: 96_000 },
+			exclusiveEngaged: true,
+		})).toBe('96 kHz \u00b7 24-bit \u00b7 Excl');
+	});
+
+	test('identifies shared output resampling without claiming exclusive mode', () => {
+		expect(formatPlayerStreamDetail({
+			stream: { sample_rate: 44_100, bit_depth: 16 },
+			runtime: { sample_rate: 48_000 },
+			exclusiveEngaged: false,
+		})).toBe('48 kHz output \u00b7 44.1 kHz / 16-bit source');
+	});
+
+	test.each([undefined, 0, -1, NaN, Infinity])('does not invent an output rate for %s', (sampleRate) => {
+		expect(formatPlayerStreamDetail({
+			stream: { sample_rate: 192_000, bit_depth: 24 },
+			runtime: { sample_rate: sampleRate },
+			exclusiveEngaged: true,
+		})).toBe('192 kHz \u00b7 24-bit \u00b7 Excl');
 	});
 
 	test('shows the lossy high bitrate when no resolution is reported', () => {
