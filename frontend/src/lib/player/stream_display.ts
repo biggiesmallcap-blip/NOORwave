@@ -62,13 +62,19 @@ export function formatPlayerStreamDetail({
 	if (qualityDetail) parts.push(qualityDetail);
 	if (sampleRate && outputRate && Number.isFinite(outputRate) && outputRate > 0 && outputRate !== sampleRate) {
 		parts.push(`${formatSampleRate(outputRate)} output`);
-		const sourceResolution = [formatSampleRate(sampleRate), bitDepth ? `${bitDepth}-bit` : null]
-			.filter(Boolean).join(' / ');
-		parts.push(`${sourceResolution} source`);
 	} else {
 		if (sampleRate) parts.push(formatSampleRate(sampleRate));
 		if (bitDepth) parts.push(`${bitDepth}-bit`);
 	}
 	if (exclusiveEngaged) parts.push(runtime?.dj_engine_enabled ? 'Excl DJ' : 'Excl');
 	return parts.join(PART_SEPARATOR);
+}
+
+export function formatPlayerStreamTooltip(stream: PlayerStreamDisplay, detail: string): string {
+	const sampleRate = stream?.sample_rate;
+	if (!sampleRate || !Number.isFinite(sampleRate) || sampleRate <= 0) return detail;
+	const bitDepth = stream?.bit_depth ?? inferStreamBitDepth(stream?.audio_quality, sampleRate);
+	const sourceResolution = [formatSampleRate(sampleRate), bitDepth ? `${bitDepth}-bit` : null]
+		.filter(Boolean).join(' / ');
+	return [detail, `${sourceResolution} source`].filter(Boolean).join(PART_SEPARATOR);
 }

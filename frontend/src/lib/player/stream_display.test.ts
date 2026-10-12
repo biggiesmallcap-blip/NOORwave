@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { formatPlayerStreamDetail, formatResolutionShort } from './stream_display';
+import { formatPlayerStreamDetail, formatPlayerStreamTooltip, formatResolutionShort } from './stream_display';
 
 describe('formatPlayerStreamDetail', () => {
 	test('shows confirmed lossless quality without using the output device rate', () => {
@@ -31,7 +31,7 @@ describe('formatPlayerStreamDetail', () => {
 			exclusiveEngaged: true,
 		});
 
-		expect(label).toBe('96 kHz output \u00b7 192 kHz / 24-bit source \u00b7 Excl');
+		expect(label).toBe('96 kHz output \u00b7 Excl');
 	});
 
 	test('keeps matching source and output rates compact', () => {
@@ -47,7 +47,21 @@ describe('formatPlayerStreamDetail', () => {
 			stream: { sample_rate: 44_100, bit_depth: 16 },
 			runtime: { sample_rate: 48_000 },
 			exclusiveEngaged: false,
-		})).toBe('48 kHz output \u00b7 44.1 kHz / 16-bit source');
+		})).toBe('48 kHz output');
+	});
+
+	test('shows fixed 96 kHz output for a 44.1 kHz source', () => {
+		expect(formatPlayerStreamDetail({
+			stream: { sample_rate: 44_100, bit_depth: 16 },
+			runtime: { sample_rate: 96_000 },
+			exclusiveEngaged: true,
+		})).toBe('96 kHz output \u00b7 Excl');
+	});
+
+	test('keeps source resolution in the tooltip', () => {
+		expect(formatPlayerStreamTooltip({ sample_rate: 44_100, bit_depth: 16 }, '96 kHz output \u00b7 Excl'))
+			.toBe('96 kHz output \u00b7 Excl \u00b7 44.1 kHz / 16-bit source');
+		expect(formatPlayerStreamTooltip(null, '96 kHz output')).toBe('96 kHz output');
 	});
 
 	test.each([undefined, 0, -1, NaN, Infinity])('does not invent an output rate for %s', (sampleRate) => {
