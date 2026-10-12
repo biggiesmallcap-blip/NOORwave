@@ -1080,4 +1080,3 @@ mod tests {
         assert_eq!(clamp_artist_search_limit(Some(5_000)), 50);
     }
 }
-
