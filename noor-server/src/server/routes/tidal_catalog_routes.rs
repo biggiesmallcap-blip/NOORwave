@@ -818,9 +818,16 @@ pub(super) async fn tidal_playlist_search(
     Ok(Json(json!({ "playlists": items })))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct TidalPlaylistTracksQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
 pub(super) async fn tidal_playlist_tracks(
     State(state): State<SharedState>,
     Path(uuid): Path<String>,
+    Query(params): Query<TidalPlaylistTracksQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let uuid = normalize_tidal_playlist_uuid(&uuid).map_err(|status| {
         (
@@ -855,10 +862,22 @@ pub(super) async fn tidal_playlist_tracks(
     let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, uuid, limit, offset);
     let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
-    let tracks = match get_cached_tidal_playlist_tracks(&playlist_tracks_cache, &cache_key) {
+    let cached = if params.refresh {
+        None
+    } else {
+        get_cached_tidal_playlist_tracks(&playlist_tracks_cache, &cache_key)
+    };
+    let never_cancelled = || -> anyhow::Result<()> { Ok(()) };
+    let tracks = match cached {
         Some(cached) => cached,
         None => {
-            let resp = match client.get_playlist_tracks(uuid, limit, offset).await {
+            let tracks = match super::tidal_sync_routes::fetch_tidal_playlist_tracks(
+                &client,
+                uuid,
+                &never_cancelled,
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     return Err((
@@ -867,8 +886,8 @@ pub(super) async fn tidal_playlist_tracks(
                     ));
                 }
             };
-            put_cached_tidal_playlist_tracks(&playlist_tracks_cache, cache_key, resp.items.clone());
-            resp.items
+            put_cached_tidal_playlist_tracks(&playlist_tracks_cache, cache_key, tracks.clone());
+            tracks
         }
     };
 

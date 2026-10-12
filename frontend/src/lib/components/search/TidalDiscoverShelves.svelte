@@ -11,6 +11,8 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
 	import AlbumPopup from '$lib/components/album/AlbumPopup.svelte';
+	import TidalCollectionPopup from '$lib/components/playlist/TidalCollectionPopup.svelte';
+	import { buildTidalCollectionMenu } from '$lib/player/tidal_collection_menu';
 	import RailNavigation from '$lib/components/ui/RailNavigation.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
@@ -42,6 +44,7 @@
 
 	/** The album tile whose detail popup is open, if any. */
 	let albumPopupItem = $state<TidalHomeItem | null>(null);
+	let playlistPopupItem = $state<TidalHomeItem | null>(null);
 	let railElements = $state<Record<string, HTMLElement>>({});
 
 	function handleItemClick(item: TidalHomeItem) {
@@ -82,12 +85,13 @@
 			return;
 		}
 		if (item.kind === 'playlist') {
-			void playTidalPlaylist(item.id);
+			playlistPopupItem = item;
 			return;
 		}
 	}
 
 	function handleItemKeydown(event: KeyboardEvent, item: TidalHomeItem) {
+		if (event.target !== event.currentTarget) return;
 		if (event.key !== 'Enter' && event.key !== ' ') return;
 		event.preventDefault();
 		handleItemClick(item);
@@ -158,11 +162,7 @@
 			openContextMenu(
 				event,
 				[
-					{
-						label: 'Play playlist',
-						icon: '▶',
-						onSelect: () => { void playTidalPlaylist(item.id); }
-					},
+					...buildTidalCollectionMenu({ onOpen: () => { playlistPopupItem = item; }, onPlay: () => void playTidalPlaylist(item.id) }),
 					downloadMenuItem((format) => void downloadTidalPlaylist(item.id, format), 'Download playlist')
 				],
 				item.title
@@ -177,6 +177,7 @@
 	function ariaLabelFor(item: TidalHomeItem): string {
 		if (mediaKind === 'video') return `Play video ${item.title}`;
 		if (item.kind === 'album') return `Open album ${item.title}`;
+		if (item.kind === 'playlist') return `Open playlist ${item.title}`;
 		return `Play ${item.title}`;
 	}
 
@@ -253,7 +254,8 @@
 						fallbackText={fallbackGlyph(item.kind)}
 						decorative={true}
 					/>
-					<PlayOverlay position="center" size="sm" label={ariaLabelFor(item)} />
+					<PlayOverlay position="center" size="sm" label={`Play ${item.title}`}
+						onclick={item.kind === 'playlist' && mediaKind === 'audio' ? (event) => { event.stopPropagation(); void playTidalPlaylist(item.id); } : undefined} />
 				</div>
 				<div class="meta">
 					<span class="title">{item.title}</span>
@@ -306,7 +308,8 @@
 					<PlayOverlay
 						position="corner"
 						size="sm"
-						label={ariaLabelFor(item)}
+						label={`Play ${item.title}`}
+						onclick={item.kind === 'playlist' && mediaKind === 'audio' ? (event) => { event.stopPropagation(); void playTidalPlaylist(item.id); } : undefined}
 					/>
 				</div>
 				<div class="meta">
@@ -379,6 +382,14 @@
 			}}
 			onClose={() => (albumPopupItem = null)}
 		/>
+	{/key}
+{/if}
+
+{#if playlistPopupItem}
+	{#key playlistPopupItem.id}
+		<TidalCollectionPopup id={playlistPopupItem.id} kind="playlist" title={playlistPopupItem.title}
+			subtitle={playlistPopupItem.creator_name} artworkUrl={playlistPopupItem.artwork_url}
+			onClose={() => playlistPopupItem = null} />
 	{/key}
 {/if}
 

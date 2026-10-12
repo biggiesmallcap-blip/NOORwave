@@ -165,10 +165,7 @@ pub(super) async fn batch_add_to_playlist(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
-    {
-        let state = state.read().await;
-        let _ = state.event_tx.send(AppEvent::PlaylistsChanged);
-    }
+    super::playlist_routes::notify_playlists_changed(&state).await;
 
     Ok(Json(json!({
         "playlist_id": payload.playlist_id,

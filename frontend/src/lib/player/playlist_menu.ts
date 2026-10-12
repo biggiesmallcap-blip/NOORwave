@@ -105,7 +105,7 @@ export function buildAddToPlaylistSubmenu(
 				const trackIds = await getTrackIds();
 				if (!trackIds.length) return;
 				try {
-					const { added } = await api.addTracksToPlaylist(playlist.id, trackIds);
+					const { added } = await api.batchAddToPlaylist(playlist.id, trackIds);
 					invalidatePlaylistCaches();
 					showToast(
 						`Added ${added} track${added !== 1 ? 's' : ''} to ${playlist.name}`,

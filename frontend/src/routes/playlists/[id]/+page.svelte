@@ -157,16 +157,12 @@
 
 	// ─── Reorder ──────────────────────────────────────────────────────────────
 	// Shares the queue's drag action, so the index conversion and the Firefox
-	// dragstart quirk are handled in one place. Rows are keyed by track id.
+	// dragstart quirk are handled in one place. Positions distinguish repeated tracks.
 	const drag = createDragReorder({
-		indexOf: (id) => tracks.findIndex((track) => track.id === id),
+		indexOf: (position) => position,
 		length: () => tracks.length,
 		canDrag: () => editable,
-		onDrop: (id, toIndex) =>
-			moveTrack(
-				tracks.findIndex((t) => t.id === id),
-				toIndex,
-			),
+		onDrop: (position, toIndex) => moveTrack(position, toIndex),
 	});
 	const dragState = drag.state;
 
@@ -374,7 +370,11 @@
 					likeLabel="Add to favourites"
 					unlikeLabel="Remove from favourites"
 					onmore={openHeaderMenu}
-				/>
+				>
+					{#if isTidal}
+						<button class="btn btn-glass" disabled={busy} onclick={() => void refreshFromTidal()}>Refresh from TIDAL</button>
+					{/if}
+				</ActionBar>
 			{/snippet}
 		</DetailHero>
 
@@ -409,11 +409,11 @@
 				{#each tracks as track, index (`${track.id}-${index}`)}
 					<li
 						class="detail-track"
-						class:dragging={$dragState.draggingId === track.id}
-						class:drag-over={$dragState.dragOverId === track.id &&
-							$dragState.draggingId !== track.id}
+						class:dragging={$dragState.draggingId === index}
+						class:drag-over={$dragState.dragOverId === index &&
+							$dragState.draggingId !== index}
 						draggable={editable}
-						use:drag.row={track.id}
+						use:drag.row={index}
 					>
 						{#if editable}
 							<span class="detail-grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>

@@ -2,6 +2,9 @@ use super::catalog_routes::merge_tidal_artist_album_filters;
 use super::home_routes::{
     LastFmArtistSeed, LastFmTrackSeed, merge_lastfm_artist_seeds, merge_lastfm_track_seeds,
 };
+use super::tidal_catalog_routes::{
+    get_cached_tidal_playlist_tracks, put_cached_tidal_playlist_tracks,
+};
 use super::*;
 use crate::PlaybackRuntimeState;
 use crate::db::{Database, schema};
@@ -6108,6 +6111,155 @@ async fn create_playlist_returns_a_local_row() {
 }
 
 #[tokio::test]
+async fn tidal_snapshot_create_validates_before_writing() {
+    let db = fresh_migrated_db();
+    let source = seed_local_playlist(&db, "Source", 1);
+    db.with_conn(|conn| {
+        conn.execute("UPDATE tracks SET tidal_id = 42", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let id = db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT track_id FROM playlist_tracks WHERE playlist_id=?1",
+                [source],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .unwrap();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    for (ids, expected) in [
+        (vec![], StatusCode::BAD_REQUEST),
+        (vec![-1], StatusCode::BAD_REQUEST),
+        (vec![999999], StatusCode::BAD_REQUEST),
+        (vec![id], StatusCode::UNAUTHORIZED),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/playlists")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "name": "Snapshot", "sync_to_tidal": true, "track_ids": ids })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(
+        db.with_conn(|conn| Ok(queries::get_playlists(conn)?.len()))
+            .unwrap(),
+        1
+    );
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/api/playlists")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "name":"Snapshot", "sync_to_tidal":true, "track_ids":[id], "tidal_track_ids":[42,43] }).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn playlist_changes_clear_provider_cache_and_broadcast() {
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        fresh_migrated_db(),
+    )));
+    let cache = state.read().await.tidal_playlist_tracks_cache.clone();
+    let mut events = state.read().await.event_tx.subscribe();
+    put_cached_tidal_playlist_tracks(&cache, "old".to_string(), vec![]);
+    assert!(get_cached_tidal_playlist_tracks(&cache, "old").is_some());
+    playlist_routes::notify_playlists_changed(&state).await;
+    assert!(get_cached_tidal_playlist_tracks(&cache, "old").is_none());
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        crate::AppEvent::PlaylistsChanged
+    ));
+}
+
+#[test]
+fn tidal_snapshot_persistence_is_linked_ordered_and_atomic() {
+    let db = fresh_migrated_db();
+    let source = seed_local_playlist(&db, "Source", 2);
+    let ids = db
+        .with_conn(|conn| {
+            Ok(queries::get_playlist_tracks(conn, source)?
+                .iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+    let saved = db
+        .with_conn(|conn| {
+            playlist_routes::persist_tidal_snapshot(
+                conn,
+                "Saved mix",
+                None,
+                "remote-uuid",
+                &[ids[1], ids[0], ids[1]],
+            )
+        })
+        .unwrap();
+    assert_eq!(saved.tidal_uuid.as_deref(), Some("remote-uuid"));
+    assert_eq!(saved.track_count, 3);
+    assert_eq!(
+        playlist_titles(&db, saved.id),
+        ["Track 1", "Track 0", "Track 1"]
+    );
+    assert!(
+        db.with_conn(|conn| playlist_routes::persist_tidal_snapshot(
+            conn,
+            "Failed",
+            None,
+            "failed-uuid",
+            &[999999]
+        ))
+        .is_err()
+    );
+    assert_eq!(
+        db.with_conn(|conn| Ok(queries::get_playlists(conn)?.len()))
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn playlist_add_to_tidal_requires_connection_and_preserves_local_contents() {
+    let db = fresh_migrated_db();
+    let id = seed_local_playlist(&db, "Synced", 1);
+    db.with_conn(|conn| {
+        conn.execute("UPDATE playlists SET tidal_uuid='remote' WHERE id=?1", [id])?;
+        conn.execute("UPDATE tracks SET tidal_id=42", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let track_id = db
+        .with_conn(|conn| Ok(queries::get_playlist_tracks(conn, id)?[0].id))
+        .unwrap();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/playlists/{id}/tracks"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"track_ids": [track_id]}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(playlist_titles(&db, id), ["Track 0"]);
+}
+
+#[tokio::test]
 async fn rename_playlist_updates_a_regular_row() {
     // The old PUT /api/smart/playlists/{id} is gated on is_smart = 1 in SQL, so
     // a regular playlist could not be renamed at all before this route existed.
@@ -8214,4 +8366,82 @@ async fn tidal_ai_cached_browse_is_reversible_and_playback_queue_is_preserved() 
     )
     .unwrap();
     assert_eq!(body, cached);
+}
+
+#[tokio::test]
+async fn tidal_snapshot_accepts_aliases_and_rejects_mismatched_original_ids() {
+    let db = fresh_migrated_db();
+    let source = seed_local_playlist(&db, "Source", 2);
+    let (local_id, other_id) = db
+        .with_conn(|conn| {
+            let tracks = queries::get_playlist_tracks(conn, source)?;
+            let (id, other) = (tracks[0].id, tracks[1].id);
+            conn.execute("UPDATE tracks SET tidal_id=NULL WHERE id=?1", [id])?;
+            conn.execute("UPDATE tracks SET tidal_id=43 WHERE id=?1", [other])?;
+            conn.execute(
+                "INSERT INTO tidal_track_aliases(tidal_id,track_id) VALUES(42,?1),(44,?2)",
+                rusqlite::params![id, other],
+            )?;
+            Ok((id, other))
+        })
+        .unwrap();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let imported = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/tidal/tracks/import")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"tidal_id":42,"title":"Track 0","artist_name":"Artist"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(imported.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(imported.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["local_id"], local_id);
+    for (ids, originals, expected) in [
+        (
+            vec![local_id, local_id],
+            Some(vec![42, 42]),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (vec![other_id], Some(vec![44]), StatusCode::UNAUTHORIZED),
+        (vec![other_id], None, StatusCode::UNAUTHORIZED),
+        (vec![local_id], Some(vec![43]), StatusCode::BAD_REQUEST),
+        (vec![local_id], Some(vec![999999]), StatusCode::BAD_REQUEST),
+        (vec![999999], Some(vec![42]), StatusCode::BAD_REQUEST),
+        (vec![local_id], None, StatusCode::BAD_REQUEST),
+        (vec![local_id], Some(vec![-1]), StatusCode::BAD_REQUEST),
+        (vec![local_id], Some(vec![]), StatusCode::BAD_REQUEST),
+    ] {
+        let saved = app.clone().oneshot(Request::builder().method("POST")
+            .uri("/api/playlists").header("content-type", "application/json")
+            .body(Body::from(json!({"name":"Snapshot","sync_to_tidal":true,"track_ids":ids,"tidal_track_ids":originals}).to_string())).unwrap()).await.unwrap();
+        let status = saved.status();
+        let body = axum::body::to_bytes(saved.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            expected,
+            "response: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    assert_eq!(
+        db.with_conn(|conn| Ok(queries::get_playlists(conn)?.len()))
+            .unwrap(),
+        1
+    );
 }

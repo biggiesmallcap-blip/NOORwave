@@ -9,6 +9,9 @@
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
+	import TidalCollectionPopup from '$lib/components/playlist/TidalCollectionPopup.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildTidalCollectionMenu } from '$lib/player/tidal_collection_menu';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -29,6 +32,7 @@
 	let refreshing = $state(false);
 	let lastRefreshFailed = $state(false);
 	let errorMsg = $state<string>('');
+	let selectedMix = $state<TidalMix | null>(null);
 
 	let audioMixes = $derived(mixes.filter((m) => !isMixVideo(m)));
 	let videoMixes = $derived(mixes.filter((m) => isMixVideo(m)));
@@ -102,15 +106,29 @@
 		void playTidalMix(mix.id);
 	}
 
+	function openMix(mix: TidalMix) {
+		if (isMixVideo(mix)) { void goto(`/videos?mixId=${encodeURIComponent(mix.id)}`); return; }
+		selectedMix = mix;
+	}
+
+	function mixMenu(event: MouseEvent, mix: TidalMix) {
+		openContextMenu(event, buildTidalCollectionMenu({
+			onOpen: () => openMix(mix), onPlay: () => playMix(mix),
+		}), mix.title);
+	}
+
 </script>
 
 {#snippet mixCard(mix: TidalMix)}
-	<button
-		type="button"
+	<div
+		role="button"
+		tabindex="0"
 		class="mix-card"
 		title={mix.sub_title ?? mix.title}
-		aria-label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
-		onclick={() => playMix(mix)}
+		aria-label={`Open ${isMixVideo(mix) ? 'video mix' : 'mix'} ${mix.title}`}
+		onclick={() => openMix(mix)}
+		onkeydown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openMix(mix); } }}
+		oncontextmenu={(event) => mixMenu(event, mix)}
 	>
 		<div class="art-wrap">
 			<ArtworkImage
@@ -126,6 +144,7 @@
 				position="corner"
 				size="sm"
 				label={`${isMixVideo(mix) ? 'Play video mix' : 'Play mix'} ${mix.title}`}
+				onclick={(event) => { event.stopPropagation(); playMix(mix); }}
 			/>
 			{#if isMixVideo(mix)}
 				<span class="video-badge">Video</span>
@@ -136,7 +155,7 @@
 		{#if mix.sub_title}
 			<div class="meta"><p class="artist">{mix.sub_title}</p></div>
 		{/if}
-	</button>
+	</div>
 {/snippet}
 
 {#snippet mixRail(items: TidalMix[])}
@@ -199,6 +218,13 @@
 		<SectionHeader title="Video Mixes" variant="charts" level={2} />
 		{@render mixRail(videoMixes)}
 	</section>
+{/if}
+
+{#if selectedMix}
+	{#key selectedMix.id}
+		<TidalCollectionPopup id={selectedMix.id} kind="mix" title={selectedMix.title}
+			subtitle={selectedMix.sub_title} artworkUrl={selectedMix.image_url} onClose={() => selectedMix = null} />
+	{/key}
 {/if}
 
 <style>

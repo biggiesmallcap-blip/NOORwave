@@ -52,6 +52,11 @@ pub(super) struct ArtistSearchParams {
 pub(super) struct CreatePlaylistRequest {
     name: String,
     description: Option<String>,
+    #[serde(default)]
+    sync_to_tidal: bool,
+    #[serde(default)]
+    track_ids: Vec<i64>,
+    tidal_track_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +110,9 @@ fn require_positive_track_ids(track_ids: &[i64]) -> Result<(), (StatusCode, Json
 /// a manual refresh. Best-effort: a closed broadcast channel is not an error.
 pub(super) async fn notify_playlists_changed(state: &SharedState) {
     let state = state.read().await;
+    if let Ok(mut cache) = state.tidal_playlist_tracks_cache.lock() {
+        cache.clear();
+    }
     let _ = state.event_tx.send(crate::AppEvent::PlaylistsChanged);
 }
 
@@ -148,6 +156,16 @@ fn require_playlist_name(raw: &str) -> Result<String, (StatusCode, Json<Value>)>
 /// a generic upstream failure.
 fn tidal_write_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     if error
+        .downcast_ref::<tidal_mutations::UnfinishedPlaylist>()
+        .is_some()
+    {
+        tracing::error!(%error, "TIDAL snapshot cleanup failed");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "message": error.to_string() })),
+        );
+    }
+    if error
         .downcast_ref::<tidal_mutations::PlaylistConflict>()
         .is_some()
     {
@@ -189,11 +207,7 @@ async fn load_playlist(
         .map_err(playlist_error_response)
 }
 
-/// Create a regular, local playlist.
-///
-/// Local-only on purpose: this does not create a counterpart on TIDAL, so the
-/// list stays a NOORwave artifact. Editing an existing TIDAL-mirrored playlist
-/// does write through - see `update_playlist_route` below.
+/// Existing callers create local playlists. Snapshot saves opt into TIDAL.
 pub(super) async fn create_playlist_route(
     State(state): State<SharedState>,
     Json(payload): Json<CreatePlaylistRequest>,
@@ -204,6 +218,17 @@ pub(super) async fn create_playlist_route(
         .as_deref()
         .map(str::trim)
         .filter(|d| !d.is_empty());
+
+    if payload.sync_to_tidal {
+        return save_tidal_playlist(
+            &state,
+            &name,
+            description,
+            &payload.track_ids,
+            payload.tidal_track_ids.as_deref(),
+        )
+        .await;
+    }
 
     let response = {
         let guard = state.read().await;
@@ -217,6 +242,121 @@ pub(super) async fn create_playlist_route(
     };
     notify_playlists_changed(&state).await;
     Ok(response)
+}
+
+async fn save_tidal_playlist(
+    state: &SharedState,
+    name: &str,
+    description: Option<&str>,
+    track_ids: &[i64],
+    original_tidal_ids: Option<&[i64]>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_track_ids(track_ids)?;
+    if track_ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "message": "Save at least one track" })),
+        ));
+    }
+    if let Some(originals) = original_tidal_ids {
+        require_positive_track_ids(originals)?;
+        if originals.len() != track_ids.len() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "message": "Each snapshot track needs its original TIDAL id" })),
+            ));
+        }
+    }
+    let tidal_ids = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            if let Some(originals) = original_tidal_ids {
+                // A provider alias can resolve to a local recording without a
+                // selected TIDAL id. Verify identity using the import lookup.
+                for (local_id, tidal_id) in track_ids.iter().zip(originals) {
+                    anyhow::ensure!(
+                        crate::db::catalogue::track_id(conn, *tidal_id)? == Some(*local_id),
+                        "Each original TIDAL id must resolve to its snapshot track"
+                    );
+                }
+                return Ok(originals.to_vec());
+            }
+            track_ids
+                .iter()
+                .map(|id| {
+                    conn.query_row("SELECT tidal_id FROM tracks WHERE id = ?1", [id], |row| {
+                        row.get::<_, Option<i64>>(0)
+                    })?
+                    .filter(|id| *id > 0)
+                    .ok_or_else(|| anyhow::anyhow!("Every saved track must have a TIDAL id"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "message": error.to_string() })),
+            )
+        })?;
+    let client = tidal_write_context(state).await.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "message": "Connect TIDAL to save this playlist" })),
+        )
+    })?;
+    let uuid = tidal_mutations::create_playlist_snapshot(&client, name, description, &tidal_ids)
+        .await
+        .map_err(tidal_write_error)?;
+    let persisted = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| persist_tidal_snapshot(conn, name, description, &uuid, track_ids));
+    let playlist = match persisted {
+        Ok(playlist) => playlist,
+        Err(error) => {
+            if let Err(cleanup) = tidal_mutations::delete_playlist(&client, &uuid).await {
+                tracing::error!(%uuid, %cleanup, "Failed to clean up snapshot after local save failed");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({ "message": format!("Local save failed: {error}. The TIDAL playlist {uuid} still exists; sync your library before retrying") }),
+                    ),
+                ));
+            }
+            return Err(playlist_error_response(error));
+        }
+    };
+    notify_playlists_changed(state).await;
+    Ok(Json(json!({ "playlist": playlist })))
+}
+
+pub(super) fn persist_tidal_snapshot(
+    conn: &rusqlite::Connection,
+    name: &str,
+    description: Option<&str>,
+    uuid: &str,
+    track_ids: &[i64],
+) -> anyhow::Result<crate::db::models::Playlist> {
+    let tx = conn.unchecked_transaction()?;
+    let playlist = queries::create_playlist(&tx, name, description)?;
+    tx.execute(
+        "UPDATE playlists SET tidal_uuid = ?2, is_synced = 1, track_count = ?3 WHERE id = ?1",
+        rusqlite::params![playlist.id, uuid, track_ids.len() as i64],
+    )?;
+    // A snapshot keeps repeated occurrences instead of using the deduping add helper.
+    for (position, id) in track_ids.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+            rusqlite::params![playlist.id, id, position as i64],
+        )?;
+    }
+    let saved = queries::get_playlist(&tx, playlist.id)?
+        .ok_or_else(|| anyhow::anyhow!("Saved playlist missing"))?;
+    tx.commit()?;
+    Ok(saved)
 }
 
 /// Rename a playlist and/or replace its description.
@@ -530,6 +670,50 @@ pub(super) async fn add_tracks_to_playlist_route(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     require_positive_playlist_id_json(id)?;
     require_positive_track_ids(&payload.track_ids)?;
+
+    let playlist = load_playlist(&state, id).await?;
+    if playlist.is_smart {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "message": "A smart playlist's contents come from its rules" })),
+        ));
+    }
+    if let Some(uuid) = playlist.tidal_uuid.as_deref() {
+        let tidal_ids = state
+            .read()
+            .await
+            .db
+            .with_conn(|conn| {
+                payload
+                    .track_ids
+                    .iter()
+                    .map(|id| {
+                        conn.query_row("SELECT tidal_id FROM tracks WHERE id = ?1", [id], |row| {
+                            row.get::<_, Option<i64>>(0)
+                        })?
+                        .filter(|id| *id > 0)
+                        .ok_or_else(|| anyhow::anyhow!("This track is not available on TIDAL"))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .map_err(|error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "message": error.to_string() })),
+                )
+            })?;
+        if !tidal_ids.is_empty() {
+            let client = tidal_write_context(&state).await.ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "message": "Connect TIDAL to add to this playlist" })),
+                )
+            })?;
+            tidal_mutations::add_to_playlist(&client, uuid, &tidal_ids)
+                .await
+                .map_err(tidal_write_error)?;
+        }
+    }
 
     let response = {
         let guard = state.read().await;

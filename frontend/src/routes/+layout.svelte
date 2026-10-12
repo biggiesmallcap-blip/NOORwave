@@ -59,6 +59,8 @@
 	import { bootstrapRemoteConnection, BoundedRetry } from '$lib/remote/connection';
 	import { currentDeviceName } from '$lib/remote/device_name';
 	import ContextMenu from '$lib/components/ContextMenu.svelte';
+	import AddToPlaylistDialog from '$lib/components/playlist/AddToPlaylistDialog.svelte';
+	import { playlistPicker } from '$lib/stores/add_to_playlist';
 	import Toast from '$lib/components/Toast.svelte';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import ShortcutHelp from '$lib/components/ShortcutHelp.svelte';
@@ -1285,6 +1287,11 @@
 </div>
 
 <ContextMenu />
+{#if $playlistPicker}
+	{#key $playlistPicker}
+		<AddToPlaylistDialog title={$playlistPicker.title} getTrackIds={$playlistPicker.getTrackIds} />
+	{/key}
+{/if}
 <Toast />
 <DiscoverySetupGuide enabled={authReady && onboardingChecked && !isOnboardingRoute && !page.url.pathname.startsWith('/connect')} />
 <WelcomeRelease enabled={authReady && onboardingChecked && !isOnboardingRoute && !isRemoteRoute && !page.url.pathname.startsWith('/connect')} version={serverVersion} />
