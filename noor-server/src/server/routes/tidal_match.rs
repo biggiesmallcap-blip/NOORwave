@@ -10,24 +10,74 @@ pub(super) const SCORE_W_ARTIST: f64 = 0.60;
 
 pub(super) const SCORE_W_TITLE: f64 = 0.40;
 
+/// Lowercase, alphanumerics only, single spaces: "AC/DC" -> "ac dc".
+fn normalize_match_text(s: &str) -> String {
+    s.to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(super) fn score_tidal_candidate(
     result_artist: &str,
     result_title: &str,
     pending_artist: &str,
     pending_title: &str,
 ) -> f64 {
-    fn normalize(s: &str) -> String {
-        s.to_ascii_lowercase()
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-    let a = strsim::jaro_winkler(&normalize(result_artist), &normalize(pending_artist));
-    let t = strsim::jaro_winkler(&normalize(result_title), &normalize(pending_title));
+    let a = strsim::jaro_winkler(
+        &normalize_match_text(result_artist),
+        &normalize_match_text(pending_artist),
+    );
+    let t = strsim::jaro_winkler(
+        &normalize_match_text(result_title),
+        &normalize_match_text(pending_title),
+    );
     SCORE_W_ARTIST * a + SCORE_W_TITLE * t
+}
+
+/// Whole-name Jaro-Winkler that still reads as the same artist written
+/// differently (an accent: 0.943). Crystal Lake vs Crystal Voices scores 0.879
+/// and must fail.
+pub(super) const ARTIST_IDENTITY_MIN: f64 = 0.93;
+
+/// The result is by the requested artist: the same name (ignoring "the" and
+/// "and"), a near-identical spelling, or one credit extending the other at a
+/// word boundary ("Crystal Voices - Deborah Van Dyke & Valerie Farnsworth").
+/// Checked on its own because the 60/40 artist/title blend let a matching
+/// title carry a different artist past the threshold.
+pub(super) fn artist_identity_matches(pending_artist: &str, result_artist: &str) -> bool {
+    fn key(s: &str) -> String {
+        let normalized = normalize_match_text(s);
+        let words: Vec<&str> = normalized
+            .split(' ')
+            .filter(|w| !w.is_empty() && *w != "the" && *w != "and")
+            .collect();
+        if words.is_empty() {
+            normalized
+        } else {
+            words.join(" ")
+        }
+    }
+    let pending = key(pending_artist);
+    let result = key(result_artist);
+    if pending.is_empty() || result.is_empty() {
+        return false;
+    }
+    if pending == result {
+        return true;
+    }
+    let (short, long) = if pending.len() <= result.len() {
+        (&pending, &result)
+    } else {
+        (&result, &pending)
+    };
+    if long.starts_with(short.as_str()) && long[short.len()..].starts_with(' ') {
+        return true;
+    }
+    strsim::jaro_winkler(&pending, &result) >= ARTIST_IDENTITY_MIN
 }
 
 pub(crate) fn import_metadata_from_search_track(
@@ -347,4 +397,51 @@ pub(crate) fn select_best_tidal_match(
 /// (remix, acoustic...) only accepts that same kind.
 pub(super) fn version_intent_matches(pending: VersionClass, candidate: VersionClass) -> bool {
     pending == candidate
+}
+
+#[cfg(test)]
+mod artist_identity_tests {
+    use super::artist_identity_matches;
+
+    #[test]
+    fn different_artists_sharing_a_word_do_not_match() {
+        assert!(!artist_identity_matches("Crystal Voices", "Crystal Lake"));
+        assert!(!artist_identity_matches(
+            "David Hickey",
+            "David Kuckhermann"
+        ));
+        assert!(!artist_identity_matches("Don McLean", "Madonna"));
+    }
+
+    #[test]
+    fn same_artist_written_differently_matches() {
+        assert!(artist_identity_matches("Beyonce", "Beyonc\u{e9}"));
+        assert!(artist_identity_matches("Sigur Ros", "Sigur R\u{f3}s"));
+        assert!(artist_identity_matches("Jay-Z", "JAY Z"));
+        assert!(artist_identity_matches("The Weeknd", "Weeknd"));
+        assert!(artist_identity_matches(
+            "Simon & Garfunkel",
+            "Simon and Garfunkel"
+        ));
+    }
+
+    #[test]
+    fn extended_credit_matches_at_a_word_boundary() {
+        assert!(artist_identity_matches(
+            "Crystal Voices",
+            "Crystal Voices - Deborah Van Dyke & Valerie Farnsworth"
+        ));
+        assert!(artist_identity_matches(
+            "Calvin Harris, Rihanna",
+            "Calvin Harris"
+        ));
+        // "Ash" is a prefix of "Ashanti" but not at a word boundary (JW 0.87).
+        assert!(!artist_identity_matches("Ash", "Ashanti"));
+    }
+
+    #[test]
+    fn empty_artist_never_matches() {
+        assert!(!artist_identity_matches("", "Crystal Voices"));
+        assert!(!artist_identity_matches("Crystal Voices", ""));
+    }
 }
