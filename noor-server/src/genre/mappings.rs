@@ -59,6 +59,26 @@ impl GenreResolution {
     }
 }
 
+/// Lowest per-word Jaro-Winkler that still reads as a misspelling of the same
+/// word ("eletric"/"electric" 0.904, "trash"/"thrash" 0.95) while rejecting a
+/// different word ("wave"/"age" 0.72, "bounce"/"house" 0.70).
+const FUZZY_WORD_MIN: f64 = 0.90;
+
+/// Fuzzy matching corrects spelling; it never swaps a word. Both sides need
+/// the same number of words, and each word must equal or nearly spell the word
+/// in the same position: "new wave" shares "new" with "New Age" and scored
+/// 0.92 overall, but "wave" is not a misspelling of "age", and "spiritual" is
+/// not "Spiritual Jazz".
+fn words_align(input: &str, candidate: &str) -> bool {
+    let input_words: Vec<&str> = input.split_whitespace().collect();
+    let candidate_words: Vec<&str> = candidate.split_whitespace().collect();
+    input_words.len() == candidate_words.len()
+        && input_words
+            .iter()
+            .zip(&candidate_words)
+            .all(|(a, b)| a == b || strsim::jaro_winkler(a, b) >= FUZZY_WORD_MIN)
+}
+
 #[derive(Debug, Clone)]
 pub struct GenreCatalog {
     entries: Vec<GenreEntry>,
@@ -270,8 +290,6 @@ impl GenreCatalog {
             return None;
         }
 
-        let input_tokens: Vec<&str> = normalized.split_whitespace().collect();
-
         let mut scored = self
             .canonical_keys
             .iter()
@@ -295,14 +313,7 @@ impl GenreCatalog {
             return None;
         }
 
-        // Require at least one shared token, or substring containment, to avoid
-        // purely character-level matches (e.g. "british" → "britpop") while still
-        // catching single-token typos like "shoegazee" → "shoegaze".
-        let candidate_tokens: Vec<&str> = best_norm.split_whitespace().collect();
-        let shares_token = input_tokens.iter().any(|t| candidate_tokens.contains(t));
-        let substring_match =
-            normalized.contains(best_norm.as_str()) || best_norm.contains(normalized);
-        if !shares_token && !substring_match {
+        if !words_align(normalized, best_norm) {
             return None;
         }
 
@@ -440,5 +451,55 @@ mod tests {
             catalog.resolve_single("r&b").map(|m| m.canonical_name),
             Some("Rhythm and Blues".to_string())
         );
+    }
+
+    fn resolved(catalog: &GenreCatalog, raw: &str) -> Option<String> {
+        catalog.resolve_single(raw).map(|m| m.canonical_name)
+    }
+
+    #[test]
+    fn fuzzy_never_swaps_one_genre_word_for_another() {
+        let catalog = GenreCatalog::from_embedded();
+        for (raw, wrong) in [
+            ("new wave", "New Age"),
+            ("new rave", "New Age"),
+            ("chicago house", "Chicago Blues"),
+            ("chicago soul", "Chicago Blues"),
+            ("psychedelic trance", "Psychedelic Rock"),
+            ("psychedelic soul", "Psychedelic Rock"),
+            ("melodic trance", "Melodic Techno"),
+            ("spiritual", "Spiritual Jazz"),
+            ("uk pop", "K-Pop"),
+            ("us garage", "UK Garage"),
+            ("latin hip hop", "Latin Pop"),
+            ("contemporary gospel", "Contemporary Folk"),
+            ("piano soul", "Piano Solo"),
+            ("future bounce", "Future House"),
+            ("dirty dutch", "Dirty South"),
+            ("lo-fi pop", "Lo-Fi Hip-Hop"),
+        ] {
+            assert_ne!(
+                resolved(&catalog, raw).as_deref(),
+                Some(wrong),
+                "{raw} must not become {wrong}"
+            );
+        }
+    }
+
+    #[test]
+    fn fuzzy_still_corrects_spelling() {
+        let catalog = GenreCatalog::from_embedded();
+        for (raw, want) in [
+            ("electronica", "Electronic"),
+            ("psychadelic rock", "Psychedelic Rock"),
+            ("trash metal", "Thrash Metal"),
+            ("eletric blues", "Electric Blues"),
+            ("musical theater", "Musical Theatre"),
+            ("funky", "Funk"),
+            ("orchestra", "Orchestral"),
+            ("chorale", "Choral"),
+        ] {
+            assert_eq!(resolved(&catalog, raw).as_deref(), Some(want), "{raw}");
+        }
     }
 }
