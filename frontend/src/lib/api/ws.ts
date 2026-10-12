@@ -197,7 +197,7 @@ export function connectWebSocket() {
 				const label = data.title ? `"${data.title}"` : 'Track';
 				showToast(`${label} skipped: ${data.reason ?? 'unavailable on TIDAL'}`, 'error', 6000);
 			}
-			if (data?.type === 'track_changed' || data?.type === 'playback_changed') {
+			if (data?.type === 'connected' || data?.type === 'track_changed' || data?.type === 'playback_changed') {
 				void refreshPlaybackRuntime();
 			}
 			if (data?.type === 'connected') {

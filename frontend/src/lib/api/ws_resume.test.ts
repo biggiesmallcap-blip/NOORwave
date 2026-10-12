@@ -31,6 +31,7 @@ class FakeSocket {
 let listeners: Record<string, () => void> = {};
 
 beforeEach(() => {
+	vi.clearAllMocks();
 	vi.useFakeTimers();
 	vi.resetModules();
 	FakeSocket.instances = [];
@@ -58,6 +59,15 @@ async function connectAndWait(handshake: Record<string, unknown>) {
 }
 
 describe('WebSocket resume recovery', () => {
+	it('loads actual output and stream resolution when an already playing app connects', async () => {
+		const { connectWebSocket } = await import('./ws');
+		const { refreshPlaybackRuntime } = await import('$lib/stores/player');
+		connectWebSocket();
+		FakeSocket.instances[0].open();
+		FakeSocket.instances[0].message({ type: 'connected' });
+		expect(refreshPlaybackRuntime).toHaveBeenCalledTimes(1);
+	});
+
 	it('replaces a socket that died before its first heartbeat', async () => {
 		await connectAndWait({ type: 'connected', heartbeat_ms: 15000 });
 		expect(FakeSocket.instances).toHaveLength(2);
