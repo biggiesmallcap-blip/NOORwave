@@ -10,18 +10,6 @@ back to the PR or commit that flagged it.
 
 ## Open
 
-### remote: browser reconnect timer loses its receiver
-
-Source: the Library loading browser regression, before its WebSocket fixture was
-connected, raised `TypeError: Illegal invocation` from `ReconnectScheduler.next`.
-Affected surfaces: `frontend/src/lib/remote/connection.ts` and
-`frontend/src/lib/api/ws.ts`. The scheduler invokes stored native `setTimeout`
-and `clearTimeout` functions as instance methods, which Edge rejects, preventing
-reconnect after a socket closes. This is outside the Library rendering change.
-Next check: reproduce a socket close in Edge, wrap the native timer defaults in
-receiver-safe closures, and verify reconnect and cancellation in a browser.
-Spawned by: Library blank-on-entry follow-up to PR #351.
-
 ### tidal: move stream.rs behind the session-bound transport
 
 Playback stream resolution (playbackinfo, manifests, video streams, downloads)
@@ -89,23 +77,6 @@ line are built; the global `.btn-secondary` / `.btn-ghost` / `.btn-icon`
 classes exist, and Space presses a focused control (play/pause stays on the
 page and the player transport). Nothing from the audit is open.
 Spawned by: design audit 2026-10-08 (artifact 7N4YSfzjpyu98GRLM5X5hF)
-### browser WebSocket reconnect timer receiver
-
-- Source: isolated playlist browser verification on 2026-10-12. With no
-  WebSocket server available, Edge reported `TypeError: Illegal invocation`
-  in `ReconnectScheduler.next`, called by the socket close handler.
-- Affected: `frontend/src/lib/remote/connection.ts` and
-  `frontend/src/lib/api/ws.ts`.
-- Why it matters: the default timer functions are stored as instance members
-  and invoked with the scheduler as their receiver; browser reconnect can
-  stop after a dropped connection.
-- Outside this plan: this is an existing transport reconnect issue, independent
-  of playlist browsing, saving, track menus, and refresh. Playlist interaction
-  checks use an intercepted connected WebSocket to isolate the requested path.
-- Next check: exercise default timers in a real browser after dropping the
-  socket, bind or wrap the browser timer functions, and verify retry and cancel.
-- Spawned by: playlist and mix interaction verification.
-
 ### video stations: phase 2 (decades, oddities, full tag coverage)
 
 - Source: video stations design, 2026-10-07.
