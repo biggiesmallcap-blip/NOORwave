@@ -320,7 +320,7 @@ Albums have one content model shown in two containers:
 
 Do not add a third presentation. A new surface picks quick view or page by that rule.
 
-Album and TIDAL collection quick views share `QuickViewPopup` for the container, focus handling, and exit motion. Scrolling inside browses the track list; scrolling over the page outside dismisses the popup while the page continues scrolling. Collection quick views use `DetailHero` and `ActionBar`, with a compact Save playlist button that uses the collection title. Keep save forms out of the track list. Portalled context menus remain interactive without dismissing the quick view.
+Album and TIDAL collection quick views share `QuickViewPopup` for the overlay surface, focus, and exit motion. Scrolling inside browses the track list; a wheel over the page outside dismisses the popup while the page keeps scrolling, and an outside click dismisses it without activating what was under the pointer. Layers that stack above it (`ContextMenu`, toasts, the command palette, the playlist picker) carry `data-floating-layer`, so interacting with them never dismisses the quick view; a new overlay that can open above a quick view needs the attribute too. Collection quick views use `DetailHero` and `ActionBar`, with a compact Save playlist button that uses the collection title. Keep save forms out of the track list. Use `ActionBar`'s `disabled` while there is nothing to act on, rather than leaving handlers out, so the row does not reflow.
 
 ## Media links and context menus
 

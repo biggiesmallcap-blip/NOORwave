@@ -401,9 +401,12 @@
 	}
 
 	/* ── Track list ─────────────────────────────────────────────────────────── */
+	/* Fills what the quick view has left under the hero and scrolls on its own,
+	   so short windows never clip the list. */
 	.popup-track-list {
-		max-height: 420px;
+		min-height: 0;
 		overflow-y: auto;
+		overscroll-behavior: contain;
 		display: flex;
 		flex-direction: column;
 		gap: 1px;

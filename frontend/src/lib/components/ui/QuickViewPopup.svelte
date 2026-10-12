@@ -1,88 +1,120 @@
 <script lang="ts">
+	// The container shared by the album and TIDAL collection quick views
+	// (STYLING.md "Album quick view and album page"). It owns the overlay
+	// surface, focus, and dismissal: Escape, the close button, a click outside,
+	// or a wheel over the page behind.
+	//
+	// The backdrop never takes pointer events, so the page stays the wheel
+	// target and keeps scrolling straight through a scroll-dismiss. (Chromium
+	// latches a wheel gesture to its first target; a backdrop that vanished
+	// mid-gesture would freeze page scrolling until the mouse moved.)
+	//
+	// Layers stacked above the quick view (context menu, toasts, the playlist
+	// picker) mark themselves with data-floating-layer. Events inside them are
+	// theirs, not outside interactions.
 	import { onMount, type Snippet } from 'svelte';
 	import { portal } from '$lib/actions/portal';
 	import { contextMenu, closeContextMenu } from '$lib/stores/context_menu';
-	import { playlistPicker } from '$lib/stores/add_to_playlist';
 
 	let { title, onClose, children }: {
 		title: string;
 		onClose: () => void;
-		children: Snippet<[() => void]>;
+		/** Receives requestClose, so content can play the exit before navigating. */
+		children: Snippet<[requestClose: () => void]>;
 	} = $props();
+
+	const WHEEL_DISMISS_THRESHOLD = 6;
+	// Completes the close if animationend never arrives (interrupted animation).
+	const EXIT_FALLBACK_MS = 240;
+	const FOCUSABLE = 'button:not(:disabled), a[href], input:not(:disabled), summary, [tabindex="0"]';
+
 	let panel = $state<HTMLDivElement>();
 	let closing = $state(false);
 	let closed = false;
-	let closeTimer: ReturnType<typeof setTimeout>;
+	let exitTimer: ReturnType<typeof setTimeout> | undefined;
 
 	onMount(() => {
 		const previousFocus = document.activeElement;
 		panel?.focus();
 		return () => {
-			clearTimeout(closeTimer);
+			clearTimeout(exitTimer);
 			if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
 		};
 	});
-
-	function finishClose() {
-		if (closed) return;
-		closed = true;
-		onClose();
-	}
 
 	function requestClose() {
 		if (closing) return;
 		closing = true;
 		closeContextMenu();
-		// Also complete when reduced motion or interruption suppresses animationend.
-		closeTimer = setTimeout(finishClose, 240);
+		exitTimer = setTimeout(finishClose, EXIT_FALLBACK_MS);
 	}
 
-	function isInside(target: EventTarget | null) {
-		return target instanceof Node && (panel?.contains(target)
-			|| (target instanceof Element && target.closest('.context-menu')));
+	function finishClose() {
+		if (closed) return;
+		closed = true;
+		clearTimeout(exitTimer);
+		onClose();
+	}
+
+	function inFloatingLayer(target: EventTarget | null) {
+		return target instanceof Element && target.closest('[data-floating-layer]') !== null;
+	}
+
+	function isOutside(target: EventTarget | null) {
+		return target instanceof Node && !panel?.contains(target) && !inFloatingLayer(target);
 	}
 
 	function handleWheel(event: WheelEvent) {
-		if (closing || $playlistPicker || isInside(event.target) || Math.abs(event.deltaY) < 6) return;
+		if (closing || Math.abs(event.deltaY) < WHEEL_DISMISS_THRESHOLD || !isOutside(event.target)) return;
 		requestClose();
 	}
 
+	// Close on an outside click and swallow it, so a card behind the popup is
+	// not activated by the same click.
 	function handleOutsideClick(event: MouseEvent) {
-		if (closing || $playlistPicker || isInside(event.target)) return;
+		if (closing || !isOutside(event.target)) return;
 		event.preventDefault();
 		event.stopPropagation();
 		requestClose();
 	}
 
 	function handleKey(event: KeyboardEvent) {
-		if ($playlistPicker || event.defaultPrevented) return;
+		if (closing || event.defaultPrevented || inFloatingLayer(event.target)) return;
 		if (event.key === 'Escape') {
 			event.preventDefault();
 			if ($contextMenu.open) closeContextMenu();
 			else requestClose();
+		} else if (event.key === 'Tab' && !$contextMenu.open) {
+			trapFocus(event);
 		}
-		if (event.key !== 'Tab' || $contextMenu.open || !panel) return;
-		const focusable = [...panel.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), [tabindex="0"]')];
-		const first = focusable[0];
-		const last = focusable.at(-1);
-		if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
-			event.preventDefault(); last?.focus();
-		} else if (!event.shiftKey && (document.activeElement === last || document.activeElement === panel)) {
-			event.preventDefault(); first?.focus();
+	}
+
+	function trapFocus(event: KeyboardEvent) {
+		if (!panel) return;
+		const focusable = panel.querySelectorAll<HTMLElement>(FOCUSABLE);
+		const edge = event.shiftKey ? focusable[0] : focusable[focusable.length - 1];
+		const wrapTo = event.shiftKey ? focusable[focusable.length - 1] : focusable[0];
+		if (document.activeElement === edge || document.activeElement === panel) {
+			event.preventDefault();
+			wrapTo?.focus();
 		}
 	}
 </script>
 
 <svelte:window onkeydown={handleKey} onwheel={handleWheel} onclickcapture={handleOutsideClick} />
 
-<div use:portal class="popup-backdrop" role="presentation">
-	<!-- Keyboard dismissal and focus trapping are handled on window above. -->
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div class="popup-panel" class:closing bind:this={panel} role="dialog" tabindex="-1"
-		aria-modal="true" aria-label={title}
-		onclick={(event) => event.stopPropagation()}
-		onanimationend={(event) => { if (closing && event.target === event.currentTarget) finishClose(); }}>
-		<button class="popup-close btn btn-icon" aria-label="Close" onclick={requestClose}>
+<div use:portal class="quick-view-backdrop" role="presentation">
+	<div
+		bind:this={panel}
+		class="quick-view"
+		class:closing
+		role="dialog"
+		aria-modal="true"
+		aria-label={title}
+		tabindex="-1"
+		onanimationend={(event) => { if (closing && event.target === event.currentTarget) finishClose(); }}
+	>
+		<button type="button" class="close btn btn-icon" aria-label="Close" onclick={requestClose}>
 			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
 		</button>
 		{@render children(requestClose)}
@@ -90,52 +122,56 @@
 </div>
 
 <style>
-	.popup-backdrop {
+	.quick-view-backdrop {
 		position: fixed;
 		inset: 0;
 		z-index: var(--z-modal);
 		display: grid;
 		place-items: center;
-		/* Keep the page as the wheel target, so scrolling continues through dismissal. */
 		pointer-events: none;
 	}
-	.popup-panel {
+
+	/* STYLING.md "Surfaces and colour roles": the overlay treatment. */
+	.quick-view {
 		position: relative;
-		width: min(820px, 92vw);
-		max-height: 86dvh;
-		pointer-events: auto;
 		display: flex;
 		flex-direction: column;
-		border-radius: var(--radius-md);
+		width: min(var(--measure-form), calc(100vw - var(--space-6)));
+		max-height: 86dvh;
+		overflow: hidden;
+		pointer-events: auto;
 		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
 		background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
 		color: var(--text-primary);
 		backdrop-filter: var(--blur-modal);
 		box-shadow: var(--panel-shadow);
-		animation: popup-bloom var(--motion-base) both;
-		overflow: hidden;
+		animation: quick-view-in var(--motion-base) both;
 	}
-	.popup-panel.closing {
-		animation: popup-collapse var(--motion-exit) forwards;
+
+	.quick-view.closing {
+		animation: quick-view-out var(--motion-exit) forwards;
 		pointer-events: none;
 	}
-	.popup-close {
+
+	.close {
 		position: absolute;
 		top: var(--space-3);
 		right: var(--space-3);
 		z-index: var(--z-raised);
 		background: color-mix(in srgb, var(--bg-elevated) 55%, transparent);
 	}
-	@keyframes popup-bloom {
-		from { opacity: 0; transform: scale(0.975) translateY(10px); }
-		to { opacity: 1; transform: scale(1) translateY(0); }
+
+	/* STYLING.md "Motion": dialogs move by opacity and a 12px translate. Reduced
+	   motion is handled globally in app.css; it shortens these to 1ms, so
+	   animationend still completes the close. */
+	@keyframes quick-view-in {
+		from { opacity: 0; transform: translateY(12px); }
+		to { opacity: 1; transform: none; }
 	}
-	@keyframes popup-collapse {
-		from { opacity: 1; transform: scale(1) translateY(0); }
-		to { opacity: 0; transform: scale(0.965) translateY(16px); }
+
+	@keyframes quick-view-out {
+		from { opacity: 1; transform: none; }
+		to { opacity: 0; transform: translateY(12px); }
 	}
-	@media (prefers-reduced-motion: reduce) {
-		.popup-panel, .popup-panel.closing { animation: none; }
-	}
-	:global([data-motion="reduce"]) .popup-panel { animation: none; }
 </style>

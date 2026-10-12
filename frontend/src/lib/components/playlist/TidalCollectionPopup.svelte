@@ -1,10 +1,15 @@
 <script lang="ts">
+	// Quick view of a TIDAL mix or playlist that has no local copy yet. Shares
+	// the album quick view's container; the hero is the detail-page DetailHero
+	// and ActionBar, and Save playlist keeps the collection's title.
 	import { onMount } from 'svelte';
 	import { api, type TidalPlayable, type Playlist } from '$lib/api/client';
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import ActionBar from '$lib/components/ui/ActionBar.svelte';
 	import QuickViewPopup from '$lib/components/ui/QuickViewPopup.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
+	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import TidalTrackRow from '$lib/components/TidalTrackRow.svelte';
 	import { currentTrack, isPlaying, playTidalTracksNow, shuffleTidalTracksNow } from '$lib/stores/player';
 	import { showToast } from '$lib/stores/toast';
@@ -16,27 +21,26 @@
 		id: string; kind: 'mix' | 'playlist'; title: string;
 		subtitle?: string | null; artworkUrl?: string | null; onClose: () => void;
 	} = $props();
+
 	let tracks = $state<TidalPlayable[]>([]);
 	let loading = $state(true);
-	let error = $state<string | null>(null);
+	let loadError = $state<unknown>(null);
 	let saving = $state(false);
-	let saveError = $state<string | null>(null);
 	let saved = $state<Playlist | null>(null);
-	let name = $state('');
 	let loadSeq = 0;
 
+	let hasTracks = $derived(tracks.length > 0);
+	let canSave = $derived(hasTracks && !loading && !saving && !saved && title.trim() !== '');
+
 	onMount(() => {
-		name = title;
 		void load();
-		return () => {
-			loadSeq++;
-		};
+		return () => { loadSeq++; };
 	});
 
 	async function load() {
 		const seq = ++loadSeq;
 		loading = true;
-		error = null;
+		loadError = null;
 		try {
 			const result = kind === 'mix'
 				? await api.getTidalMixTracks(id)
@@ -44,7 +48,7 @@
 			if (seq !== loadSeq) return;
 			tracks = result.tracks.map((track) => ({ ...track, artist_name: track.artist_name ?? null }));
 		} catch (reason) {
-			if (seq === loadSeq) error = `Could not load tracks: ${reason}`;
+			if (seq === loadSeq) loadError = reason;
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
@@ -54,35 +58,41 @@
 		void playTidalTracksNow(tracks, title, { startIndex, shuffleMode: 'off' });
 	}
 
+	function shuffle() {
+		void shuffleTidalTracksNow(tracks, title);
+	}
+
 	async function save() {
-		if (saving || saved || !name.trim() || !tracks.length) return;
+		if (!canSave) return;
 		saving = true;
-		saveError = null;
 		try {
-			saved = await saveTidalPlaylist(name, tracks);
+			saved = await saveTidalPlaylist(title, tracks);
 			showToast(`Saved ${saved.name} to NOORwave and TIDAL`, 'success');
 		} catch (reason) {
-			saveError = `Could not save playlist: ${reason}`;
+			console.error(`Could not save TIDAL ${kind} ${id}`, reason);
+			showToast(`Couldn't save ${title}. Try again.`, 'error');
 		} finally {
 			saving = false;
 		}
 	}
 
 	function menu() {
-		if (loading || !tracks.length) return [];
+		if (!hasTracks) return [];
 		return buildTidalCollectionMenu({
 			onPlay: () => play(),
-			onShuffle: () => void shuffleTidalTracksNow(tracks, title),
-			onSave: !saving && !saved && name.trim() ? () => void save() : undefined,
+			onShuffle: shuffle,
+			onSave: canSave ? () => void save() : undefined,
 		});
 	}
 
-	function contextMenu(event: MouseEvent) {
+	function openHeroMenu(event: MouseEvent) {
 		event.preventDefault();
 		openContextMenu(event, menu(), title);
 	}
 
-	function moreActions(event: MouseEvent) {
+	// Stop the opening click before it reaches ContextMenu's window listener,
+	// which would close the menu again on the same click.
+	function openMoreMenu(event: MouseEvent) {
 		event.preventDefault();
 		event.stopPropagation();
 		openMenuAtElement(event.currentTarget as HTMLElement, menu(), title);
@@ -90,29 +100,33 @@
 </script>
 
 <QuickViewPopup {title} {onClose}>
-	{#snippet children(close)}
-		<div class="collection-hero">
-			<DetailHero {title} artwork={artworkUrl} fallbackText="MIX" oncontextmenu={contextMenu}>
+	{#snippet children(requestClose)}
+		<div class="hero">
+			<DetailHero {title} eyebrow={`TIDAL ${kind}`} artwork={artworkUrl} fallbackText="MIX" oncontextmenu={openHeroMenu}>
 				{#snippet meta()}
-					<span>TIDAL {kind === 'mix' ? 'mix' : 'playlist'}</span>
-					{#if !loading && !error}<span>{tracks.length} tracks</span>{/if}
+					{#if hasTracks}<span>{tracks.length} tracks</span>{/if}
 				{/snippet}
 				{#snippet details()}
-					{#if subtitle}<p class="t-meta subtitle">{subtitle}</p>{/if}
+					{#if subtitle}<p class="t-meta">{subtitle}</p>{/if}
 				{/snippet}
 				{#snippet actions()}
 					<ActionBar
-						onplay={!loading && tracks.length ? () => play() : undefined}
-						onshuffle={!loading && tracks.length ? () => void shuffleTidalTracksNow(tracks, title) : undefined}
-						onmore={!loading && tracks.length ? moreActions : undefined}
-						moreLabel={`More ${kind} actions`}>
+						disabled={!hasTracks}
+						onplay={() => play()}
+						onshuffle={shuffle}
+						shuffleHint={`Play this ${kind} in random order`}
+						onmore={openMoreMenu}
+						moreLabel={`More ${kind} actions`}
+					>
 						{#if saved}
-							<a class="btn btn-ghost" href={`/playlists/${saved.id}`} onclick={close}>Open saved playlist</a>
+							<a class="btn btn-ghost" href={`/playlists/${saved.id}`} onclick={requestClose}>Open saved playlist</a>
 						{:else}
-							<button class="btn btn-secondary" disabled={loading || saving || !tracks.length}
-								title="Save these tracks to NOORwave and TIDAL" onclick={() => void save()}>{saving ? 'Saving…' : 'Save playlist'}</button>
+							<button type="button" class="btn btn-secondary" disabled={!canSave}
+								title="Save these tracks to NOORwave and TIDAL" onclick={() => void save()}>
+								{saving ? 'Saving...' : 'Save playlist'}
+							</button>
 						{/if}
-						<button class="btn btn-icon" aria-label="Refresh from TIDAL" title="Refresh from TIDAL"
+						<button type="button" class="btn btn-icon" aria-label="Refresh from TIDAL" title="Refresh from TIDAL"
 							disabled={loading || saving} onclick={() => void load()}>
 							<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1"/></svg>
 						</button>
@@ -120,33 +134,85 @@
 				{/snippet}
 			</DetailHero>
 		</div>
-		{#if saveError}<p class="status save-error t-body" role="alert">{saveError}</p>{/if}
-		{#if loading && !tracks.length}
-			<Skeleton rows={6} label="Loading tracks" />
-		{:else if error && !tracks.length}
-			<div class="status"><p class="t-body" role="alert">{error}</p><button class="btn btn-secondary" onclick={() => void load()}>Retry</button></div>
-		{:else if !tracks.length}
-			<p class="status t-body">No tracks in this {kind}.</p>
-		{:else}
-			{#if error}
-				<div class="status"><p class="t-body" role="alert">{error}. Showing the previous track list.</p><button class="btn btn-secondary" onclick={() => void load()}>Retry</button></div>
+
+		<!-- STYLING.md "States": a refresh keeps the list, dimmed, under a 2px bar. -->
+		<div class="refresh-bar" class:active={loading && hasTracks} aria-hidden="true"></div>
+
+		<div class="body">
+			{#if loadError}
+				<ErrorState
+					title={hasTracks ? `Couldn't refresh this ${kind}` : `Couldn't load this ${kind}`}
+					error={loadError}
+					onretry={() => void load()}
+				/>
 			{/if}
-			<ol class="track-list" class:refreshing={loading} aria-busy={loading}>
-				{#each tracks as track, index (`${index}:${track.tidal_id}`)}
-					<TidalTrackRow {track} {index} variant="numbered" isCurrent={$currentTrack?.tidal_id === track.tidal_id}
-						isPlaying={$isPlaying} onRowClick={() => play(index)} />
-				{/each}
-			</ol>
-		{/if}
+			{#if hasTracks}
+				<ol class="track-list" class:refreshing={loading} aria-busy={loading}>
+					{#each tracks as track, index (`${index}:${track.tidal_id}`)}
+						<TidalTrackRow {track} {index} variant="numbered" isCurrent={$currentTrack?.tidal_id === track.tidal_id}
+							isPlaying={$isPlaying} onRowClick={() => play(index)} />
+					{/each}
+				</ol>
+			{:else if loading}
+				<Skeleton rows={6} label="Loading tracks" />
+			{:else if !loadError}
+				<EmptyState title={`No tracks in this ${kind}`} copy="TIDAL returned an empty list. Refresh to try again." />
+			{/if}
+		</div>
 	{/snippet}
 </QuickViewPopup>
 
 <style>
-	.collection-hero { padding: var(--space-5) var(--space-5) var(--space-3); padding-right: var(--space-7); }
-	.collection-hero :global(.detail-hero) { margin: 0; }
-	.subtitle { margin: 0; }
-	.status { padding: var(--space-4) var(--space-5); margin: 0; }
-	.save-error { color: var(--state-error); }
-	.track-list { list-style: none; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--space-2) var(--space-3) var(--space-4); margin: 0; scrollbar-width: thin; }
-	.track-list.refreshing { opacity: 0.55; }
+	/* Room on the right for the container's close button. */
+	.hero {
+		padding: var(--space-5) var(--space-7) var(--space-3) var(--space-5);
+	}
+
+	.hero :global(.detail-hero) {
+		margin: 0;
+	}
+
+	.hero p {
+		margin: 0;
+	}
+
+	.refresh-bar {
+		position: relative;
+		height: 2px;
+		flex-shrink: 0;
+		overflow: hidden;
+	}
+
+	.refresh-bar.active::after {
+		content: '';
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: 40%;
+		background: var(--accent);
+		animation: refresh-sweep 1.1s var(--ease-standard) infinite;
+	}
+
+	@keyframes refresh-sweep {
+		from { transform: translateX(-100%); }
+		to { transform: translateX(250%); }
+	}
+
+	.body {
+		min-height: 0;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-width: thin;
+		padding: var(--space-2) var(--space-5) var(--space-4);
+	}
+
+	.track-list {
+		list-style: none;
+		margin: 0 calc(-1 * var(--space-2));
+		padding: 0;
+		transition: opacity var(--motion-fast);
+	}
+
+	.track-list.refreshing {
+		opacity: 0.55;
+	}
 </style>

@@ -16,7 +16,7 @@ describe('album quick view', () => {
 	});
 
 	test('closes before navigating, like the artist link', () => {
-		expect(popup).toMatch(/function openAlbumPage\(\) \{[\s\S]*?requestClose\(\);[\s\S]*?goto\(href\)/);
+		expect(popup).toMatch(/function openAlbumPage\(requestClose: \(\) => void\) \{[\s\S]*?requestClose\(\);[\s\S]*?goto\(href\)/);
 	});
 
 	test('TIDAL-only albums link to their TIDAL album page', () => {
