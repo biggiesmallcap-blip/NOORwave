@@ -727,7 +727,8 @@ pub(super) fn handle_release_exclusive_now(
     }
 }
 
-/// Resume playback, re-acquiring an exclusive device if it was released.
+/// Restart the active track at its current position when a panic poisoned
+/// its PCM buffers. Returns whether a restart happened.
 pub(super) fn recover_poisoned_pcm(
     state: &mut PlaybackRuntimeLoopState,
     restart: impl FnOnce(&mut PlaybackRuntimeLoopState, PreparedPlaybackJob) -> Result<()>,
@@ -761,6 +762,8 @@ pub(super) fn recover_poisoned_pcm(
     Ok(true)
 }
 
+/// Resume playback, re-acquiring an exclusive device if it was released and
+/// rebuilding any faulted shared output.
 pub(super) fn handle_resume(
     env: LoopEnv<'_>,
     state: &mut PlaybackRuntimeLoopState,
@@ -1156,21 +1159,7 @@ pub(super) fn hard_pause_for_output_fault(
     output_live: Arc<AtomicBool>,
     message: String,
 ) {
-    state.user_paused = true;
-    for engine in [
-        &state.engine,
-        &state.next_engine,
-        &state.fading_out_engine,
-        &state.drop_preview_engine,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        // A failed driver cannot be relied on to finish a fade. Clear any old
-        // ramp, including on an otherwise healthy overlapping output.
-        engine.shared.disarm_pause_fade();
-        engine.shared.paused.store(true, Ordering::SeqCst);
-    }
+    hard_pause_all_decks(state);
     warn!("{message}");
     let _ = event_tx.send(PlaybackRuntimeEvent::OutputFault {
         active_track_id: state.engine.as_ref().map(|engine| engine.track_id),
@@ -1186,6 +1175,7 @@ pub(super) fn hard_pause_for_output_fault(
         output_live,
         message,
     });
+    acknowledge_hard_pause(state, event_tx);
 }
 
 pub(super) fn recover_faulted_shared_outputs(
@@ -1219,7 +1209,8 @@ pub(super) fn recover_faulted_shared_outputs(
     }
 }
 
-/// Move output to another device, mode or sample rate.
+/// Live decks keep the buffered decode rate; only an idle runtime may adopt
+/// the requested rate.
 pub(super) fn preserve_live_output_sample_rate(
     requested_rate: Option<u32>,
     has_live_engines: bool,
@@ -1232,23 +1223,8 @@ pub(super) fn preserve_live_output_sample_rate(
     }
 }
 
+/// Move output to another device, mode or sample rate.
 #[allow(clippy::too_many_arguments)]
-fn pause_all_decks_for_rejected_output(state: &mut PlaybackRuntimeLoopState) {
-    state.user_paused = true;
-    for engine in [
-        &state.engine,
-        &state.next_engine,
-        &state.fading_out_engine,
-        &state.drop_preview_engine,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        engine.shared.disarm_pause_fade();
-        engine.shared.paused.store(true, Ordering::SeqCst);
-    }
-}
-
 pub(super) fn handle_device_swap(
     env: LoopEnv<'_>,
     state: &mut PlaybackRuntimeLoopState,
@@ -1286,7 +1262,6 @@ pub(super) fn handle_device_swap(
     let new_device = match resolve_device(&selection) {
         Some(d) => d,
         None => {
-            pause_all_decks_for_rejected_output(state);
             fail_runtime_command(
                 state,
                 event_tx,
@@ -1301,7 +1276,6 @@ pub(super) fn handle_device_swap(
     let new_supported = match new_device.default_output_config() {
         Ok(s) => s,
         Err(err) => {
-            pause_all_decks_for_rejected_output(state);
             fail_runtime_command(
                 state,
                 event_tx,
@@ -1320,9 +1294,8 @@ pub(super) fn handle_device_swap(
         || state.fading_out_engine.is_some()
         || state.drop_preview_engine.is_some();
     if has_live_engines && new_config.channels != state.device_channels {
-        // Runtime Error pauses the route's transport state. Pause the actual
-        // decks too, while retaining the previous endpoint for a later Resume.
-        pause_all_decks_for_rejected_output(state);
+        // The failure pauses every deck and keeps the previous endpoint for a
+        // later Resume.
         fail_runtime_command(
             state,
             event_tx,

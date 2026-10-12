@@ -103,6 +103,14 @@ pub(super) fn fail_runtime_command(
 ) {
     // Error consumers pause DB/UI state. Make the audio graph agree before
     // publishing, without relying on a failed output to finish a fade.
+    hard_pause_all_decks(state);
+    report_runtime_command_error(state, event_tx, command_name, error);
+    acknowledge_hard_pause(state, event_tx);
+}
+
+/// Pause every deck at once and latch the user-pause intent. A failed driver
+/// cannot be relied on to finish a fade, so any armed ramp is cleared.
+pub(super) fn hard_pause_all_decks(state: &mut PlaybackRuntimeLoopState) {
     state.user_paused = true;
     for engine in [
         &state.engine,
@@ -116,7 +124,18 @@ pub(super) fn fail_runtime_command(
         engine.shared.disarm_pause_fade();
         engine.shared.paused.store(true, Ordering::SeqCst);
     }
-    report_runtime_command_error(state, event_tx, command_name, error);
+}
+
+/// Error events can be dropped by the listener as stale. The runtime has
+/// paused regardless, so acknowledge it like a user pause; the transport
+/// reconciles DB and UI to what is actually audible.
+pub(super) fn acknowledge_hard_pause(
+    state: &PlaybackRuntimeLoopState,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) {
+    let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
+        track_id: state.engine.as_ref().map(|engine| engine.track_id),
+    });
 }
 
 /// Surface a decode/source failure on the pre-buffered next track without

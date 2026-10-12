@@ -1279,8 +1279,45 @@ async fn cpal_fault_consumer_pauses_db_and_audibility_preserving_queue() {
             .load(std::sync::atomic::Ordering::Acquire)
     );
     let info = guard.playback_runtime_info.as_ref().unwrap();
-    assert_eq!(info.active_track_id, None);
+    assert_eq!(
+        info.active_track_id,
+        Some(1),
+        "the runtime keeps the paused deck, so Resume must not rebuild it"
+    );
     assert_eq!(info.last_error.as_deref(), Some("device removed"));
+}
+
+#[tokio::test]
+async fn cpal_fault_before_started_still_pauses_transport() {
+    // A fresh play only binds `active_track_id` at Started. A fault while the
+    // new track buffers must still pause DB/UI rather than be dropped.
+    let (state, handle, stop, live) = cpal_fault_fixture().await;
+    state
+        .write()
+        .await
+        .playback_runtime_info
+        .as_mut()
+        .unwrap()
+        .active_track_id = None;
+    assert!(handle_output_fault(&state, &handle, cpal_fault_event(&stop, &live)).await);
+    let guard = state.read().await;
+    assert!(
+        !guard
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap()
+            .state
+            .is_playing
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("device removed")
+    );
 }
 
 #[tokio::test]

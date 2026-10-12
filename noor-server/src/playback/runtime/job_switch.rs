@@ -259,6 +259,26 @@ pub(super) fn switch_is_noop_for_active_job(
     !force_restart && active == Some((track_id, generation))
 }
 
+/// A transport rebuild after a fault re-sends the job this runtime already
+/// holds. With play intent over hard-paused decks, Switch must resume them
+/// rather than skip the job as a no-op.
+pub(super) fn switch_should_resume_active_job(
+    state: &PlaybackRuntimeLoopState,
+    job: &PreparedPlaybackJob,
+) -> bool {
+    state.user_paused
+        && !job.start_paused
+        && switch_is_noop_for_active_job(
+            false,
+            state
+                .engine
+                .as_ref()
+                .map(|engine| (engine.track_id, engine.generation)),
+            job.track.id,
+            job.generation,
+        )
+}
+
 /// A direct selection can consume a prepared next deck without going through
 /// promotion. Bind every public reader to that deck before exposing it.
 pub(super) fn adopt_predecoded_next_engine(

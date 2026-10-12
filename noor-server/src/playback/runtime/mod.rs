@@ -582,6 +582,13 @@ fn run_runtime_loop(
                     }
                 }
                 PlaybackRuntimeCommand::Switch(job) => {
+                    // A transport rebuild after a fault re-sends the job this
+                    // runtime already holds, which `transition_to_job` skips.
+                    // Honour its play intent through the normal Resume path,
+                    // which also rebuilds faulted or released output.
+                    if switch_should_resume_active_job(&state, &job) {
+                        return handle_resume(env, &mut state);
+                    }
                     if let Err(error) = transition_to_job(
                         &config,
                         &command_tx,

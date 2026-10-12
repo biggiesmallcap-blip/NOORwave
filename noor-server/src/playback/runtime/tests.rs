@@ -5068,6 +5068,10 @@ fn cpal_output_fault_hard_pauses_graph_without_finishing_queue() {
         }
         other => panic!("expected typed fault, got {other:?}"),
     }
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::Paused { track_id: Some(1) })
+    ));
     assert!(event_rx.try_recv().is_err());
 }
 
@@ -5380,6 +5384,10 @@ fn exclusive_output_fault_poll_pauses_graph_once_without_queue_advance() {
             }
             other => panic!("expected output fault, got {other:?}"),
         }
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(PlaybackRuntimeEvent::Paused { track_id: Some(1) })
+        ));
         poll_exclusive_output_fault(&mut state, &event_tx);
         assert!(event_rx.try_recv().is_err());
     }
@@ -5773,6 +5781,10 @@ fn runtime_recovery_composes_after_command_error_and_panic() {
         }
         other => panic!("expected error event, got {other:?}"),
     }
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::Paused { .. })
+    ));
 
     // 2. Simulate a subsequent successful Play: engine re-populates.
     state.engine = Some(test_engine_with_shared(10, 2));
@@ -6665,4 +6677,54 @@ fn offset_source_redirect_makes_handle_read_from_new_engine() {
     // Stale writes to engine A must not leak through.
     engine_a_offset.store(999_999, Ordering::Relaxed);
     assert_eq!(handle.buffered_start_samples(), 48_000 * 2 * 30);
+}
+
+#[test]
+fn switch_to_the_held_job_resumes_hard_paused_decks() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(17, 9));
+    state.user_paused = true;
+    let play = PreparedPlaybackJob::test_fixture(17, 9);
+    assert!(!play.start_paused);
+    assert!(switch_should_resume_active_job(&state, &play));
+
+    let mut paused = play.clone();
+    paused.start_paused = true;
+    assert!(!switch_should_resume_active_job(&state, &paused));
+    assert!(!switch_should_resume_active_job(
+        &state,
+        &PreparedPlaybackJob::test_fixture(17, 10)
+    ));
+    assert!(!switch_should_resume_active_job(
+        &state,
+        &PreparedPlaybackJob::test_fixture(18, 9)
+    ));
+    state.user_paused = false;
+    assert!(!switch_should_resume_active_job(&state, &play));
+}
+
+#[test]
+fn failed_commands_acknowledge_the_hard_pause() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(17, 9));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    fail_runtime_command(&mut state, &event_tx, "Resume", anyhow!("device gone"));
+    assert!(state.user_paused);
+    assert!(
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::SeqCst)
+    );
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::CommandError { .. })
+    ));
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::Paused { track_id: Some(17) })
+    ));
 }

@@ -2157,7 +2157,7 @@ pub(crate) async fn handle_output_fault(
     event: playback_runtime::PlaybackRuntimeEvent,
 ) -> bool {
     let playback_runtime::PlaybackRuntimeEvent::OutputFault {
-        active_track_id,
+        active_track_id: _,
         generation,
         active_decoder_stop,
         decoder_stop,
@@ -2170,6 +2170,8 @@ pub(crate) async fn handle_output_fault(
     use std::sync::atomic::Ordering;
     // Validate after acquiring the same lock that protects queue replacement.
     // Checking before this await allows a delayed failure to pause a newer row.
+    // The output and decoder identities already pin the fault to live decks;
+    // `active_track_id` is not compared because it lags until Started.
     let completed = {
         let mut guard = state.write().await;
         if !output_live.load(Ordering::Acquire)
@@ -2182,11 +2184,6 @@ pub(crate) async fn handle_output_fault(
                 .playback_runtime
                 .as_ref()
                 .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
-            || guard
-                .playback_runtime_info
-                .as_ref()
-                .and_then(|info| info.active_track_id)
-                != active_track_id
         {
             return false;
         }
@@ -2194,9 +2191,10 @@ pub(crate) async fn handle_output_fault(
             warn!("Failed to persist output-fault pause: {error}");
         }
         guard.audio_active.store(false, Ordering::Release);
+        // The runtime keeps the paused decks, so the active track stays bound
+        // and Resume can rebuild the output in place.
         if let Some(info) = guard.playback_runtime_info.as_mut() {
             info.last_error = Some(message.clone());
-            info.active_track_id = None;
             if info.exclusive_engaged {
                 let device = info.device_name.clone();
                 info.exclusive_engaged = false;
@@ -2303,7 +2301,12 @@ async fn handle_runtime_error_checked(
             .store(false, std::sync::atomic::Ordering::Release);
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.last_error = Some(message.to_string());
-            info.active_track_id = None;
+            // A failed command leaves its paused decks in the runtime (a
+            // runtime that dropped them also sends Stopped). Other errors come
+            // from a runtime that may have lost its engines.
+            if command_context.is_none() {
+                info.active_track_id = None;
+            }
         }
         let outcome = if paused {
             flush_active_listen_session_locked(
