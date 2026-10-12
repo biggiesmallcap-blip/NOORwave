@@ -1653,6 +1653,24 @@ async fn handle_runtime_finished_for_owner(
 
     let Some(snapshot) = snapshot else {
         let mut state_guard = state.write().await;
+        // Mismatch cleanup can wait behind another writer. Revalidate while
+        // holding the source identity through the session/history mutation.
+        let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
+        let owner_is_current = current_playback_generation(&state_guard) == generation
+            && match (expected_runtime, expected_source, source_guard.as_ref()) {
+                (None, None, None) => true,
+                (Some(runtime), Some(expected_source), Some(current_source)) => {
+                    state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
+                        && Arc::ptr_eq(current_source, expected_source)
+                }
+                _ => false,
+            };
+        if !owner_is_current {
+            return Ok(());
+        }
         let track_id_for_event = match flush_active_listen_session_locked(
             &mut state_guard,
             chrono::Utc::now(),
