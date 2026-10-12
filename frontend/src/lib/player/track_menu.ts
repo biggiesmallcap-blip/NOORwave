@@ -200,7 +200,7 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 		items.push({
 			label: 'Artist radio',
 			icon: '✦',
-			onSelect: () => void startArtistRadio(track.artist_id!, track.id)
+			onSelect: () => void startArtistRadio(track.artist_id!)
 		});
 	}
 
