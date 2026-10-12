@@ -9,12 +9,12 @@ Change: when source and runtime rates differ, the visible label uses the actual 
 Validation:
 
 - Initial source/output regression failed before implementation.
-- Final frontend suite: 1,329 tests in 212 files passed.
+- Final frontend suite after initial-connection refresh: 1,330 tests in 212 files passed.
 - `pnpm check`: zero errors and warnings. `pnpm lint` and `pnpm run build`: passed.
-- A production browser check exercised the real Settings/player route through playback-state/runtime API fixtures and a `track_changed` WebSocket event. It verified the compact visible label and complete source tooltip. This is a rendered product-route check, not a native audible-output test.
+- A production browser check exercised the real Settings/player route through playback-state/runtime API fixtures and the initial `connected` WebSocket event. It verified the compact visible label and complete source tooltip without a track change. This is a rendered product-route check, not a native audible-output test. SvelteKit sync and production build share generated files; final build was performed without concurrent sync and the preview was restarted afterward to load its matching manifest.
 - Updated the isolated portable frontend assets, retaining older hashed assets so an already open page can finish using its loaded chunks. No database, sign-in or backend changes during this UI update.
 
-Commits: `cbd3d128`, source/output distinction; `2dfc7a56`, compact output label and source tooltip.
+Commits: `cbd3d128`, source/output distinction; `2dfc7a56`, compact output label and source tooltip; `bb2dfa95`, initial connection fetches stream and actual output rate. The new fake-socket regression failed before the initial connection fix and passed afterward.
 
 Acceptance: done for rate distinction, compact label, tooltip wiring and rendered route verification. User reported clean playback so far at confirmed 96 kHz with Stable buffering after the separate callback fix. That observation is preliminary; occasional PCM contention diagnostics remain.
 
