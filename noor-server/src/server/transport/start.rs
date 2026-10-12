@@ -72,14 +72,18 @@ pub(crate) async fn start_track_for_runtime(
     state: &SharedState,
     request: StartRequest<'_>,
     expected_runtime: &crate::playback::runtime::PlaybackRuntimeHandle,
+    expected_source: &std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<Started, StartError> {
-    start_track_inner(state, request, Some(expected_runtime)).await
+    start_track_inner(state, request, Some((expected_runtime, expected_source))).await
 }
 
 async fn start_track_inner(
     state: &SharedState,
     request: StartRequest<'_>,
-    expected_runtime: Option<&crate::playback::runtime::PlaybackRuntimeHandle>,
+    expected_runtime: Option<(
+        &crate::playback::runtime::PlaybackRuntimeHandle,
+        &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    )>,
 ) -> Result<Started, StartError> {
     let StartRequest {
         track,
@@ -93,7 +97,7 @@ async fn start_track_inner(
         return Err(StartError::LocalUnsupported);
     };
     let resolved = resolve_tidal_playback_stream(state, track, &stream_request).await;
-    if let Some(expected) = expected_runtime {
+    if let Some((expected, expected_source)) = expected_runtime {
         let guard = state.read().await;
         if !guard
             .playback_runtime
@@ -101,6 +105,10 @@ async fn start_track_inner(
             .is_some_and(|runtime| runtime.handle.is_same_runtime(expected))
         {
             // A failed lookup is stale too: it must not pause the replacement.
+            return Err(StartError::Superseded);
+        }
+        let source_guard = expected.lock_playback_source_identity();
+        if !std::sync::Arc::ptr_eq(&source_guard, expected_source) {
             return Err(StartError::Superseded);
         }
     }
@@ -117,7 +125,7 @@ async fn start_track_inner(
             .ok_or(StartError::Superseded)?,
     };
     let handle = match expected_runtime {
-        Some(expected) => expected.clone(),
+        Some((expected, _)) => expected.clone(),
         None => ensure_for_track(state).await.map_err(StartError::Runtime)?,
     };
     // Transport intent is re-read at dispatch: a pause that landed during the
@@ -144,6 +152,16 @@ async fn start_track_inner(
         })
         .map(|value| value != 0)
         .unwrap_or(true);
+    let source_guard =
+        expected_runtime.map(|(expected, _)| expected.lock_playback_source_identity());
+    if let Some((_, expected_source)) = expected_runtime {
+        if source_guard
+            .as_ref()
+            .is_none_or(|current| !std::sync::Arc::ptr_eq(current, expected_source))
+        {
+            return Err(StartError::Superseded);
+        }
+    }
     let job =
         player::build_playback_preparation(track, Some(&stream_info), crossfade_ms, user_quality)
             .with_generation(start_generation)

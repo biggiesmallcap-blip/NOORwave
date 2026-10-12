@@ -242,6 +242,8 @@ pub enum PlaybackRuntimeEvent {
     TrackError {
         track_id: i64,
         generation: u64,
+        /// Failed decoder identity retained across actor and listener queues.
+        source_identity: Arc<AtomicU64>,
         message: String,
     },
     PreparedTrackError {

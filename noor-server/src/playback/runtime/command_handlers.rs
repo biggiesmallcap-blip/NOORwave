@@ -1038,6 +1038,13 @@ pub(super) fn handle_track_terminal(
                     offset_source,
                 );
             } else {
+                let Some(source_identity) = state
+                    .engine
+                    .as_ref()
+                    .map(|engine| Arc::clone(&engine.shared.handoff_elapsed_samples))
+                else {
+                    return ControlFlow::Continue(());
+                };
                 stop_current_engine(state);
                 match outcome {
                     PlaybackTerminalReason::Finished => {
@@ -1050,6 +1057,7 @@ pub(super) fn handle_track_terminal(
                         let _ = event_tx.send(PlaybackRuntimeEvent::TrackError {
                             track_id,
                             generation,
+                            source_identity,
                             message,
                         });
                     }

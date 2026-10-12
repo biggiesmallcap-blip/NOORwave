@@ -4361,6 +4361,48 @@ fn command_error_keeps_generation_and_reader_identity_after_engine_teardown() {
 }
 
 #[test]
+fn track_error_keeps_failed_decoder_identity_after_engine_teardown() {
+    let mut state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(17, 7);
+    let failed_source = Arc::clone(&engine.shared.handoff_elapsed_samples);
+    let stop = engine.shared.stop_flag();
+    state.engine = Some(engine);
+    let (event_tx, mut events) = tokio::sync::broadcast::channel(8);
+    let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
+    let _ = handle_track_terminal(
+        &mut state,
+        &event_tx,
+        &source,
+        &source,
+        &source,
+        17,
+        7,
+        stop,
+        PlaybackTerminalReason::Error("decode failed".into()),
+    );
+    assert!(state.engine.is_none());
+    match events.try_recv().unwrap() {
+        PlaybackRuntimeEvent::TrackError {
+            track_id,
+            generation,
+            source_identity,
+            message,
+        } => {
+            assert_eq!((track_id, generation), (17, 7));
+            assert_eq!(message, "decode failed");
+            assert!(Arc::ptr_eq(&source_identity, &failed_source));
+            // The payload comes from the failed deck, rather than whatever
+            // reader happens to be published when teardown finishes.
+            assert!(!Arc::ptr_eq(
+                &source_identity,
+                &state.handoff_elapsed_source.lock().unwrap()
+            ));
+        }
+        other => panic!("expected decoder error, got {other:?}"),
+    }
+}
+
+#[test]
 fn manual_seek_near_end_suppresses_crossfade_promotion() {
     let mut state = test_runtime_loop_state();
     let active = test_engine_with_shared(1, 20);

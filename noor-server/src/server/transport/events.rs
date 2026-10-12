@@ -393,11 +393,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                 Ok(playback_runtime::PlaybackRuntimeEvent::TrackError {
                     track_id,
                     generation,
+                    source_identity,
                     message,
                 }) => {
                     if let Err(error) = handle_runtime_track_error(
                         state.clone(),
                         &handle,
+                        &source_identity,
                         track_id,
                         generation,
                         &message,
@@ -1656,6 +1658,7 @@ pub(crate) fn runtime_track_error_is_retryable(message: &str) -> bool {
 pub(crate) async fn handle_runtime_track_error(
     state: SharedState,
     expected_runtime: &playback_runtime::PlaybackRuntimeHandle,
+    expected_source: &Arc<std::sync::atomic::AtomicU64>,
     failed_track_id: i64,
     generation: u64,
     message: &str,
@@ -1671,6 +1674,10 @@ pub(crate) async fn handle_runtime_track_error(
                 .as_ref()
                 .is_some_and(|runtime| runtime.handle.is_same_runtime(expected_runtime))
         {
+            return Ok(());
+        }
+        let source_guard = expected_runtime.lock_playback_source_identity();
+        if !Arc::ptr_eq(&source_guard, expected_source) {
             return Ok(());
         }
         let retry_already_attempted = state_guard
@@ -1714,6 +1721,10 @@ pub(crate) async fn handle_runtime_track_error(
             {
                 return Ok(());
             }
+            let source_guard = expected_runtime.lock_playback_source_identity();
+            if !Arc::ptr_eq(&source_guard, expected_source) {
+                return Ok(());
+            }
             state_guard.db.with_conn(player::load_snapshot)?
         };
         let Some(track) = snapshot
@@ -1734,6 +1745,7 @@ pub(crate) async fn handle_runtime_track_error(
                 crossfade_ms,
             },
             expected_runtime,
+            expected_source,
         )
         .await
         {
@@ -1772,6 +1784,10 @@ pub(crate) async fn handle_runtime_track_error(
                     .as_ref()
                     .is_some_and(|runtime| runtime.handle.is_same_runtime(expected_runtime))
             {
+                return Ok(());
+            }
+            let source_guard = expected_runtime.lock_playback_source_identity();
+            if !Arc::ptr_eq(&source_guard, expected_source) {
                 return Ok(());
             }
             state_guard.db.with_conn(player::pause)?;

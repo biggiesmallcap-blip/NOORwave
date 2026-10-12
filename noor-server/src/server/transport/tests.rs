@@ -259,6 +259,86 @@ async fn retired_runtime_started_cannot_activate_replacement_with_same_generatio
 }
 
 #[tokio::test]
+async fn retired_decoder_track_error_listener_cannot_clear_same_runtime_restart() {
+    for message in ["active decode failed", "DASH stream prebuffer failed"] {
+        let (state, handle, _, _) = cpal_fault_fixture().await;
+        let mut guard = state.write().await;
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "fresh decoder".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        guard.playback_runtime_info.as_mut().unwrap().last_error = Some("fresh status".into());
+        let before = guard.db.with_conn(player::load_snapshot).unwrap();
+        let mut events = guard.event_tx.subscribe();
+        let listener = spawn_playback_runtime_listener(state.clone(), handle.clone());
+        assert!(
+            handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::TrackError {
+                track_id: 1,
+                generation: 0,
+                source_identity: handle.playback_source_identity(),
+                message: message.into(),
+            })
+        );
+        tokio::task::yield_now().await;
+        handle.test_replace_playback_source();
+        drop(guard);
+        assert!(handle.test_publish_event(
+            playback_runtime::PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                output_identity: handle.test_exclusive_event_identity(),
+                device_name: "listener barrier".into(),
+                transport_format: "test format".into(),
+            }
+        ));
+        let mut earlier_events = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if matches!(event, AppEvent::AudioExclusiveEngaged { .. }) {
+                    break;
+                }
+                earlier_events.push(event);
+            }
+        })
+        .await
+        .unwrap();
+        listener.abort();
+        assert!(listener.await.unwrap_err().is_cancelled());
+        let guard = state.read().await;
+        assert!(
+            guard
+                .audio_active
+                .load(std::sync::atomic::Ordering::Acquire),
+            "old decoder cleared fresh audio activity"
+        );
+        assert_eq!(
+            guard.current_stream_display.as_ref().unwrap().audio_quality,
+            "fresh decoder"
+        );
+        assert_eq!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .unwrap()
+                .last_error
+                .as_deref(),
+            Some("fresh status")
+        );
+        let after = guard.db.with_conn(player::load_snapshot).unwrap();
+        assert_eq!(after.state.is_playing, before.state.is_playing);
+        assert_eq!(
+            after.state.current_queue_item_id,
+            before.state.current_queue_item_id
+        );
+        assert_eq!(after.queue.len(), before.queue.len());
+        assert!(
+            earlier_events.is_empty(),
+            "stale decoder published {earlier_events:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn retired_runtime_track_error_cannot_clear_replacement_or_advance_queue() {
     for message in ["active decode failed", "DASH stream prebuffer failed"] {
         let (state, handle, _, _) = cpal_fault_fixture().await;
@@ -277,6 +357,7 @@ async fn retired_runtime_track_error_cannot_clear_replacement_or_advance_queue()
             handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::TrackError {
                 track_id: 1,
                 generation: 0,
+                source_identity: handle.playback_source_identity(),
                 message: message.into(),
             })
         );
@@ -339,6 +420,7 @@ async fn current_runtime_track_error_listener_keeps_terminal_recovery_working() 
             handle.test_publish_event(playback_runtime::PlaybackRuntimeEvent::TrackError {
                 track_id: 1,
                 generation: 0,
+                source_identity: handle.playback_source_identity(),
                 message: if retryable {
                     "DASH stream prebuffer failed"
                 } else {
@@ -3006,9 +3088,16 @@ async fn repeated_transient_runtime_error_pauses_without_advancing_queue() {
         });
     }
 
-    handle_runtime_track_error(state, &handle, 1, 1, "DASH stream prebuffer failed")
-        .await
-        .expect("second transient failure should pause");
+    handle_runtime_track_error(
+        state,
+        &handle,
+        &handle.playback_source_identity(),
+        1,
+        1,
+        "DASH stream prebuffer failed",
+    )
+    .await
+    .expect("second transient failure should pause");
 
     let snapshot = db.with_conn(player::load_snapshot).unwrap();
     assert_eq!(
@@ -3124,9 +3213,16 @@ async fn runtime_track_error_advances_to_next_library_track() {
         .unwrap()
         .handle
         .clone();
-    handle_runtime_track_error(state.clone(), &handle, 1, 1, "active decode failed")
-        .await
-        .expect("track error should advance");
+    handle_runtime_track_error(
+        state.clone(),
+        &handle,
+        &handle.playback_source_identity(),
+        1,
+        1,
+        "active decode failed",
+    )
+    .await
+    .expect("track error should advance");
 
     assert_eq!(
         switched_rx
@@ -3270,8 +3366,15 @@ async fn transient_retry_resolution_cannot_dispatch_or_pause_replacement_runtime
         let task_state = state.clone();
         let handle = old.handle.clone();
         let pending = tokio::spawn(async move {
-            handle_runtime_track_error(task_state, &handle, 1, 0, "DASH stream prebuffer failed")
-                .await
+            handle_runtime_track_error(
+                task_state,
+                &handle,
+                &handle.playback_source_identity(),
+                1,
+                0,
+                "DASH stream prebuffer failed",
+            )
+            .await
         });
         tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
             .await
@@ -3356,8 +3459,15 @@ async fn transient_retry_resolution_preserves_current_row_and_latest_pause_inten
         let task_state = state.clone();
         let handle = runtime.handle.clone();
         let pending = tokio::spawn(async move {
-            handle_runtime_track_error(task_state, &handle, 1, 0, "DASH stream prebuffer failed")
-                .await
+            handle_runtime_track_error(
+                task_state,
+                &handle,
+                &handle.playback_source_identity(),
+                1,
+                0,
+                "DASH stream prebuffer failed",
+            )
+            .await
         });
         tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
             .await
@@ -3451,8 +3561,15 @@ async fn transient_retry_resolution_cannot_overwrite_new_generation() {
         let task_state = state.clone();
         let handle = runtime.handle.clone();
         let pending = tokio::spawn(async move {
-            handle_runtime_track_error(task_state, &handle, 1, 0, "DASH stream prebuffer failed")
-                .await
+            handle_runtime_track_error(
+                task_state,
+                &handle,
+                &handle.playback_source_identity(),
+                1,
+                0,
+                "DASH stream prebuffer failed",
+            )
+            .await
         });
         tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
             .await
@@ -3493,6 +3610,97 @@ async fn transient_retry_resolution_cannot_overwrite_new_generation() {
             guard.current_stream_display.as_ref().unwrap().audio_quality,
             "new generation"
         );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn transient_retry_resolution_cannot_overwrite_same_runtime_decoder_restart() {
+    for reject in [false, true] {
+        let (state, runtime, gate) = retry_resolution_fixture(reject).await;
+        let task_state = state.clone();
+        let handle = runtime.handle.clone();
+        let source_identity = handle.playback_source_identity();
+        let pending = tokio::spawn(async move {
+            handle_runtime_track_error(
+                task_state,
+                &handle,
+                &source_identity,
+                1,
+                0,
+                "DASH stream prebuffer failed",
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        let mut guard = state.write().await;
+        runtime.handle.test_replace_playback_source();
+        guard.current_stream_display = Some(crate::StreamDisplayInfo {
+            audio_quality: "restarted decoder".into(),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+        });
+        let info = guard.playback_runtime_info.as_mut().unwrap();
+        info.active_track_id = Some(1);
+        info.last_error = None;
+        guard
+            .audio_active
+            .store(true, std::sync::atomic::Ordering::Release);
+        let before = guard.db.with_conn(player::load_snapshot).unwrap();
+        let mut events = guard.event_tx.subscribe();
+        drop(guard);
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        runtime.handle.pause().unwrap();
+        assert!(matches!(
+            runtime
+                .commands
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            playback_runtime::PlaybackRuntimeCommand::Pause
+        ));
+        let guard = state.read().await;
+        assert!(
+            guard
+                .audio_active
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert_eq!(
+            guard.current_stream_display.as_ref().unwrap().audio_quality,
+            "restarted decoder"
+        );
+        assert_eq!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .unwrap()
+                .active_track_id,
+            Some(1)
+        );
+        assert!(
+            guard
+                .playback_runtime_info
+                .as_ref()
+                .unwrap()
+                .last_error
+                .is_none()
+        );
+        let after = guard.db.with_conn(player::load_snapshot).unwrap();
+        assert_eq!(after.state.is_playing, before.state.is_playing);
+        assert_eq!(
+            after.state.current_queue_item_id,
+            before.state.current_queue_item_id
+        );
+        assert_eq!(after.queue.len(), before.queue.len());
         assert!(matches!(
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
