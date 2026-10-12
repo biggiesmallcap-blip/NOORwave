@@ -2514,3 +2514,53 @@ fn deck_status_exposes_inflight_profile_as_analyzing() {
     assert_eq!(deck.profile_status, "analyzing");
     assert!(deck.profile_error.is_none());
 }
+
+// Transport listeners hold the playback source lock while they write SQLite.
+// Status must not take the DB first and then wait on that lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_never_waits_on_playback_source_while_holding_db() {
+    let db = crate::db::Database::open_in_memory().expect("db");
+    db.run_migrations().expect("migrations");
+    db.with_conn(|conn| queries::set_dj_engine_enabled(conn, true))
+        .expect("enable dj");
+    let state = fresh_test_state_with_dj_tx(db.clone(), None);
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let handle = crate::playback::runtime::PlaybackRuntimeHandle::test_with_command_tx(command_tx);
+    {
+        let mut guard = state.write().await;
+        guard.playback_runtime = Some(crate::PlaybackRuntimeState {
+            access_token: String::new(),
+            handle: handle.clone(),
+        });
+        guard.playback_runtime_info = Some(crate::PlaybackRuntimeInfo {
+            device_name: "DAC".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            active_track_id: Some(1),
+            last_error: None,
+            exclusive_engaged: false,
+            exclusive_transport_format: None,
+        });
+    }
+
+    let source_guard = handle.lock_playback_source_identity();
+    let status = tokio::spawn(get_status(State(state.clone())));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (db_tx, db_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        db.with_conn(|_| Ok(())).expect("db");
+        let _ = db_tx.send(());
+    });
+    let db_free = db_rx.recv_timeout(std::time::Duration::from_secs(2));
+    drop(source_guard);
+    assert!(
+        db_free.is_ok(),
+        "status held the DB connection while waiting on the playback source lock"
+    );
+    let _response = tokio::time::timeout(std::time::Duration::from_secs(5), status)
+        .await
+        .expect("status finished")
+        .expect("status task")
+        .expect("status ok");
+}

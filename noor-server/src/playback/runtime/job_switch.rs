@@ -140,7 +140,10 @@ pub(super) fn transition_to_job(
             *position_source.lock().unwrap() = Arc::clone(&eng.shared.source_position_samples);
             *buffered_source.lock().unwrap() = Arc::clone(&eng.shared.buffered_samples);
             *offset_source.lock().unwrap() = Arc::clone(&eng.shared.source_offset_samples);
-            *state.handoff_elapsed_source.lock().unwrap() =
+            *state
+                .handoff_elapsed_source
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) =
                 Arc::clone(&eng.shared.handoff_elapsed_samples);
             state.engine = Some(eng);
         } else {
@@ -163,7 +166,10 @@ pub(super) fn transition_to_job(
             *position_source.lock().unwrap() = Arc::clone(&eng.shared.source_position_samples);
             *buffered_source.lock().unwrap() = Arc::clone(&eng.shared.buffered_samples);
             *offset_source.lock().unwrap() = Arc::clone(&eng.shared.source_offset_samples);
-            *state.handoff_elapsed_source.lock().unwrap() =
+            *state
+                .handoff_elapsed_source
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) =
                 Arc::clone(&eng.shared.handoff_elapsed_samples);
             state.engine = Some(eng);
         }
@@ -221,7 +227,10 @@ pub(super) fn transition_to_job(
                     Arc::clone(&engine.shared.source_position_samples);
                 *buffered_source.lock().unwrap() = Arc::clone(&engine.shared.buffered_samples);
                 *offset_source.lock().unwrap() = Arc::clone(&engine.shared.source_offset_samples);
-                *state.handoff_elapsed_source.lock().unwrap() =
+                *state
+                    .handoff_elapsed_source
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) =
                     Arc::clone(&engine.shared.handoff_elapsed_samples);
                 state.engine = Some(engine);
                 output_config.sample_rate = actual_rate;
@@ -266,7 +275,11 @@ pub(super) fn adopt_predecoded_next_engine(
     *position_source.lock().unwrap() = Arc::clone(&pre.shared.source_position_samples);
     *buffered_source.lock().unwrap() = Arc::clone(&pre.shared.buffered_samples);
     *offset_source.lock().unwrap() = Arc::clone(&pre.shared.source_offset_samples);
-    *state.handoff_elapsed_source.lock().unwrap() = Arc::clone(&pre.shared.handoff_elapsed_samples);
+    *state
+        .handoff_elapsed_source
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) =
+        Arc::clone(&pre.shared.handoff_elapsed_samples);
     state.engine = Some(pre);
 }
 

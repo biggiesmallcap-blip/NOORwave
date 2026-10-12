@@ -216,7 +216,10 @@ pub(super) fn promote_next_to_active(
     *position_source.lock().unwrap() = Arc::clone(&next.shared.source_position_samples);
     *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
     *offset_source.lock().unwrap() = Arc::clone(&next.shared.source_offset_samples);
-    *state.handoff_elapsed_source.lock().unwrap() =
+    *state
+        .handoff_elapsed_source
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) =
         Arc::clone(&next.shared.handoff_elapsed_samples);
 
     let source_identity = Arc::clone(&next.shared.handoff_elapsed_samples);
@@ -336,7 +339,10 @@ pub(super) fn promote_prepared_at_boundary(
     *position_source.lock().unwrap() = Arc::clone(&next.shared.source_position_samples);
     *buffered_source.lock().unwrap() = Arc::clone(&next.shared.buffered_samples);
     *offset_source.lock().unwrap() = Arc::clone(&next.shared.source_offset_samples);
-    *state.handoff_elapsed_source.lock().unwrap() =
+    *state
+        .handoff_elapsed_source
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) =
         Arc::clone(&next.shared.handoff_elapsed_samples);
 
     let source_identity = Arc::clone(&next.shared.handoff_elapsed_samples);
