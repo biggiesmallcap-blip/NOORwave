@@ -976,11 +976,7 @@ pub(crate) fn decode_and_buffer_job(
             if let Some(r) = resampler.as_mut() {
                 let tail = r.flush();
                 if !tail.is_empty() {
-                    let mut guard = shared
-                        .buffer
-                        .lock()
-                        .map_err(|_| anyhow!("playback buffer poisoned"))?;
-                    guard.samples.extend_from_slice(&tail);
+                    shared.append_decoded_samples(&tail)?;
                 }
             }
 

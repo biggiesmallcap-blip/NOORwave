@@ -5,10 +5,19 @@ use crate::playback::player::PlaybackSourceKind;
 use anyhow::{Result, anyhow};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use tracing::{debug, warn};
+use tracing::warn;
 
 const GAPLESS_PREFILL_PAD_MS: usize = 250;
 const NEAR_END_THRESHOLD_MS: i64 = 30_000;
+
+#[derive(Clone, Copy, Debug)]
+enum RtNotification {
+    Started,
+    NearEnd,
+    Finished,
+    Crossfade { position: u64, target: u64 },
+    DropPreview { position: u64 },
+}
 /// Length of the seam ramps around a rendered DJ handoff: the outgoing live
 /// stream fades out over this window while the installed transition buffer
 /// carries a matching baked fade-in. Long enough to kill the cut click,
@@ -46,7 +55,7 @@ pub(crate) fn write_output_f32(
     // Tap the finished output for the wallpaper visualiser. RT-safe: a
     // non-blocking try_lock + bounded copy, skipped on contention. Never
     // mutates `data`, so the audio is byte-for-byte unchanged.
-    crate::playback::spectrum::global().push(
+    crate::playback::spectrum::capture_output(
         data,
         shared.device_channels,
         shared.device_sample_rate,
@@ -70,7 +79,7 @@ pub(crate) fn write_output_i16(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) {
     write_output_buffer(data, shared, command_tx, event_tx, |sample| {
-        (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+        (sample.clamp(-1.0, 1.0) * 32_768.0).round() as i16
     })
 }
 
@@ -81,8 +90,43 @@ pub(crate) fn write_output_u16(
     event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) {
     write_output_buffer(data, shared, command_tx, event_tx, |sample| {
-        let normalized = sample.clamp(-1.0, 1.0) * 0.5 + 0.5;
-        (normalized * u16::MAX as f32) as u16
+        (sample.clamp(-1.0, 1.0) * 32_768.0 + 32_768.0).round() as u16
+    })
+}
+
+pub(crate) fn write_output_i32(
+    data: &mut [i32],
+    shared: &Arc<PlaybackSharedState>,
+    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) {
+    write_output_buffer(data, shared, command_tx, event_tx, |sample| {
+        (sample.clamp(-1.0, 1.0) * 2_147_483_648.0).round() as i32
+    })
+}
+
+pub(crate) fn write_output_f64(
+    data: &mut [f64],
+    shared: &Arc<PlaybackSharedState>,
+    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) {
+    write_output_buffer(data, shared, command_tx, event_tx, f64::from)
+}
+
+pub(crate) fn write_output_i24(
+    data: &mut [cpal::I24],
+    shared: &Arc<PlaybackSharedState>,
+    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) {
+    write_output_buffer(data, shared, command_tx, event_tx, |sample| {
+        let value = (sample.clamp(-1.0, 1.0) * 8_388_608.0)
+            .round()
+            .clamp(-8_388_608.0, 8_388_607.0) as i32;
+        // Saturation above also maps NaN to integer zero, so the complete
+        // input domain stays within I24's representable range.
+        cpal::I24::new_unchecked(value)
     })
 }
 
@@ -139,8 +183,8 @@ fn step_gain(current: f32, target: f32, step: f32) -> f32 {
 fn write_output_buffer<T>(
     data: &mut [T],
     shared: &Arc<PlaybackSharedState>,
-    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    _command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+    _event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     convert: impl Fn(f32) -> T,
 ) {
     if shared.stopped.load(Ordering::SeqCst) {
@@ -181,26 +225,20 @@ fn write_output_buffer<T>(
     let mut transport = f32::from_bits(shared.transport_gain.load(Ordering::Relaxed));
     let transport_step = transport_ramp_step(shared.device_sample_rate);
 
-    // Real-time safety contract for this critical section:
-    //   * No IO, no syscalls, no allocations on the hot path.
-    //   * drain_into is O(data.len()) and data.len() == one CPAL callback
-    //     buffer (~256-1024 samples), bounded copy.
-    //   * Rare events inside this guard (started/finished/near-end/crossfade
-    //     event sends) each fire at most once per buffer-instance per event
-    //     class, so allocation amortizes to zero across the steady-state
-    //     callback rate. Underrun and seek-reject WARNS never log here: they
-    //     latch deferred_* atomics drained by the runtime loop's watchdog
-    //     tick, because tracing does I/O and an underrun fires exactly when
-    //     the system is already struggling. The two debug! lines below are
-    //     level-gated (an atomic interest check when disabled) and accepted
-    //     for dev diagnostics.
-    //   * The off-thread growth telemetry (Task 13) is a load + conditional
-    //     CAS, no allocation.
-    // A future refactor that adds IO, an unbounded loop, or a per-callback
-    // allocation inside this guard would regress to dropouts/underruns -
-    // keep the critical section bounded.
-    let mut guard = match shared.buffer.lock() {
+    // Decoder append/compaction and DJ publication can hold this lock. Waiting
+    // here would miss the device deadline. Silence preserves the cursor and
+    // envelope until the next callback can consume the same samples.
+    // Notifications share this buffer's fixed mailbox, so seeks and buffer
+    // replacement can retire them under the same lock as the PCM cursor.
+    let mut guard = match shared.buffer.try_lock() {
         Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            shared
+                .deferred_buffer_contention
+                .fetch_add(1, Ordering::Relaxed);
+            data.fill_with(|| convert(0.0));
+            return;
+        }
         Err(_) => {
             data.fill_with(|| convert(0.0));
             return;
@@ -212,6 +250,27 @@ fn write_output_buffer<T>(
     if shared.paused.load(Ordering::SeqCst) && !shared.pause_fade_armed.load(Ordering::Relaxed) {
         data.fill_with(|| convert(0.0));
         return;
+    }
+
+    let recovery_target = shared.recovery_seek_samples.load(Ordering::Acquire);
+    if recovery_target != u64::MAX {
+        let offset = shared.position_offset_samples.load(Ordering::Relaxed);
+        let local = recovery_target.saturating_sub(offset);
+        if local > guard.samples.len() as u64 && !guard.finished {
+            data.fill_with(|| convert(0.0));
+            return;
+        }
+        // A short/changed source can finish before the saved position. Clamp
+        // to its real end so normal terminal handling remains reachable.
+        let local = local.min(guard.samples.len() as u64) as usize;
+        guard.seek_to(local);
+        shared
+            .position_samples
+            .store(offset + guard.read_pos as u64, Ordering::Relaxed);
+        shared.publish_source_position();
+        shared
+            .recovery_seek_samples
+            .store(u64::MAX, Ordering::Release);
     }
 
     let seek_target = shared.seek_target_samples.load(Ordering::Relaxed);
@@ -257,12 +316,6 @@ fn write_output_buffer<T>(
 
     let ready_to_start = guard.is_ready();
     if ready_to_start && !guard.started {
-        debug!(
-            "Playback buffer started: {} samples buffered, threshold {}, callback size {}",
-            guard.samples.len().saturating_sub(guard.read_pos),
-            guard.start_threshold_samples,
-            data.len()
-        );
         guard.started = true;
     }
 
@@ -395,24 +448,11 @@ fn write_output_buffer<T>(
     }
 
     if guard.started && !guard.started_notified {
-        guard.started_notified = true;
-        if shared.started_event_enabled.load(Ordering::Relaxed) {
-            let _ = event_tx.send(PlaybackRuntimeEvent::Started {
-                track_id: shared.track_id,
-                generation: shared.generation,
-                source: shared.source_kind,
-            });
-        }
+        guard.started_notified = !shared.started_event_enabled.load(Ordering::Relaxed)
+            || guard.push_notification(RtNotification::Started);
     }
 
     if guard.started && written == 0 && guard.finished && !guard.finished_notified {
-        debug!(
-            "Playback runtime finished: track_id={}, generation={}, position_samples={}, total_samples={}",
-            shared.track_id,
-            shared.generation,
-            shared.position_samples.load(Ordering::Relaxed),
-            shared.total_samples.load(Ordering::Relaxed)
-        );
         // Latch only once the terminal is actually handed to the runtime.
         // Latching first and discarding the send result made this the single
         // unacknowledged point of failure for the whole end-of-track advance:
@@ -420,13 +460,7 @@ fn write_output_buffer<T>(
         // sample of the track with the queue intact. A dropped terminal past
         // this point (unmatched engine slot, or a guard in the queue-advance
         // handler) is now caught by the stall watchdog instead.
-        let sent = command_tx
-            .send(PlaybackRuntimeCommand::TrackTerminal {
-                track_id: shared.track_id,
-                generation: shared.generation,
-                outcome: PlaybackTerminalReason::Finished,
-            })
-            .is_ok();
+        let sent = guard.push_notification(RtNotification::Finished);
         guard.finished_notified = sent;
     }
 
@@ -439,11 +473,9 @@ fn write_output_buffer<T>(
                 * shared.device_channels as i64
                 / 1000;
             if total.saturating_sub(pos) <= threshold as u64 {
-                shared.near_end_signaled.store(true, Ordering::Relaxed);
-                let _ = event_tx.send(PlaybackRuntimeEvent::NearEnd {
-                    track_id: shared.track_id,
-                    generation: shared.generation,
-                });
+                if guard.push_notification(RtNotification::NearEnd) {
+                    shared.near_end_signaled.store(true, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -463,15 +495,14 @@ fn write_output_buffer<T>(
                 (total > 0).then(|| total.saturating_sub(xfade))
             };
             if let Some(trigger_target_samples) = trigger_target.filter(|target| pos >= *target) {
-                shared
-                    .crossfade_start_signaled
-                    .store(true, Ordering::Relaxed);
-                let _ = command_tx.send(PlaybackRuntimeCommand::CrossfadeStart {
-                    track_id: shared.track_id,
-                    generation: shared.generation,
-                    trigger_position_samples: pos,
-                    trigger_target_samples,
-                });
+                if guard.push_notification(RtNotification::Crossfade {
+                    position: pos,
+                    target: trigger_target_samples,
+                }) {
+                    shared
+                        .crossfade_start_signaled
+                        .store(true, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -481,14 +512,11 @@ fn write_output_buffer<T>(
         if trigger != u64::MAX {
             let pos = shared.position_samples.load(Ordering::Relaxed);
             if pos >= trigger {
-                shared
-                    .drop_preview_start_signaled
-                    .store(true, Ordering::Relaxed);
-                let _ = command_tx.send(PlaybackRuntimeCommand::DropPreviewStart {
-                    track_id: shared.track_id,
-                    generation: shared.generation,
-                    trigger_position_samples: pos,
-                });
+                if guard.push_notification(RtNotification::DropPreview { position: pos }) {
+                    shared
+                        .drop_preview_start_signaled
+                        .store(true, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -508,6 +536,8 @@ pub(crate) struct PlaybackSharedState {
     /// buffer crosses BUFFER_GROWTH_WARN_THRESHOLD_SAMPLES; the decoder
     /// thread observes this and emits the warn (off the real-time thread).
     pub(crate) growth_warned: AtomicBool,
+    pub(crate) deferred_buffer_contention: AtomicU64,
+    pub(crate) deferred_cpal_notices: AtomicU32,
     /// Deferred RT diagnostics, same pattern as `growth_warned`: the audio
     /// callback latches a flag plus payload atomics and the runtime loop's
     /// watchdog tick emits the log lines off the real-time thread. Payloads
@@ -523,6 +553,7 @@ pub(crate) struct PlaybackSharedState {
     pub(crate) deferred_seek_offset: AtomicU64,
     pub(crate) deferred_seek_buffered: AtomicU64,
     pub(crate) buffer: Mutex<PlaybackBuffer>,
+    pending_rt_notifications: Arc<AtomicBool>,
     pub(crate) command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     pub(crate) volume_ctl: Arc<AtomicU32>,
     /// f32 bits of the gain actually applied to the last frame emitted, as
@@ -555,6 +586,7 @@ pub(crate) struct PlaybackSharedState {
     /// the runtime restores plain incoming audio instead of replaying deck A.
     pub(crate) handoff_source_prefix: Mutex<Option<Vec<f32>>>,
     pub(crate) seek_target_samples: AtomicU64,
+    recovery_seek_samples: AtomicU64,
     pub(crate) total_samples: AtomicU64,
     /// Mirror of `buffer.samples.len()` published from the audio callback so
     /// HTTP / route-side consumers can read "how much of this track is
@@ -603,6 +635,92 @@ pub(crate) struct PlaybackSharedState {
 }
 
 impl PlaybackSharedState {
+    /// Called by the runtime actor. Channel allocation and reference ownership
+    /// stay here; the device callback only writes Copy values into the buffer.
+    #[cfg(test)]
+    pub(crate) fn drain_rt_notifications(
+        &self,
+        command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+        event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    ) {
+        while let Some(command) = self.take_rt_command(event_tx) {
+            if command_tx.send(command).is_err() {
+                if let Ok(mut buffer) = self.buffer.lock() {
+                    buffer.finished_notified = false;
+                }
+                break;
+            }
+        }
+    }
+
+    /// Return commands directly to the actor rather than queueing them behind
+    /// a concurrently submitted seek. Unconsumed values remain under its lock.
+    pub(crate) fn take_rt_command(
+        &self,
+        event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    ) -> Option<PlaybackRuntimeCommand> {
+        if self.paused.load(Ordering::SeqCst) || self.stopped.load(Ordering::SeqCst) {
+            return None;
+        }
+        for _ in 0..32 {
+            // Empty actor polls must not compete with the device callback for PCM.
+            // Producers and consumers publish this hint under the buffer lock.
+            if !self.pending_rt_notifications.load(Ordering::Acquire) {
+                return None;
+            }
+            let notification = {
+                let Ok(mut buffer) = self.buffer.try_lock() else {
+                    return None;
+                };
+                let notification = buffer.notifications[0].take()?;
+                buffer.notifications.rotate_left(1);
+                buffer
+                    .pending_notifications
+                    .store(buffer.notifications[0].is_some(), Ordering::Release);
+                notification
+            };
+            match notification {
+                RtNotification::Started => {
+                    let _ = event_tx.send(PlaybackRuntimeEvent::Started {
+                        track_id: self.track_id,
+                        generation: self.generation,
+                        source: self.source_kind,
+                    });
+                }
+                RtNotification::NearEnd => {
+                    let _ = event_tx.send(PlaybackRuntimeEvent::NearEnd {
+                        track_id: self.track_id,
+                        generation: self.generation,
+                    });
+                }
+                RtNotification::Finished => {
+                    return Some(PlaybackRuntimeCommand::TrackTerminal {
+                        track_id: self.track_id,
+                        generation: self.generation,
+                        decoder_stop: self.stop_flag(),
+                        outcome: PlaybackTerminalReason::Finished,
+                    });
+                }
+                RtNotification::Crossfade { position, target } => {
+                    return Some(PlaybackRuntimeCommand::CrossfadeStart {
+                        track_id: self.track_id,
+                        generation: self.generation,
+                        trigger_position_samples: position,
+                        trigger_target_samples: target,
+                    });
+                }
+                RtNotification::DropPreview { position } => {
+                    return Some(PlaybackRuntimeCommand::DropPreviewStart {
+                        track_id: self.track_id,
+                        generation: self.generation,
+                        trigger_position_samples: position,
+                    });
+                }
+            }
+        }
+        None
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         track_id: i64,
@@ -634,6 +752,8 @@ impl PlaybackSharedState {
         let source_offset_samples = Arc::new(AtomicU64::new(
             position_offset_samples.load(Ordering::Relaxed),
         ));
+        let buffer = PlaybackBuffer::new(prebuffer_samples);
+        let pending_rt_notifications = Arc::clone(&buffer.pending_notifications);
         Self {
             track_id,
             generation,
@@ -641,6 +761,8 @@ impl PlaybackSharedState {
             paused: AtomicBool::new(false),
             stopped: Arc::new(AtomicBool::new(false)),
             growth_warned: AtomicBool::new(false),
+            deferred_buffer_contention: AtomicU64::new(0),
+            deferred_cpal_notices: AtomicU32::new(0),
             deferred_underrun_warn: AtomicBool::new(false),
             deferred_underrun_requested: AtomicU64::new(0),
             deferred_underrun_written: AtomicU64::new(0),
@@ -649,7 +771,8 @@ impl PlaybackSharedState {
             deferred_seek_target: AtomicU64::new(0),
             deferred_seek_offset: AtomicU64::new(0),
             deferred_seek_buffered: AtomicU64::new(0),
-            buffer: Mutex::new(PlaybackBuffer::new(prebuffer_samples)),
+            buffer: Mutex::new(buffer),
+            pending_rt_notifications,
             command_tx,
             volume_ctl,
             volume_smoothed,
@@ -662,6 +785,7 @@ impl PlaybackSharedState {
             handoff_timeline: AtomicHandoffTimeline::default(),
             handoff_source_prefix: Mutex::new(None),
             seek_target_samples: AtomicU64::new(u64::MAX),
+            recovery_seek_samples: AtomicU64::new(u64::MAX),
             total_samples: AtomicU64::new(estimated_total_samples.unwrap_or(0)),
             buffered_samples: Arc::new(AtomicU64::new(0)),
             position_offset_samples,
@@ -686,6 +810,34 @@ impl PlaybackSharedState {
     /// in-callback seek). Called from the runtime loop's watchdog tick -
     /// never from the real-time thread, which only does the latching.
     pub(crate) fn drain_deferred_rt_logs(&self) {
+        let notices = self.deferred_cpal_notices.swap(0, Ordering::Relaxed);
+        if notices & 1 != 0 {
+            warn!(
+                track_id = self.track_id,
+                "Playback output reported a recoverable underrun"
+            );
+        }
+        if notices & 2 != 0 {
+            warn!(
+                track_id = self.track_id,
+                "Playback output could not acquire real-time scheduling"
+            );
+        }
+        if notices & 4 != 0 {
+            warn!(
+                track_id = self.track_id,
+                "Playback output rerouted to the new system device"
+            );
+        }
+        let contention = self.deferred_buffer_contention.swap(0, Ordering::Relaxed);
+        if contention != 0 {
+            warn!(
+                track_id = self.track_id,
+                generation = self.generation,
+                callbacks = contention,
+                "Playback output skipped busy decoder buffer"
+            );
+        }
         if self.deferred_underrun_warn.swap(false, Ordering::AcqRel) {
             warn!(
                 "Playback buffer underrun: track_id={}, generation={}, requested={}, written={}, buffered_remaining={}",
@@ -954,10 +1106,48 @@ impl PlaybackSharedState {
                 .store(0.0f32.to_bits(), Ordering::Relaxed);
         }
         self.seek_target_samples.store(u64::MAX, Ordering::Relaxed);
+        self.recovery_seek_samples
+            .store(u64::MAX, Ordering::Release);
         self.position_samples
             .store(target_samples, Ordering::Relaxed);
         self.publish_source_position();
         self.publish_buffered_samples(guard.samples.len());
+        Ok(())
+    }
+
+    pub(crate) fn arm_recovery_seek_ms(&self, target_ms: u64) -> Result<()> {
+        let channels = u64::from(self.device_channels);
+        if channels == 0 || self.device_sample_rate == 0 {
+            return Err(anyhow!("Recovery requires a valid audio clock"));
+        }
+        let target = target_ms
+            .checked_mul(u64::from(self.device_sample_rate))
+            .map(|frames| frames / 1000)
+            .and_then(|frames| frames.checked_mul(channels))
+            .ok_or_else(|| anyhow!("Recovery position exceeds the audio clock"))?;
+        let mut guard = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("playback buffer poisoned"))?;
+        if !self.paused.load(Ordering::SeqCst) || guard.started {
+            return Err(anyhow!("Recovery must be armed before playback starts"));
+        }
+        let offset = self.position_offset_samples.load(Ordering::Relaxed) / channels * channels;
+        if target < offset {
+            return Err(anyhow!("Recovery position precedes the decoded segment"));
+        }
+        let skip = target
+            .saturating_sub(offset)
+            .min(guard.samples.len() as u64) as usize;
+        guard.samples.drain(..skip);
+        guard.read_pos = 0;
+        guard.clear_rt_notifications();
+        self.position_offset_samples
+            .store(offset + skip as u64, Ordering::Relaxed);
+        self.position_samples.store(target, Ordering::Relaxed);
+        self.publish_source_position();
+        self.publish_buffered_samples(guard.samples.len());
+        self.recovery_seek_samples.store(target, Ordering::Release);
         Ok(())
     }
 
@@ -971,7 +1161,21 @@ impl PlaybackSharedState {
         if guard.sealed_for_render {
             return Ok(guard.samples.len());
         }
-        guard.samples.extend_from_slice(samples);
+        let target = self.recovery_seek_samples.load(Ordering::Acquire);
+        let offset = self.position_offset_samples.load(Ordering::Relaxed);
+        let skip = if target == u64::MAX {
+            0
+        } else {
+            target.saturating_sub(offset).min(samples.len() as u64) as usize
+        };
+        if skip != 0 {
+            // Discard preroll before allocation/backpressure. Otherwise a
+            // direct stream can fill its lookahead window before reaching
+            // the recovery position while the output waits in silence.
+            self.position_offset_samples
+                .store(offset + skip as u64, Ordering::Relaxed);
+        }
+        guard.samples.extend_from_slice(&samples[skip..]);
         self.publish_buffered_samples(guard.samples.len());
         Ok(guard.samples.len())
     }
@@ -1015,10 +1219,16 @@ impl PlaybackSharedState {
     }
 
     pub(crate) fn signal_terminal(&self, outcome: PlaybackTerminalReason) -> Result<()> {
+        // A cold output retry replaces this decoder using the same job identity.
+        // Cancellation from the retired decoder must not finish the replacement.
+        if self.stopped.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         self.command_tx
             .send(PlaybackRuntimeCommand::TrackTerminal {
                 track_id: self.track_id,
                 generation: self.generation,
+                decoder_stop: self.stop_flag(),
                 outcome,
             })
             .map_err(|_| anyhow!("playback runtime command channel closed"))
@@ -1027,6 +1237,8 @@ impl PlaybackSharedState {
 
 #[derive(Debug)]
 pub(crate) struct PlaybackBuffer {
+    notifications: [Option<RtNotification>; 32],
+    pending_notifications: Arc<AtomicBool>,
     pub(crate) samples: Vec<f32>,
     pub(crate) read_pos: usize,
     pub(crate) start_threshold_samples: usize,
@@ -1041,8 +1253,25 @@ pub(crate) struct PlaybackBuffer {
 }
 
 impl PlaybackBuffer {
+    fn push_notification(&mut self, notification: RtNotification) -> bool {
+        if let Some(slot) = self.notifications.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(notification);
+            self.pending_notifications.store(true, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn clear_rt_notifications(&mut self) {
+        self.notifications.fill(None);
+        self.pending_notifications.store(false, Ordering::Release);
+    }
+
     pub(crate) fn new(start_threshold_samples: usize) -> Self {
         Self {
+            notifications: [None; 32],
+            pending_notifications: Arc::new(AtomicBool::new(false)),
             samples: Vec::new(),
             read_pos: 0,
             start_threshold_samples,
@@ -1100,6 +1329,8 @@ impl PlaybackBuffer {
             return false;
         }
         self.read_pos = target_samples.min(self.samples.len());
+        self.clear_rt_notifications();
+        self.started_notified = false;
         self.finished_notified = false;
         self.starved_notified = false;
         if !self.finished {
@@ -1110,6 +1341,7 @@ impl PlaybackBuffer {
     }
 
     fn reset(&mut self) {
+        self.clear_rt_notifications();
         self.samples.clear();
         self.read_pos = 0;
         self.started = false;
@@ -1149,8 +1381,278 @@ pub(crate) fn estimate_total_samples_from_duration_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn render_and_drain(
+        data: &mut [f32],
+        shared: &Arc<PlaybackSharedState>,
+        command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
+        event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+    ) {
+        super::write_output_f32(data, shared, command_tx, event_tx);
+        shared.drain_rt_notifications(command_tx, event_tx);
+    }
     use crate::playback::gapless::GaplessPlan;
     use crate::playback::player::PlaybackSourceKind;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    struct CallbackTestAllocator;
+
+    thread_local! {
+        static ALLOCATION_COUNTS: Cell<(bool, u64, u64)> = const { Cell::new((false, 0, 0)) };
+    }
+
+    #[global_allocator]
+    static TEST_ALLOCATOR: CallbackTestAllocator = CallbackTestAllocator;
+
+    // Delegate unchanged to System; count only on the measuring test thread.
+    unsafe impl GlobalAlloc for CallbackTestAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = ALLOCATION_COUNTS.try_with(|counts| {
+                let (enabled, allocations, frees) = counts.get();
+                if enabled {
+                    counts.set((enabled, allocations + 1, frees));
+                }
+            });
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            let _ = ALLOCATION_COUNTS.try_with(|counts| {
+                let (enabled, allocations, frees) = counts.get();
+                if enabled {
+                    counts.set((enabled, allocations, frees + 1));
+                }
+            });
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[test]
+    fn audio_callback_transport_notifications_do_not_allocate_or_free() {
+        let shared = test_shared_state();
+        shared.append_decoded_samples(&[0.25; 16]).unwrap();
+        shared.buffer.lock().unwrap().mark_finished();
+        shared.total_samples.store(16, Ordering::Relaxed);
+        shared.crossfade_samples.store(16, Ordering::Relaxed);
+        shared
+            .drop_preview_trigger_samples
+            .store(8, Ordering::Relaxed);
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let mut output = [0.0; 16];
+
+        ALLOCATION_COUNTS.with(|counts| counts.set((true, 0, 0)));
+        super::write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        super::write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        let (_, allocations, frees) = ALLOCATION_COUNTS.with(|counts| {
+            let result = counts.get();
+            counts.set((false, 0, 0));
+            result
+        });
+
+        assert_eq!(
+            (allocations, frees),
+            (0, 0),
+            "callback transition delivery used the allocator"
+        );
+        // The callback must only publish into its preallocated RT handoff.
+        assert!(command_rx.try_recv().is_err());
+        assert!(event_rx.try_recv().is_err());
+        shared.drain_rt_notifications(&command_tx, &event_tx);
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            PlaybackRuntimeEvent::Started { .. }
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            PlaybackRuntimeEvent::NearEnd { .. }
+        ));
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            PlaybackRuntimeCommand::CrossfadeStart { .. }
+        ));
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            PlaybackRuntimeCommand::DropPreviewStart { .. }
+        ));
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            PlaybackRuntimeCommand::TrackTerminal { .. }
+        ));
+    }
+
+    #[test]
+    fn cpal_first_fatal_callback_defers_owned_error_without_allocator_use() {
+        let shared = test_shared_state();
+        let live = Arc::new(AtomicBool::new(true));
+        let callback = crate::playback::output::cpal_shared::CpalCallbackState::new(live);
+        let error = cpal::Error::with_message(
+            cpal::ErrorKind::DeviceNotAvailable,
+            String::from("driver diagnostic retained for runtime"),
+        );
+        ALLOCATION_COUNTS.with(|counts| counts.set((true, 0, 0)));
+        crate::playback::output::cpal_shared::emit_cpal_stream_error(&shared, &callback, error);
+        let (_, allocations, frees) = ALLOCATION_COUNTS.with(|counts| {
+            let result = counts.get();
+            counts.set((false, 0, 0));
+            result
+        });
+        assert_eq!(
+            (allocations, frees),
+            (0, 0),
+            "fatal callback used the allocator"
+        );
+        match callback.take_command(&shared).unwrap() {
+            PlaybackRuntimeCommand::CpalOutputError { message, .. } => {
+                assert!(message.contains("driver diagnostic retained for runtime"));
+            }
+            other => panic!("expected retained diagnostic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recovery_preroll_is_discarded_without_playback_or_backpressure_growth() {
+        let shared = test_shared_state();
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.append_decoded_samples(&[0.1; 48]).unwrap();
+        shared.arm_recovery_seek_ms(1).unwrap();
+        assert_eq!(shared.buffer.lock().unwrap().samples.len(), 0);
+        shared.paused.store(false, Ordering::SeqCst);
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [1.0; 8];
+        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output, [0.0; 8]);
+        assert_eq!(shared.position_samples.load(Ordering::Relaxed), 96);
+        shared.append_decoded_samples(&[0.2; 48]).unwrap();
+        assert_eq!(shared.unread_buffered_samples().unwrap(), 0);
+        shared.append_decoded_samples(&[0.75; 8]).unwrap();
+        shared.buffer.lock().unwrap().mark_finished();
+        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output, [0.75; 8], "recovery replayed preroll");
+        assert_eq!(shared.position_samples.load(Ordering::Relaxed), 104);
+        assert_eq!(shared.source_position_samples.load(Ordering::Relaxed), 104);
+    }
+
+    #[test]
+    fn recovery_at_44100_hz_preserves_interleaved_channel_alignment() {
+        let (command_tx, _) = mpsc::channel();
+        let shared = PlaybackSharedState::new(
+            1,
+            1,
+            PlaybackSourceKind::TidalStream,
+            GaplessPlan::disabled(),
+            44_100,
+            2,
+            None,
+            command_tx,
+            Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.arm_recovery_seek_ms(999).unwrap();
+        let target = shared.recovery_seek_samples.load(Ordering::Acquire);
+        assert_eq!(target, 88_110);
+        assert_eq!(target % 2, 0);
+    }
+
+    #[test]
+    fn recovery_callback_wait_and_start_do_not_allocate_or_free() {
+        let shared = test_shared_state();
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.arm_recovery_seek_ms(1).unwrap();
+        shared.paused.store(false, Ordering::SeqCst);
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [1.0; 8];
+        for ready in [false, true] {
+            if ready {
+                shared.append_decoded_samples(&[0.5; 104]).unwrap();
+                shared.buffer.lock().unwrap().mark_finished();
+            }
+            ALLOCATION_COUNTS.with(|counts| counts.set((true, 0, 0)));
+            write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+            let (_, allocations, frees) = ALLOCATION_COUNTS.with(|counts| {
+                let result = counts.get();
+                counts.set((false, 0, 0));
+                result
+            });
+            assert_eq!((allocations, frees), (0, 0));
+            assert_eq!(output, [if ready { 0.5 } else { 0.0 }; 8]);
+        }
+    }
+
+    #[test]
+    fn recovery_short_source_reaches_actual_end_instead_of_waiting_forever() {
+        let shared = test_shared_state();
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.arm_recovery_seek_ms(1000).unwrap();
+        shared.append_decoded_samples(&[0.5; 64]).unwrap();
+        shared.buffer.lock().unwrap().mark_finished();
+        shared.paused.store(false, Ordering::SeqCst);
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [1.0; 8];
+        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output, [0.0; 8]);
+        assert_eq!(
+            shared.recovery_seek_samples.load(Ordering::Acquire),
+            u64::MAX
+        );
+        assert_eq!(shared.source_position_samples.load(Ordering::Relaxed), 64);
+        assert!(matches!(
+            shared.take_rt_command(&event_tx),
+            Some(PlaybackRuntimeCommand::TrackTerminal { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_actor_polling_does_not_interrupt_buffered_pcm() {
+        let shared = test_shared_state();
+        const BLOCKS: usize = 20_000;
+        const SAMPLES: usize = 128;
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples = vec![0.25; BLOCKS * SAMPLES];
+            buffer.started = true;
+            buffer.started_notified = true;
+        }
+        shared.near_end_signaled.store(true, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let observer_shared = shared.clone();
+        let observer_stop = stop.clone();
+        let observer_barrier = barrier.clone();
+        let observer = std::thread::spawn(move || {
+            let (event_tx, _) = tokio::sync::broadcast::channel(8);
+            observer_barrier.wait();
+            while !observer_stop.load(Ordering::Relaxed) {
+                assert!(observer_shared.take_rt_command(&event_tx).is_none());
+            }
+        });
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [0.0; SAMPLES];
+        let mut silent_blocks = 0;
+        barrier.wait();
+        for _ in 0..BLOCKS {
+            super::write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+            if output.iter().all(|sample| *sample == 0.0) {
+                silent_blocks += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        observer.join().unwrap();
+        assert_eq!(
+            silent_blocks, 0,
+            "empty actor polling inserted silent PCM blocks"
+        );
+        assert_eq!(
+            shared.position_samples.load(Ordering::Relaxed),
+            (BLOCKS * SAMPLES) as u64
+        );
+    }
 
     fn test_shared_state() -> Arc<PlaybackSharedState> {
         let (command_tx, _) = mpsc::channel();
@@ -1167,6 +1669,216 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         ))
+    }
+
+    #[test]
+    fn full_notification_mailbox_retries_terminal_after_control_drains() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.started = true;
+            buffer.started_notified = true;
+            buffer.finished = true;
+            for _ in 0..32 {
+                assert!(buffer.push_notification(RtNotification::NearEnd));
+            }
+        }
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(64);
+        super::write_output_f32(&mut [0.0; 8], &shared, &command_tx, &event_tx);
+        assert!(!shared.buffer.lock().unwrap().finished_notified);
+        shared.drain_rt_notifications(&command_tx, &event_tx);
+        super::write_output_f32(&mut [0.0; 8], &shared, &command_tx, &event_tx);
+        shared.drain_rt_notifications(&command_tx, &event_tx);
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            PlaybackRuntimeCommand::TrackTerminal { .. }
+        ));
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn paused_notifications_wait_for_resume_and_seek_retires_old_transition() {
+        let shared = test_shared_state();
+        shared.append_decoded_samples(&[0.25; 64]).unwrap();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        super::write_output_f32(&mut [0.0; 8], &shared, &command_tx, &event_tx);
+        shared.paused.store(true, Ordering::SeqCst);
+        shared.drain_rt_notifications(&command_tx, &event_tx);
+        assert!(event_rx.try_recv().is_err());
+        shared.paused.store(false, Ordering::SeqCst);
+        shared.drain_rt_notifications(&command_tx, &event_tx);
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            PlaybackRuntimeEvent::Started { .. }
+        ));
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.push_notification(RtNotification::Crossfade {
+                position: 8,
+                target: 8,
+            });
+            buffer.push_notification(RtNotification::Finished);
+        }
+        shared.apply_in_buffer_seek(16).unwrap();
+        shared.drain_rt_notifications(&command_tx, &event_tx);
+        assert!(command_rx.try_recv().is_err());
+        super::write_output_f32(&mut [0.0; 8], &shared, &command_tx, &event_tx);
+        shared.drain_rt_notifications(&command_tx, &event_tx);
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            PlaybackRuntimeEvent::Started { .. }
+        ));
+    }
+
+    #[test]
+    fn audio_callback_does_not_wait_for_decoder_buffer() {
+        let shared = test_shared_state();
+        shared.append_decoded_samples(&[0.25; 128]).unwrap();
+        let guard = shared.buffer.lock().unwrap();
+        let render_shared = Arc::clone(&shared);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let render = std::thread::spawn(move || {
+            let (command_tx, _) = mpsc::channel();
+            let (event_tx, _) = tokio::sync::broadcast::channel(8);
+            let mut data = [1.0; 128];
+            ready_tx.send(()).unwrap();
+            render_and_drain(&mut data, &render_shared, &command_tx, &event_tx);
+            done_tx.send(data).unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let result = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+        // Always release the producer and join, including the failing baseline.
+        drop(guard);
+        render.join().unwrap();
+        let data = result.expect("audio callback waited for the decoder's buffer lock");
+        assert_eq!(data, [0.0; 128]);
+        assert_eq!(shared.position_samples.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.buffer.lock().unwrap().read_pos, 0);
+    }
+
+    #[test]
+    fn stopped_decoder_cannot_terminate_its_cold_replacement() {
+        let (command_tx, command_rx) = mpsc::channel();
+        let shared = PlaybackSharedState::new(
+            1,
+            1,
+            PlaybackSourceKind::TidalStream,
+            GaplessPlan::disabled(),
+            48_000,
+            2,
+            None,
+            command_tx,
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        shared.stopped.store(true, Ordering::SeqCst);
+        shared
+            .signal_terminal(PlaybackTerminalReason::Error("cancelled".into()))
+            .unwrap();
+        assert!(command_rx.try_recv().is_err());
+        shared.stopped.store(false, Ordering::SeqCst);
+        shared
+            .signal_terminal(PlaybackTerminalReason::Error("active decode failed".into()))
+            .unwrap();
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            PlaybackRuntimeCommand::TrackTerminal { .. }
+        ));
+    }
+
+    #[test]
+    fn shared_i16_callback_preserves_signed_pcm_values() {
+        let shared = test_shared_state();
+        let expected = [i16::MIN, -16_384, -1, 0, 1, 16_384, i16::MAX, 0];
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples = expected
+                .iter()
+                .map(|pcm| f32::from(*pcm) / 32_768.0)
+                .collect();
+            buffer.mark_finished();
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut data = [0; 8];
+        write_output_i16(&mut data, &shared, &command_tx, &event_tx);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn shared_i32_callback_outputs_pcm_and_unsigned_silence_is_centered() {
+        let shared = test_shared_state();
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples = vec![-1.0, -0.5, 0.0, 0.5, 1.0, 0.0];
+            buffer.mark_finished();
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut data = [0; 6];
+        write_output_i32(&mut data, &shared, &command_tx, &event_tx);
+        assert_eq!(
+            data,
+            [i32::MIN, -1_073_741_824, 0, 1_073_741_824, i32::MAX, 0]
+        );
+        shared.paused.store(true, Ordering::SeqCst);
+        let mut unsigned = [0; 6];
+        write_output_u16(&mut unsigned, &shared, &command_tx, &event_tx);
+        assert_eq!(unsigned, [32_768; 6]);
+    }
+
+    #[test]
+    fn shared_i24_callback_preserves_signed_pcm_and_paused_silence() {
+        let shared = test_shared_state();
+        let pcm = [-8_388_608, -4_194_304, -1, 0, 1, 4_194_304, 8_388_607, 0];
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples = pcm
+                .iter()
+                .map(|value| *value as f32 / 8_388_608.0)
+                .collect();
+            buffer.mark_finished();
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [cpal::I24::default(); 8];
+        write_output_i24(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output.map(|value| value.inner()), pcm);
+        shared.paused.store(true, Ordering::SeqCst);
+        write_output_i24(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output.map(|value| value.inner()), [0; 8]);
+    }
+
+    #[test]
+    fn shared_f64_callback_preserves_float_samples_and_paused_silence() {
+        let shared = test_shared_state();
+        let pcm = [
+            -1.0_f32,
+            -0.5,
+            -f32::EPSILON,
+            0.0,
+            f32::EPSILON,
+            0.5,
+            1.0,
+            0.0,
+        ];
+        {
+            let mut buffer = shared.buffer.lock().unwrap();
+            buffer.samples = pcm.to_vec();
+            buffer.mark_finished();
+        }
+        let (command_tx, _) = mpsc::channel();
+        let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut output = [0.0_f64; 8];
+        write_output_f64(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output, pcm.map(f64::from));
+        shared.paused.store(true, Ordering::SeqCst);
+        write_output_f64(&mut output, &shared, &command_tx, &event_tx);
+        assert_eq!(output, [0.0; 8]);
     }
 
     #[test]
@@ -1276,7 +1988,7 @@ mod tests {
         let (command_tx, _) = mpsc::channel();
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
         let mut output = vec![0.0f32; frames * 2];
-        write_output_f32(&mut output, shared, &command_tx, &event_tx);
+        render_and_drain(&mut output, shared, &command_tx, &event_tx);
         output
     }
 
@@ -1637,7 +2349,8 @@ mod tests {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
         let mut output = [0.0f32; 2];
 
-        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        super::write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        shared.drain_rt_notifications(&command_tx, &event_tx);
 
         match event_rx.try_recv().expect("started event") {
             PlaybackRuntimeEvent::Started {
@@ -1665,7 +2378,7 @@ mod tests {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
         let mut output = [0.0f32; 2];
 
-        write_output_f32(&mut output, &shared, &command_tx, &event_tx);
+        super::write_output_f32(&mut output, &shared, &command_tx, &event_tx);
 
         assert!(
             event_rx.try_recv().is_err(),
@@ -1749,7 +2462,7 @@ mod tests {
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [0.0; 4];
 
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
 
         assert_eq!(out, [0.25, -0.5, 0.75, -1.0]);
     }
@@ -1766,7 +2479,7 @@ mod tests {
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [0.0; 4];
 
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
 
         assert_eq!(out, [0.125, 0.25, 0.5, 1.0]);
     }
@@ -1820,7 +2533,7 @@ mod tests {
         let (command_tx, _) = mpsc::channel();
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [0.0_f32; 4];
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
 
         assert_eq!(
             out,
@@ -1866,8 +2579,8 @@ mod tests {
         for _ in 0..(XFADE as usize / BLOCK) {
             let mut out_block = [0.0_f32; BLOCK];
             let mut in_block = [0.0_f32; BLOCK];
-            write_output_f32(&mut out_block, &outgoing, &command_tx, &event_tx);
-            write_output_f32(&mut in_block, &incoming, &command_tx, &event_tx);
+            render_and_drain(&mut out_block, &outgoing, &command_tx, &event_tx);
+            render_and_drain(&mut in_block, &incoming, &command_tx, &event_tx);
             for (out_sample, in_sample) in out_block.iter().zip(in_block.iter()) {
                 let power = out_sample * out_sample + in_sample * in_sample;
                 assert!(
@@ -1925,7 +2638,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [0.0_f32; 4];
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
 
         assert!(
             !shared.crossfade_start_signaled.load(Ordering::Relaxed),
@@ -1951,7 +2664,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [0.0_f32; 4];
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
 
         match command_rx.try_recv().expect("crossfade command") {
             PlaybackRuntimeCommand::CrossfadeStart {
@@ -1991,7 +2704,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [0.0_f32; 4];
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
 
         assert!(
             !shared.crossfade_start_signaled.load(Ordering::Relaxed),
@@ -2005,7 +2718,7 @@ mod tests {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
             buffer.samples.extend_from_slice(&[0.5, 0.5, 0.5, 0.5]);
         }
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
         match command_rx.try_recv().expect("crossfade command") {
             PlaybackRuntimeCommand::CrossfadeStart { .. } => {}
             other => panic!("expected CrossfadeStart, got {other:?}"),
@@ -2034,7 +2747,7 @@ mod tests {
         let (command_tx, _) = mpsc::channel();
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [0.0_f32; 4];
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
 
         let expected = (720.0_f32 / 1440.0 * std::f32::consts::FRAC_PI_2).cos();
         assert!(
@@ -2050,7 +2763,7 @@ mod tests {
             let mut buffer = shared.buffer.lock().expect("buffer lock");
             buffer.samples.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
         }
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
         assert_eq!(out, [0.0, 0.0, 0.0, 0.0]);
     }
 
@@ -2073,7 +2786,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [0.0_f32; 4];
-        write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+        render_and_drain(&mut out, &shared, &command_tx, &event_tx);
 
         assert_eq!(shared.crossfade_samples.load(Ordering::Relaxed), 0);
         match command_rx.try_recv().expect("drop preview command") {

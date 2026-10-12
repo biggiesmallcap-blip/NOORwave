@@ -79,7 +79,7 @@ pub(crate) async fn apply_runtime_ready(
 pub(crate) fn spawn_playback_runtime_listener(
     state: SharedState,
     handle: playback_runtime::PlaybackRuntimeHandle,
-) {
+) -> tokio::task::JoinHandle<()> {
     // Subscribe before scheduling the task: native runtime events can arrive
     // before Tokio first polls it. Replay device metadata if startup Ready
     // was already sent before the handle reached this layer.
@@ -171,7 +171,24 @@ pub(crate) fn spawn_playback_runtime_listener(
                     let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Error { message }) => {
-                    handle_runtime_error(state.clone(), &message).await;
+                    handle_runtime_error_from(&state, Some(&handle), &message).await;
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::CommandError {
+                    generation,
+                    source_identity,
+                    message,
+                }) => {
+                    handle_runtime_command_error(
+                        &state,
+                        &handle,
+                        generation,
+                        &source_identity,
+                        &message,
+                    )
+                    .await;
+                }
+                Ok(fault @ playback_runtime::PlaybackRuntimeEvent::OutputFault { .. }) => {
+                    handle_output_fault(&state, &handle, fault).await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Exited { message }) => {
                     handle_runtime_exit(&state, &handle, message.as_deref()).await;
@@ -296,31 +313,17 @@ pub(crate) fn spawn_playback_runtime_listener(
                     .await;
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Paused { .. }) => {
-                    let state_guard = state.read().await;
-                    if !state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
-                    {
-                        break;
-                    }
-                    drop(state_guard);
                     // The runtime acknowledged pause (user command or the
                     // advance-cascade breaker). Reconcile DB/UI to it so the
                     // pause button always reflects what is actually audible.
-                    reconcile_runtime_transport_state(&state, false).await;
-                }
-                Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. }) => {
-                    let state_guard = state.read().await;
-                    if !state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
-                    {
+                    if !reconcile_runtime_transport_state(&state, &handle, false).await {
                         break;
                     }
-                    drop(state_guard);
-                    reconcile_runtime_transport_state(&state, true).await;
+                }
+                Ok(playback_runtime::PlaybackRuntimeEvent::Resumed { .. }) => {
+                    if !reconcile_runtime_transport_state(&state, &handle, true).await {
+                        break;
+                    }
                 }
                 Ok(playback_runtime::PlaybackRuntimeEvent::Preparing { .. }) => {}
                 Ok(playback_runtime::PlaybackRuntimeEvent::Stalled { track_id }) => {
@@ -431,6 +434,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                     transport_format,
                 }) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = true;
                         info.exclusive_transport_format = Some(transport_format.clone());
@@ -445,6 +455,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                     device_name,
                 }) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = false;
                         info.exclusive_transport_format = None;
@@ -458,6 +475,13 @@ pub(crate) fn spawn_playback_runtime_listener(
                     device_name,
                 }) => {
                     let mut state_guard = state.write().await;
+                    if !state_guard
+                        .playback_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.handle.is_same_runtime(&handle))
+                    {
+                        continue;
+                    }
                     if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                         info.exclusive_engaged = false;
                         info.exclusive_transport_format = None;
@@ -493,7 +517,8 @@ pub(crate) fn spawn_playback_runtime_listener(
                             }
                         })
                     };
-                    drop(state_guard);
+                    // Sending is synchronous. Keep the validated runtime
+                    // current until its recovery command has been queued.
                     if let Some((runtime, output)) = retry
                         && let Err(error) = runtime.device_swap(
                             output.device,
@@ -513,7 +538,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    })
 }
 
 /// Peek at what would play next without advancing the queue, then send `PrepareNext` to the
@@ -914,8 +939,21 @@ pub(crate) fn release_next_prebuffer_slot(
 /// runtime is the source of truth for what is audible; this is the
 /// reconciliation channel that closes the "button says paused, audio still
 /// playing" gap after command interleavings.
-pub(crate) async fn reconcile_runtime_transport_state(state: &SharedState, runtime_playing: bool) {
+pub(crate) async fn reconcile_runtime_transport_state(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    runtime_playing: bool,
+) -> bool {
     let state_guard = state.read().await;
+    // Runtime replacement needs the write lock. Keep this validated read
+    // guard through DB reconciliation and its public notification.
+    if !state_guard
+        .playback_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+    {
+        return false;
+    }
     let db_playing = state_guard
         .db
         .with_conn(|conn| {
@@ -928,10 +966,10 @@ pub(crate) async fn reconcile_runtime_transport_state(state: &SharedState, runti
         })
         .map(|value: i64| value != 0);
     let Ok(db_playing) = db_playing else {
-        return;
+        return true;
     };
     if db_playing == runtime_playing {
-        return;
+        return true;
     }
     let updated = state_guard.db.with_conn(|conn| {
         conn.execute(
@@ -948,6 +986,7 @@ pub(crate) async fn reconcile_runtime_transport_state(state: &SharedState, runti
         );
         let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
     }
+    true
 }
 
 pub(crate) async fn switch_runtime_to_snapshot_current(
@@ -1591,32 +1630,189 @@ pub(crate) async fn handle_prepared_runtime_track_error_for_runtime(
     report_playback_failure(state, message);
 }
 
+pub(crate) async fn handle_output_fault(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    event: playback_runtime::PlaybackRuntimeEvent,
+) -> bool {
+    let playback_runtime::PlaybackRuntimeEvent::OutputFault {
+        active_track_id,
+        generation,
+        active_decoder_stop,
+        decoder_stop,
+        output_live,
+        message,
+    } = event
+    else {
+        return false;
+    };
+    use std::sync::atomic::Ordering;
+    // Validate after acquiring the same lock that protects queue replacement.
+    // Checking before this await allows a delayed failure to pause a newer row.
+    let completed = {
+        let mut guard = state.write().await;
+        if !output_live.load(Ordering::Acquire)
+            || decoder_stop.load(Ordering::Acquire)
+            || active_decoder_stop
+                .as_ref()
+                .is_some_and(|stop| stop.load(Ordering::Acquire))
+            || current_playback_generation(&guard) != generation
+            || !guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
+            || guard
+                .playback_runtime_info
+                .as_ref()
+                .and_then(|info| info.active_track_id)
+                != active_track_id
+        {
+            return false;
+        }
+        if let Err(error) = guard.db.with_conn(player::pause) {
+            warn!("Failed to persist output-fault pause: {error}");
+        }
+        guard.audio_active.store(false, Ordering::Release);
+        if let Some(info) = guard.playback_runtime_info.as_mut() {
+            info.last_error = Some(message.clone());
+            info.active_track_id = None;
+            if info.exclusive_engaged {
+                let device = info.device_name.clone();
+                info.exclusive_engaged = false;
+                info.exclusive_transport_format = None;
+                let _ = guard
+                    .event_tx
+                    .send(AppEvent::AudioExclusiveReleased { device });
+            }
+        }
+        let outcome = flush_active_listen_session_locked(
+            &mut guard,
+            chrono::Utc::now(),
+            player::ListenSessionEndReason::Stopped,
+        )
+        .ok();
+        if let Some(track_id) = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.flushed_track_id)
+        {
+            let _ = guard
+                .event_tx
+                .send(AppEvent::ListenHistoryUpdated { track_id });
+        }
+        let _ = guard.event_tx.send(AppEvent::PlaybackFailed { message });
+        let _ = guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        outcome.and_then(|outcome| outcome.scrobble_completed)
+    };
+    if let Some(payload) = completed {
+        crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
+    }
+    true
+}
+
 pub(crate) async fn handle_runtime_error(state: SharedState, message: &str) {
-    {
+    handle_runtime_error_from(&state, None, message).await;
+}
+
+pub(crate) async fn handle_runtime_command_error(
+    state: &SharedState,
+    handle: &playback_runtime::PlaybackRuntimeHandle,
+    generation: Option<u64>,
+    source_identity: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    message: &str,
+) -> bool {
+    handle_runtime_error_checked(
+        state,
+        Some(handle),
+        Some((generation, source_identity)),
+        message,
+    )
+    .await
+}
+
+pub(crate) async fn handle_runtime_error_from(
+    state: &SharedState,
+    expected_handle: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    message: &str,
+) -> bool {
+    handle_runtime_error_checked(state, expected_handle, None, message).await
+}
+
+async fn handle_runtime_error_checked(
+    state: &SharedState,
+    expected_handle: Option<&playback_runtime::PlaybackRuntimeHandle>,
+    command_context: Option<(Option<u64>, &std::sync::Arc<std::sync::atomic::AtomicU64>)>,
+    message: &str,
+) -> bool {
+    let completed = {
         let mut state_guard = state.write().await;
+        // Runtime replacement and its DB/UI state share this lock. Checking
+        // before acquiring it would allow a retired error to pause a new row.
+        if expected_handle.is_some_and(|expected| {
+            !state_guard
+                .playback_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.handle.is_same_runtime(expected))
+        }) {
+            return false;
+        }
+        // Actor publication also uses this reader lock. Keep its identity
+        // stable through the validated DB/UI mutation, then release before
+        // any asynchronous scrobble work. The audio callback never uses it.
+        let source_guard = command_context
+            .and_then(|_| expected_handle.map(|handle| handle.lock_playback_source_identity()));
+        if let Some((generation, source_identity)) = command_context {
+            if generation
+                .is_some_and(|generation| current_playback_generation(&state_guard) != generation)
+                || source_guard
+                    .as_ref()
+                    .is_none_or(|current| !std::sync::Arc::ptr_eq(current, source_identity))
+            {
+                return false;
+            }
+        }
+        let paused = match state_guard.db.with_conn(player::pause) {
+            Ok(_) => true,
+            Err(error) => {
+                warn!("Failed to persist runtime-error pause: {error}");
+                false
+            }
+        };
+        state_guard
+            .audio_active
+            .store(false, std::sync::atomic::Ordering::Release);
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.last_error = Some(message.to_string());
             info.active_track_id = None;
         }
-    }
-    report_playback_failure(&state, message);
-
-    let snapshot = {
-        let state_guard = state.read().await;
-        state_guard.db.with_conn(player::pause).ok()
+        let outcome = if paused {
+            flush_active_listen_session_locked(
+                &mut state_guard,
+                chrono::Utc::now(),
+                player::ListenSessionEndReason::Stopped,
+            )
+            .map_err(|error| warn!("Failed to flush runtime-error listen session: {error}"))
+            .ok()
+        } else {
+            None
+        };
+        if let Some(track_id) = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.flushed_track_id)
+        {
+            let _ = state_guard
+                .event_tx
+                .send(AppEvent::ListenHistoryUpdated { track_id });
+        }
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackFailed {
+            message: message.to_string(),
+        });
+        let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+        outcome.and_then(|outcome| outcome.scrobble_completed)
     };
-
-    if let Some(snapshot) = snapshot {
-        sync_session_after_snapshot(
-            &state,
-            &snapshot,
-            Some(player::ListenSessionEndReason::Stopped),
-        )
-        .await;
+    if let Some(payload) = completed {
+        crate::services::scrobbling::enqueue_completed(state.clone(), payload).await;
     }
-
-    let state_guard = state.read().await;
-    let _ = state_guard.event_tx.send(AppEvent::PlaybackStateChanged);
+    true
 }
 
 pub(crate) async fn handle_runtime_exit(

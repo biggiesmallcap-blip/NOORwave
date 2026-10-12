@@ -3,6 +3,10 @@ use crate::db::audio_settings::ExclusiveLatencyMode;
 use crate::playback::dj_lookahead::DjMediaRef;
 use crate::playback::gapless::GaplessPlan;
 use crate::playback::player::{PlaybackSourceKind, PreparedPlaybackJob, PreparedTransitionProgram};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64},
+};
 
 #[derive(Debug, Clone)]
 pub enum PlaybackRuntimeCommand {
@@ -88,7 +92,17 @@ pub enum PlaybackRuntimeCommand {
     TrackTerminal {
         track_id: i64,
         generation: u64,
+        decoder_stop: Arc<AtomicBool>,
         outcome: PlaybackTerminalReason,
+    },
+    /// Native output faults are reconciled by the command loop, never directly
+    /// by the asynchronous UI listener. Tokens reject a retired output/decoder.
+    CpalOutputError {
+        track_id: i64,
+        generation: u64,
+        decoder_stop: Arc<AtomicBool>,
+        output_live: Arc<AtomicBool>,
+        message: String,
     },
     TrackStatus {
         track_id: i64,
@@ -236,6 +250,23 @@ pub enum PlaybackRuntimeEvent {
         message: String,
     },
     Error {
+        message: String,
+    },
+    /// Command failure from one generation and decoder, rather than the
+    /// entire runtime. Public notifications omit these internal identities.
+    CommandError {
+        generation: Option<u64>,
+        source_identity: Arc<AtomicU64>,
+        message: String,
+    },
+    /// Internal identity travels across the second queue to the HTTP listener.
+    /// It must not pause a replacement engine that reuses the same track/job.
+    OutputFault {
+        active_track_id: Option<i64>,
+        generation: u64,
+        active_decoder_stop: Option<Arc<AtomicBool>>,
+        decoder_stop: Arc<AtomicBool>,
+        output_live: Arc<AtomicBool>,
         message: String,
     },
     /// The runtime command loop exited and this handle can no longer accept
