@@ -179,6 +179,7 @@
 
 	<NowPlayingMetadata
 		track={track}
+		stream={streamDisplay}
 		nowPlayingAttribution={nowPlayingAttribution}
 		streamDetail={streamDetail}
 		qualityLabel={qualityLabel}

@@ -16,6 +16,8 @@
 		"lint:inline-styles": "node scripts/lint-inline-styles.mjs",
 		"lint:motion": "node scripts/lint-motion.mjs",
 		"smoke": "node scripts/smoke.mjs",
+		"smoke:library-loading": "node scripts/library-loading-smoke.ts",
+		"smoke:exclusive-warning": "node scripts/exclusive-warning-smoke.ts",
 		"smoke:full": "node scripts/smoke.mjs --phase full",
 		"smoke:headed": "node scripts/smoke.mjs --headed",
 		"test": "vitest run",

@@ -10,6 +10,18 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### remote: browser reconnect timer loses its receiver
+
+Source: the Library loading browser regression, before its WebSocket fixture was
+connected, raised `TypeError: Illegal invocation` from `ReconnectScheduler.next`.
+Affected surfaces: `frontend/src/lib/remote/connection.ts` and
+`frontend/src/lib/api/ws.ts`. The scheduler invokes stored native `setTimeout`
+and `clearTimeout` functions as instance methods, which Edge rejects, preventing
+reconnect after a socket closes. This is outside the Library rendering change.
+Next check: reproduce a socket close in Edge, wrap the native timer defaults in
+receiver-safe closures, and verify reconnect and cancellation in a browser.
+Spawned by: Library blank-on-entry follow-up to PR #351.
+
 ### tidal: move stream.rs behind the session-bound transport
 
 Playback stream resolution (playbackinfo, manifests, video streams, downloads)
@@ -1067,3 +1079,21 @@ TIDAL-mirrored playlist does write through (rename, remove, reorder, delete).
 Adding creation would need `POST /v1/users/{id}/playlists` in
 `services/tidal/mutations.rs` plus a UI choice about where a new playlist
 should live.
+
+### Windows startup when another app owns media keys
+
+Source: isolated symptom-build validation on 2026-10-12. A distinct test app
+identifier bypassed single-instance arbitration while the installed app owned
+MediaPlayPause. The second app panicked during setup with HotKey already
+registered, leaving its sidecar running.
+
+Affected surfaces: `noor-app/src/main.rs`, `noor-app/src/media_keys.rs` and
+sidecar cleanup after setup failure. This matters because global shortcut
+registration is fallible and should not necessarily make the entire app fail.
+It is outside the current Library/warning/format validation scope: the test
+shell temporarily omitted media-key registration and production source was
+restored. No permanent media-key behavior change was made.
+
+Next check: reproduce with a separate shortcut-owning process, decide whether
+registration failure should warn and continue, and verify cleanup on setup
+failure without interrupting another application's audio or shortcut ownership.

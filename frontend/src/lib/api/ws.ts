@@ -7,7 +7,7 @@ import { handleAnalysisProgress, handleAnalysisComplete } from '$lib/stores/audi
 import { handleDiscoverySpaceRefreshed, setRefreshProgress } from '$lib/components/DiscoverSpace/discover_space_store';
 import { setExclusiveEngaged, setExclusiveFailed, setExclusiveReleased } from '$lib/stores/exclusive_status';
 import { handleDownloadProgress, handleDownloadItemDone, handleDownloadComplete } from '$lib/stores/downloads';
-import { showToast } from '$lib/stores/toast';
+import { showToast, showUniqueToast } from '$lib/stores/toast';
 import { setAudioSpectrum } from '$lib/stores/audioSpectrum';
 import { applyCacheUpdateForWsMessage } from '$lib/cache/ws_events';
 import { ReconnectScheduler } from '$lib/remote/connection';
@@ -197,7 +197,7 @@ export function connectWebSocket() {
 				const label = data.title ? `"${data.title}"` : 'Track';
 				showToast(`${label} skipped: ${data.reason ?? 'unavailable on TIDAL'}`, 'error', 6000);
 			}
-			if (data?.type === 'track_changed' || data?.type === 'playback_changed') {
+			if (data?.type === 'connected' || data?.type === 'track_changed' || data?.type === 'playback_changed') {
 				void refreshPlaybackRuntime();
 			}
 			if (data?.type === 'connected') {
@@ -247,10 +247,10 @@ export function connectWebSocket() {
 			}
 			if (data?.type === 'audio_exclusive_failed') {
 				setExclusiveFailed(data.device ?? '', data.reason ?? 'Exclusive mode unavailable');
-				// One transient toast on the failure transition so the user notices
+				// Keep one transient toast during repeated failed grabs so the user notices
 				// even if they're not on the settings page. The persistent banner on
 				// settings carries the rest of the message.
-				showToast(`Exclusive mode unavailable: ${data.reason ?? 'unknown reason'}`, 'error', 8000);
+				showUniqueToast(`Exclusive mode unavailable: ${data.reason ?? 'unknown reason'}`, 'error', 8000);
 			}
 			if (data?.type === 'audio_exclusive_released') {
 				setExclusiveReleased(data.device ?? '');

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Track } from '$lib/api/client';
 	import type { QualityDisplay } from '$lib/stores/playerInformation';
+	import { formatPlayerStreamTooltip } from '$lib/player/stream_display';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import {
 		albumRefFromTrack,
@@ -41,6 +42,7 @@
 	} = $props();
 
 	const titleRef = $derived(track ? trackRefFromTrack(track) : null);
+	const streamTooltip = $derived(formatPlayerStreamTooltip(stream, streamDetail));
 	const artistRef = $derived(track ? artistRefFromTrack(track) : null);
 	const artistHref = $derived(mediaHref(artistRef));
 	const albumRef = $derived(track ? albumRefFromTrack(track) : null);
@@ -117,7 +119,7 @@
 	{#if qualityDisplay !== 'off' && (qualityLabel || streamDetail)}
 		<div class="badge-row">
 			{#if qualityLabel && (qualityDisplay === 'icon' || qualityDisplay === 'both')}
-				<span class={`quality-badge quality-icon ${qualityClass}`} role="img" aria-label={`${qualityLabel}${streamDetail ? `, ${streamDetail}` : ''}`} title={`${qualityLabel}${streamDetail ? ` · ${streamDetail}` : ''}`}>
+				<span class={`quality-badge quality-icon ${qualityClass}`} role="img" aria-label={`${qualityLabel}${streamTooltip ? `, ${streamTooltip}` : ''}`} title={`${qualityLabel}${streamTooltip ? ` · ${streamTooltip}` : ''}`}>
 					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1.5 8h2.2l1.4-3.6 2.5 7.2 2-5.4 1.4 1.8h3.5" /></svg>
 				</span>
 			{/if}
@@ -125,7 +127,7 @@
 				<span class={`quality-badge np-quality-chip ${qualityClass}`}>{qualityLabel}</span>
 			{/if}
 			{#if streamDetail && (qualityDisplay === 'details' || qualityDisplay === 'both')}
-				<span class="stream-micro" title={streamDetail}>{streamDetail}</span>
+				<span class="stream-micro" title={streamTooltip}>{streamDetail}</span>
 			{/if}
 		</div>
 	{/if}

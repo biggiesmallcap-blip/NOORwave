@@ -17,7 +17,7 @@
 		toggleTrackFavorite
 	} from '$lib/stores/player';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
-	import { formatPlayerStreamDetail } from '$lib/player/stream_display';
+	import { formatPlayerStreamDetail, formatPlayerStreamTooltip } from '$lib/player/stream_display';
 	import { formatTrackDuration } from '$lib/utils/format';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { goto } from '$app/navigation';
@@ -357,7 +357,7 @@
 			</button>
 		{/if}
 		{#if streamDetail}
-			<span class="remote-stream" aria-label="Stream quality">{streamDetail}</span>
+			<span class="remote-stream" aria-label={`Stream quality: ${formatPlayerStreamTooltip($currentStreamDisplay, streamDetail)}`} title={formatPlayerStreamTooltip($currentStreamDisplay, streamDetail)}>{streamDetail}</span>
 		{/if}
 	</div>
 

@@ -1750,7 +1750,9 @@
 		<div class="batch-feedback error">{batchError}</div>
 	{/if}
 
-	{#if $isLoading}
+	<!-- Landing queries own their loading state. Browse warmups must not hide
+	     cached shelves or postpone mounting the mural queries. -->
+	{#if $isLoading && activeTab !== 'all' && !isSearchMode}
 		<Skeleton rows={10} label="Loading library" />
 
 	{:else if isSearchMode && searchFailed}
