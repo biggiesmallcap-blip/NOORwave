@@ -1014,16 +1014,20 @@ export const api = {
 	/**
 	 * Fetch a Spotify-sourced playlist's full metadata + track list, with
 	 * each track stamped with its current TIDAL resolution state.
+	 * `savedPlaylist` is the library copy saved from it, if any. `refresh`
+	 * bypasses the server's cached copy to pick up tracks added on Spotify.
 	 */
 	getSpotifyPlaylist(
 		spotifyId: string,
 		signal?: AbortSignal,
-	): Promise<{ playlist: SpotifyPlaylistDetail; pendingSpotifyIds: string[] }> {
-		return fetchApi<{ playlist?: unknown; pendingSpotifyIds?: unknown; pending_spotify_ids?: unknown }>(
+		options: { refresh?: boolean } = {},
+	): Promise<{ playlist: SpotifyPlaylistDetail; pendingSpotifyIds: string[]; savedPlaylist: Playlist | null }> {
+		return fetchApi<{ playlist?: unknown; pendingSpotifyIds?: unknown; pending_spotify_ids?: unknown; savedPlaylist?: Playlist | null }>(
 			`/api/discovery/sportify/playlist/${encodeURIComponent(spotifyId)}`,
-			undefined,
+			options.refresh ? { refresh: 'true' } : undefined,
 			{ signal },
 		).then((res) => ({
+			savedPlaylist: res.savedPlaylist ?? null,
 			playlist: normalizeSpotifyPlaylistDetail(res.playlist),
 			pendingSpotifyIds: [
 				...(Array.isArray(res.pendingSpotifyIds) ? res.pendingSpotifyIds : []),
@@ -1179,14 +1183,30 @@ export const api = {
 	},
 
 	/**
-	 * Save the ephemeral Spotify playlist into the user's library. Imports
-	 * each resolved TIDAL track and creates a noor playlist; unresolved
-	 * rows are skipped (counts come back in the response).
+	 * Match Spotify tracks against TIDAL now. `refresh` ignores cached
+	 * matches and misses, so a rescan can find tracks TIDAL added since.
+	 */
+	resolveTidalBulk(spotifyIds: string[], refresh = false) {
+		type Row = { spotifyId?: unknown; tidal?: unknown };
+		return fetchApi<{ resolved?: Row[]; unresolved?: Row[] }>(`/api/resolve/tidal/bulk`, undefined, {
+			method: 'POST',
+			body: JSON.stringify({ spotify_ids: spotifyIds, refresh }),
+		}).then((res) => [...(res.resolved ?? []), ...(res.unresolved ?? [])]
+			.filter((row): row is Row & { spotifyId: string } => typeof row.spotifyId === 'string')
+			.map((row) => ({ spotifyId: row.spotifyId, tidal: normalizeSpotifyTidalState(row.tidal) })));
+	},
+
+	/**
+	 * Save an external Spotify playlist into the user's library. Imports
+	 * each resolved TIDAL track into the saved copy; unresolved rows are
+	 * skipped (counts come back in the response). The saved copy remembers
+	 * its source, so saving again appends new matches (`updated: true`).
 	 */
 	saveSpotifyPlaylist(spotifyId: string, name?: string) {
 		return fetchApi<{
 			playlist: Playlist;
 			added: number;
+			updated?: boolean;
 			totalTracks: number;
 			resolvedCount: number;
 			unresolvedCount: number;

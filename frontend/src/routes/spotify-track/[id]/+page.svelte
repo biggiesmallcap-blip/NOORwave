@@ -22,6 +22,7 @@
   import { tidalStatus } from '$lib/stores/tidal';
   import DetailHero from '$lib/components/ui/DetailHero.svelte';
   import ActionBar from '$lib/components/ui/ActionBar.svelte';
+  import SpotifySourceBadge from '$lib/components/ui/SpotifySourceBadge.svelte';
 
   const spotifyId = $derived($page.params.id ?? '');
 
@@ -307,7 +308,7 @@
     {@const headerTrack = asTidalPlayableFromDetail(detail)}
     {@const playable = headerTrack !== null}
     <DetailHero
-      eyebrow="Spotify track · ephemeral"
+      eyebrow="External track"
       title={heroDetail.title ?? '-'}
       artwork={heroDetail.thumbnail}
       backdrop={heroDetail.thumbnail}
@@ -316,6 +317,7 @@
       oncontextmenu={handleHeaderContextMenu}
     >
       {#snippet meta()}
+        <SpotifySourceBadge />
           {#if heroDetail.primaryArtist}
             <!-- Artist pages are TIDAL + local library only; the spotify-artist
                  route was an unreachable dead layer and has been removed. -->

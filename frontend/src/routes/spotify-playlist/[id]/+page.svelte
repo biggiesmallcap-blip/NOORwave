@@ -1,13 +1,13 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onDestroy } from 'svelte';
-  import { goto } from '$app/navigation';
   import { lazyTidalArt } from '$lib/actions/lazy-tidal-art';
   import { goBack } from '$lib/navigation/back';
   import { formatTrackDuration } from '$lib/utils/format';
   import {
     api,
     ApiError,
+    type Playlist,
     type SpotifyPlaylistDetail,
     type SpotifyPlaylistTrack,
     type SpotifyTidalState,
@@ -30,10 +30,14 @@
   import { putCachedSpotifyChartMeta } from '$lib/stores/spotify-chart-meta-cache';
   import DetailHero from '$lib/components/ui/DetailHero.svelte';
   import ActionBar from '$lib/components/ui/ActionBar.svelte';
+  import SpotifySourceBadge from '$lib/components/ui/SpotifySourceBadge.svelte';
+  import { openExternal } from '$lib/util/external';
+  import { actionErrorMessage } from '$lib/utils/describe_error';
 
-  // Ephemeral Spotify playlist view. The playlist is NOT in the user's
-  // library — clicking Save promotes it. Until then, navigation away loses
-  // any state held only in this component.
+  // External Spotify playlist, played through TIDAL matches. Save copies the
+  // matched tracks into the library; the saved copy remembers its Spotify
+  // source, so the page shows it and Update appends tracks added on Spotify
+  // since (server side, existing tracks are skipped and edits are kept).
 
   const spotifyId = $derived($page.params.id ?? '');
   const backLink = $derived(resolveBackLink($page.url.searchParams));
@@ -42,9 +46,9 @@
   let pendingIds = $state<string[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let saving = $state(false);
-  let saveResult = $state<string | null>(null);
-  let saveErr = $state<string | null>(null);
+  let savedPlaylist = $state<Playlist | null>(null);
+  // One library action at a time: saving, updating from Spotify, rescanning.
+  let busy = $state<'saving' | 'updating' | 'rescanning' | null>(null);
   let requestedSpotifyId = $state('');
   let lazyArt = $state<Record<string, string>>({});
   let loadSeq = 0;
@@ -118,8 +122,7 @@
     error = null;
     detail = null;
     pendingIds = [];
-    saveResult = null;
-    saveErr = null;
+    savedPlaylist = null;
     lazyArt = {};
     // Sportify proxy is third-party and flaky. Retry once on 5xx so a
     // transient upstream hiccup doesn't surface as a hard failure.
@@ -132,13 +135,7 @@
     try {
       const res = await api.getSpotifyPlaylist(id, controller.signal);
       if (seq !== loadSeq) return;
-      detail = res.playlist;
-      putCachedSpotifyChartMeta(id, res.playlist);
-      pendingIds = res.pendingSpotifyIds ?? [];
-      pollDeadline = Date.now() + POLL_DEADLINE_MS;
-      if (pendingIds.length > 0) {
-        schedulePoll(seq);
-      }
+      applyLoaded(id, res, seq);
       loading = false;
     } catch (e) {
       clearTimeout(timeout);
@@ -156,6 +153,22 @@
       loading = false;
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  function applyLoaded(
+    id: string,
+    res: Awaited<ReturnType<typeof api.getSpotifyPlaylist>>,
+    seq: number,
+  ) {
+    detail = res.playlist;
+    savedPlaylist = res.savedPlaylist;
+    putCachedSpotifyChartMeta(id, res.playlist);
+    pendingIds = res.pendingSpotifyIds ?? [];
+    pollDeadline = Date.now() + POLL_DEADLINE_MS;
+    clearPoll();
+    if (pendingIds.length > 0) {
+      schedulePoll(seq);
     }
   }
 
@@ -368,24 +381,105 @@
     openMenuAtElement(e.currentTarget as HTMLElement, buildRowMenu(t), t.title ?? 'Spotify track');
   }
 
-  async function save() {
-    if (!detail || saving) return;
-    saving = true;
-    saveErr = null;
-    try {
-      const res = await api.saveSpotifyPlaylist(spotifyId);
-      const skipped = res.unresolvedCount + (res.importFailures ?? 0);
-      saveResult =
-        skipped > 0
-          ? `Saved ${res.added} tracks. ${skipped} unavailable on TIDAL were skipped.`
-          : `Saved ${res.added} tracks.`;
-      // Navigate to the new playlist after a beat so the user sees the toast.
-      setTimeout(() => goto(`/playlists`), 1200);
-    } catch (e) {
-      saveErr = (e as Error).message ?? 'Save failed';
-    } finally {
-      saving = false;
+  // Save skips tracks still being matched, so let the background matcher
+  // finish first (bounded by the poll deadline).
+  async function settlePending(seq: number) {
+    while (seq === loadSeq && pendingIds.length > 0 && Date.now() <= pollDeadline) {
+      await new Promise((r) => setTimeout(r, 400));
     }
+  }
+
+  function skippedNote(res: { unresolvedCount: number; importFailures: number }): string {
+    const skipped = res.unresolvedCount + (res.importFailures ?? 0);
+    return skipped > 0 ? ` ${skipped} not on TIDAL were skipped.` : '';
+  }
+
+  async function saveToLibrary(seq: number) {
+    const res = await api.saveSpotifyPlaylist(spotifyId);
+    if (seq !== loadSeq) return;
+    savedPlaylist = res.playlist;
+    const name = res.playlist.name;
+    if (!res.updated) {
+      showToast(`Saved ${res.added} tracks to ${name}.${skippedNote(res)}`, 'success');
+    } else if (res.added > 0) {
+      showToast(`Added ${res.added} new tracks to ${name}.${skippedNote(res)}`, 'success');
+    } else {
+      showToast(`${name} is up to date.`, 'info');
+    }
+  }
+
+  async function save() {
+    if (!detail || busy) return;
+    const seq = loadSeq;
+    busy = 'saving';
+    try {
+      await settlePending(seq);
+      await saveToLibrary(seq);
+    } catch (e) {
+      showToast(actionErrorMessage(e, "Couldn't save this playlist. Try again."), 'error');
+    } finally {
+      busy = null;
+    }
+  }
+
+  // Re-read the playlist from Spotify (not the server's cached copy), match
+  // the new tracks, then append them to the saved copy.
+  async function updateFromSpotify() {
+    const id = spotifyId.trim();
+    if (!detail || busy || !id) return;
+    const seq = loadSeq;
+    busy = 'updating';
+    try {
+      const res = await api.getSpotifyPlaylist(id, undefined, { refresh: true });
+      if (seq !== loadSeq) return;
+      applyLoaded(id, res, seq);
+      if (!savedPlaylist) return;
+      await settlePending(seq);
+      await saveToLibrary(seq);
+    } catch (e) {
+      showToast(actionErrorMessage(e, "Couldn't update from Spotify. Try again."), 'error');
+    } finally {
+      busy = null;
+    }
+  }
+
+  // Match again the tracks that found nothing on TIDAL or only a doubtful
+  // match, ignoring cached misses (TIDAL adds catalog all the time).
+  async function rescanUnmatched() {
+    if (!detail || busy) return;
+    const ids = detail.tracks
+      .filter((t) => t.spotifyId && t.tidal.status !== 'resolved' && t.tidal.status !== 'pending')
+      .map((t) => t.spotifyId as string);
+    if (ids.length === 0) return;
+    const seq = loadSeq;
+    busy = 'rescanning';
+    try {
+      const entries = await api.resolveTidalBulk(ids, true);
+      if (seq !== loadSeq || !detail) return;
+      const byId = new Map(entries.map((e) => [e.spotifyId, e.tidal]));
+      const before = playableCount;
+      detail = {
+        ...detail,
+        tracks: detail.tracks.map((t) => {
+          const next = t.spotifyId ? byId.get(t.spotifyId) : undefined;
+          return next ? { ...t, tidal: next } : t;
+        }),
+      };
+      const found = playableCount - before;
+      showToast(
+        found > 0 ? `Found ${found} more on TIDAL.` : 'No new matches on TIDAL yet.',
+        found > 0 ? 'success' : 'info',
+      );
+    } catch (e) {
+      showToast(actionErrorMessage(e, "Couldn't rescan tracks. Try again."), 'error');
+    } finally {
+      busy = null;
+    }
+  }
+
+  function openOnSpotify() {
+    const id = spotifyId.trim();
+    if (id) void openExternal(`https://open.spotify.com/playlist/${encodeURIComponent(id)}`);
   }
 
   function formatNumber(n: number | null): string {
@@ -403,14 +497,30 @@
   );
   const playableCount = $derived(detail?.tracks.filter(isPlayable).length ?? 0);
   const totalCount = $derived(detail?.tracks.length ?? 0);
+  // Tracks a rescan can help: no TIDAL match, a doubtful one, or an error.
+  const unmatchedCount = $derived(
+    detail?.tracks.filter((t) => t.tidal.status !== 'resolved' && t.tidal.status !== 'pending').length ?? 0,
+  );
 
-  // Secondary queue actions live in More, so every detail hero shares one
-  // action order (STYLING.md "ActionBar").
+  // Secondary actions live in More, so every detail hero shares one action
+  // order (STYLING.md "ActionBar").
   function openHeroMore(event: MouseEvent) {
-    openContextMenu(event, [
-      { label: 'Play next', icon: '\u2934', onSelect: () => void playAllNext() },
-      { label: 'Add to queue', icon: '\uFF0B', onSelect: () => void addAllToQueue() },
-    ], 'Spotify playlist');
+    event.preventDefault();
+    event.stopPropagation();
+    const items: MenuItem[] = [
+      { label: 'Play next', icon: '\u2934', disabled: playableCount === 0, onSelect: () => void playAllNext() },
+      { label: 'Add to queue', icon: '\uFF0B', disabled: playableCount === 0, onSelect: () => void addAllToQueue() },
+      { separator: true, label: '' },
+      {
+        label: 'Rescan unmatched tracks',
+        icon: '\u21BB',
+        disabled: unmatchedCount === 0 || busy !== null,
+        hint: unmatchedCount === 0 ? 'Every track has a TIDAL match' : undefined,
+        onSelect: () => void rescanUnmatched(),
+      },
+      { label: 'Open in Spotify', icon: '\u2197', onSelect: openOnSpotify },
+    ];
+    openMenuAtElement(event.currentTarget as HTMLElement, items, 'Spotify playlist');
   }
 </script>
 
@@ -430,7 +540,7 @@
   {:else if detail}
     {@const heroDetail = detail as SpotifyPlaylistDetail}
     <DetailHero
-      eyebrow="Spotify playlist · ephemeral"
+      eyebrow="External playlist"
       title={heroDetail.title ?? 'Untitled playlist'}
       artwork={heroDetail.thumbnail}
       backdrop={heroDetail.thumbnail}
@@ -438,6 +548,7 @@
       variant="immersive"
     >
       {#snippet meta()}
+          <SpotifySourceBadge />
           {#if heroDetail.owner}
             <span>By {heroDetail.owner}</span>
           {/if}
@@ -446,13 +557,24 @@
           {/if}
           <span>· {totalCount} tracks</span>
           <span class="resolved-count">· {resolvedCount} playable on TIDAL</span>
+          {#if unmatchedCount > 0}
+            <span>·</span>
+            <button type="button" class="meta-link" disabled={busy !== null}
+              title="Look for these tracks on TIDAL again" onclick={() => void rescanUnmatched()}>
+              {busy === 'rescanning' ? 'Rescanning...' : `Rescan ${unmatchedCount} unmatched`}
+            </button>
+          {/if}
       {/snippet}
       {#snippet details()}
         {#if heroDetail.description}
           <p class="description">{heroDetail.description}</p>
         {/if}
-        {#if saveResult}<p class="toast success">{saveResult}</p>{/if}
-        {#if saveErr}<p class="toast error">Save failed: {saveErr}</p>{/if}
+        {#if savedPlaylist}
+          <p class="saved-line">
+            Saved to your library as
+            <a href={`/playlists/${savedPlaylist.id}`}>{savedPlaylist.name}</a>
+          </p>
+        {/if}
       {/snippet}
       {#snippet actions()}
           <ActionBar
@@ -461,13 +583,24 @@
             onshuffle={playableCount > 0 ? shuffleAll : undefined}
             onradio={playableCount > 0 ? startPlaylistRadio : undefined}
             radioLabel="Song radio"
-            onlike={resolvedCount > 0 ? save : undefined}
-            likeLabel="Save to library"
-            likePending={saving}
-            onmore={playableCount > 0 ? openHeroMore : undefined}
+            onmore={openHeroMore}
+            moreLabel="More playlist actions"
           >
+          {#if savedPlaylist}
+            <button type="button" class="btn btn-secondary" disabled={busy !== null}
+              title="Add tracks added on Spotify since you saved it"
+              onclick={() => void updateFromSpotify()}>
+              {busy === 'updating' ? 'Updating...' : 'Update from Spotify'}
+            </button>
+          {:else}
+            <button type="button" class="btn btn-secondary" disabled={busy !== null || resolvedCount === 0}
+              title="Save the TIDAL matches as a playlist in your library"
+              onclick={() => void save()}>
+              {busy === 'saving' ? 'Saving...' : 'Save playlist'}
+            </button>
+          {/if}
           {#if pendingIds.length > 0}
-            <span class="resolving-badge">Resolving {pendingIds.length} more…</span>
+            <span class="resolving-badge">Matching {pendingIds.length} more on TIDAL...</span>
           {/if}
           </ActionBar>
       {/snippet}
@@ -588,15 +721,23 @@
     color: var(--text-muted);
     font-style: italic;
   }
-  .toast {
-    margin: var(--space-2) 0 0;
-    font-size: var(--font-size-xs);
-    padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
-    width: fit-content;
+  .meta-link {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--accent-line, #7dc8af);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
-  .toast.success { background: rgba(125, 200, 175, 0.12); color: var(--accent); }
-  .toast.error { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+  .meta-link:disabled { cursor: default; opacity: 0.6; }
+  .saved-line {
+    margin: 0;
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+  }
+  .saved-line a { color: var(--text-primary); font-weight: var(--font-weight-semibold); }
 
   .tracks { list-style: none; margin: 0; padding: 0; }
   .row {

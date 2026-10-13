@@ -277,6 +277,34 @@ pub fn new_playlist_track_ids(
         .collect())
 }
 
+/// The library playlist saved from this Spotify playlist, if any. Several
+/// can exist only from saves made before the link was recorded; newest wins.
+pub fn find_spotify_source_playlist(
+    conn: &Connection,
+    spotify_id: &str,
+) -> Result<Option<Playlist>> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM playlists WHERE spotify_source_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![spotify_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match id {
+        Some(id) => get_playlist(conn, id),
+        None => Ok(None),
+    }
+}
+
+/// Record the Spotify playlist a library playlist was saved from.
+pub fn set_spotify_source(conn: &Connection, playlist_id: i64, spotify_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE playlists SET spotify_source_id = ?2 WHERE id = ?1",
+        params![playlist_id, spotify_id],
+    )?;
+    Ok(())
+}
+
 /// Bulk-insert tracks into a playlist, skipping any already present.
 /// Returns the number of tracks actually inserted.
 pub fn add_tracks_to_playlist(

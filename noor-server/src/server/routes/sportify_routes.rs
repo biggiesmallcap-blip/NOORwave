@@ -227,12 +227,16 @@ async fn load_playlist(
     db: &crate::db::Database,
     cache_cfg: &crate::services::sportify::cache::SportifyCacheConfig,
     id: &str,
+    refresh: bool,
 ) -> Result<crate::services::sportify::models::SportifyPlaylist, (StatusCode, Json<Value>)> {
     use crate::services::sportify::cache as sp_cache;
 
-    if let Some(cached) = db
-        .with_conn(|conn| sp_cache::get_playlist_meta(conn, cache_cfg, id))
-        .map_err(super::internal)?
+    // `refresh` skips the cached copy so Update sees tracks added on Spotify
+    // since the playlist was last opened.
+    if !refresh
+        && let Some(cached) = db
+            .with_conn(|conn| sp_cache::get_playlist_meta(conn, cache_cfg, id))
+            .map_err(super::internal)?
     {
         return Ok(cached);
     }
@@ -403,9 +407,16 @@ pub(super) async fn sportify_discovery_album(
     })))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct SportifyPlaylistQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
 pub(super) async fn sportify_discovery_playlist(
     State(state): State<SharedState>,
     Path(spotify_id): Path<String>,
+    Query(query): Query<SportifyPlaylistQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use crate::services::sportify::{normalize, stats};
 
@@ -433,12 +444,21 @@ pub(super) async fn sportify_discovery_playlist(
         ));
     };
 
-    let playlist = load_playlist(&sportify_client, &spotify_public, &db, &cache_cfg, id).await?;
-    db.with_conn(|conn| {
-        stats::write_track_playcounts(conn, &playlist.tracks);
-        Ok::<_, anyhow::Error>(())
-    })
-    .map_err(super::internal)?;
+    let playlist = load_playlist(
+        &sportify_client,
+        &spotify_public,
+        &db,
+        &cache_cfg,
+        id,
+        query.refresh,
+    )
+    .await?;
+    let saved_playlist = db
+        .with_conn(|conn| {
+            stats::write_track_playcounts(conn, &playlist.tracks);
+            queries::find_spotify_source_playlist(conn, id)
+        })
+        .map_err(super::internal)?;
 
     let mut row = normalize::playlist_from_sportify(&playlist, "sportify_playlist");
     db.with_conn(|conn| {
@@ -450,6 +470,7 @@ pub(super) async fn sportify_discovery_playlist(
     Ok(Json(json!({
         "playlist": serde_json::to_value(row).unwrap_or(json!({})),
         "pendingSpotifyIds": pending_ids,
+        "savedPlaylist": saved_playlist,
     })))
 }
 
@@ -481,7 +502,15 @@ pub(super) async fn sportify_discovery_playlist_meta(
         ));
     };
 
-    let playlist = load_playlist(&sportify_client, &spotify_public, &db, &cache_cfg, id).await?;
+    let playlist = load_playlist(
+        &sportify_client,
+        &spotify_public,
+        &db,
+        &cache_cfg,
+        id,
+        false,
+    )
+    .await?;
 
     Ok(Json(sportify_playlist_meta_value(id, &playlist)))
 }
@@ -1108,11 +1137,15 @@ struct SportifyImportSummary {
     local_ids: Vec<i64>,
 }
 
-/// Save an ephemeral Spotify-sourced playlist into the user's library.
+/// Save an external Spotify playlist into the user's library.
 ///
 /// Pre-condition: the playlist's tracks have been bulk-resolved against
-/// TIDAL (the ephemeral view does this on open). Tracks without a cached
-/// resolution are skipped. We never invent a placeholder TIDAL id.
+/// TIDAL (the external playlist view does this on open). Tracks without a
+/// cached resolution are skipped. We never invent a placeholder TIDAL id.
+///
+/// The saved copy records its Spotify source. Saving again appends the
+/// matched tracks it does not have yet (Update) instead of creating a
+/// duplicate; tracks the listener removed or reordered are left alone.
 pub(super) async fn save_spotify_playlist(
     State(state): State<SharedState>,
     Json(body): Json<SaveSpotifyPlaylistBody>,
@@ -1143,7 +1176,15 @@ pub(super) async fn save_spotify_playlist(
         ));
     };
 
-    let playlist = load_playlist(&sportify_client, &spotify_public, &db, &cache_cfg, id).await?;
+    let playlist = load_playlist(
+        &sportify_client,
+        &spotify_public,
+        &db,
+        &cache_cfg,
+        id,
+        false,
+    )
+    .await?;
 
     let playlist_name = body
         .name
@@ -1235,25 +1276,35 @@ pub(super) async fn save_spotify_playlist(
         ));
     }
 
-    // Create the playlist row and bulk-add tracks in a single transaction.
+    // Append to the saved copy, or create it, in a single transaction.
     let result = db
         .with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
-                 VALUES (?1, ?2, 0, 0, 0)",
-                params![playlist_name, playlist.description],
-            )?;
-            let playlist_id = conn.last_insert_rowid();
-            let added = queries::add_tracks_to_playlist(conn, playlist_id, &local_ids)?;
-            let row = queries::get_playlist(conn, playlist_id)?
+            let tx = conn.unchecked_transaction()?;
+            let (playlist_id, updated) = match queries::find_spotify_source_playlist(&tx, id)? {
+                Some(existing) => (existing.id, true),
+                None => {
+                    tx.execute(
+                        "INSERT INTO playlists (name, description, is_smart, is_synced, track_count)
+                         VALUES (?1, ?2, 0, 0, 0)",
+                        params![playlist_name, playlist.description],
+                    )?;
+                    let playlist_id = tx.last_insert_rowid();
+                    queries::set_spotify_source(&tx, playlist_id, id)?;
+                    (playlist_id, false)
+                }
+            };
+            let added = queries::add_tracks_to_playlist(&tx, playlist_id, &local_ids)?;
+            let row = queries::get_playlist(&tx, playlist_id)?
                 .ok_or_else(|| anyhow::anyhow!("playlist not found after insert"))?;
-            Ok::<_, anyhow::Error>((row, added))
+            tx.commit()?;
+            Ok::<_, anyhow::Error>((row, added, updated))
         })
         .map_err(super::internal)?;
 
     Ok(Json(json!({
         "playlist": result.0,
         "added": result.1,
+        "updated": result.2,
         "totalTracks": total_tracks,
         "resolvedCount": resolved_count,
         "unresolvedCount": unresolved_count,
