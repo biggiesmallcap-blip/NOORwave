@@ -466,6 +466,12 @@
 		if (!renderer) return;
 		event.preventDefault();
 		const p = local(event);
+		// A sideways trackpad swipe pans; everything else zooms.
+		if (!event.ctrlKey && event.deltaMode === 0 && Math.abs(event.deltaX) > Math.abs(event.deltaY) * 1.5) {
+			renderer.panBy(-event.deltaX, -event.deltaY);
+			tip = null;
+			return;
+		}
 		const unit = event.deltaMode === 1 ? 0.05 : event.deltaMode === 2 ? 0.5 : event.ctrlKey ? 0.01 : 0.0018;
 		const factor = Math.exp(-event.deltaY * unit);
 		renderer.zoomAt(p.x, p.y, Math.min(4, Math.max(0.25, factor)));

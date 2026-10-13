@@ -302,6 +302,8 @@ export class AtlasRenderer {
 	private labels: PlannedLabel[] = [];
 	private labelsAt = -Infinity;
 	private labelsStale = true;
+	/** The last plan used the reduced in-motion candidate set. */
+	private labelsPartial = false;
 
 	// Motion.
 	private raf = 0;
@@ -321,6 +323,7 @@ export class AtlasRenderer {
 	private scratchPt: Point = { x: 0, y: 0 };
 	private lastCam: Camera = { cx: NaN, cy: NaN, scale: NaN };
 	private destroyed = false;
+	private warmToken = 0;
 
 	readonly hit: HitResult = { kind: 'none', index: -1 };
 
@@ -385,6 +388,7 @@ export class AtlasRenderer {
 		this.labelsStale = true;
 		this.schedulePulse();
 		this.requestDraw();
+		this.warmLabelWidths();
 	}
 
 	setNames(names: Map<number, string>): void {
@@ -424,6 +428,34 @@ export class AtlasRenderer {
 		this.sceneBoxes = [];
 		this.labelsStale = true;
 		this.requestDraw();
+		this.warmLabelWidths();
+	}
+
+	/**
+	 * Measure artist names in idle time, biggest first, so the first zoom
+	 * into a dense scene does not pay for hundreds of text shapings at once.
+	 */
+	private warmLabelWidths(): void {
+		const data = this.data;
+		if (!data || this.mini || typeof window === 'undefined') return;
+		const token = ++this.warmToken;
+		const order = Array.from({ length: data.count }, (_, i) => i).sort((a, b) => data.globalRank[a] - data.globalRank[b]);
+		let at = 0;
+		const idle: (cb: () => void) => void =
+			'requestIdleCallback' in window ? (cb) => window.requestIdleCallback(cb, { timeout: 500 }) : (cb) => setTimeout(cb, 30);
+		const step = () => {
+			if (this.destroyed || token !== this.warmToken || this.data !== data) return;
+			this.ctx.font = `600 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+			const end = Math.min(order.length, at + 300);
+			for (; at < end; at++) {
+				const i = order[at];
+				if (this.artistWidth[i] >= 0) continue;
+				const name = this.names.get(data.ids[i]);
+				if (name) this.artistWidth[i] = this.ctx.measureText(name).width;
+			}
+			if (at < order.length) idle(step);
+		};
+		idle(step);
 	}
 
 	destroy(): void {
@@ -836,10 +868,12 @@ export class AtlasRenderer {
 		}
 		// Re-plan labels at most ~11 times a second while moving, and once when
 		// the camera settles, so motion never pays for placement every frame.
+		if (!animating && this.labelsPartial) this.labelsStale = true;
 		if (data && this.labelsStale && (!animating || now - this.labelsAt > 90)) {
-			this.computeLabels();
+			this.computeLabels(animating);
 			this.labelsAt = now;
 			this.labelsStale = false;
+			this.labelsPartial = animating;
 		}
 		this.draw(now);
 		this.dirty = false;
@@ -898,7 +932,8 @@ export class AtlasRenderer {
 		return this.zoomLevel() >= 1.45 || s === this.hoverScene || s === this.selectedScene;
 	}
 
-	private computeLabels(): void {
+	/** In motion, fewer candidates keep placement cheap; the settle pass places them all. */
+	private computeLabels(moving = false): void {
 		const data = this.data;
 		if (!data || !this.grid) return;
 		const ctx = this.ctx;
@@ -929,6 +964,7 @@ export class AtlasRenderer {
 			focusScene: this.selectedScene,
 			compact: this.compact,
 			artistLabelHeight: ARTIST_FONT_PX + 3,
+			maxArtistCandidates: moving ? 160 : undefined,
 		});
 	}
 
