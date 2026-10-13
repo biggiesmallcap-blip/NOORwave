@@ -283,7 +283,18 @@ impl ExclusiveRenderSourceBank {
     }
 
     pub fn set_sources(&self, sources: Vec<ExclusiveRenderSource>) {
-        let mut guard = match self.sources.write() {
+        // A writer blocked in `write()` makes the render thread's `try_read`
+        // fail, so a track-change publication could cost a silent period at
+        // the seam. Poll instead; the render thread holds its read guard only
+        // for one period's bounded mix.
+        let locked = loop {
+            match self.sources.try_write() {
+                Ok(guard) => break Ok(guard),
+                Err(TryLockError::Poisoned(error)) => break Err(error),
+                Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_micros(200)),
+            }
+        };
+        let mut guard = match locked {
             Ok(guard) => guard,
             Err(error) => {
                 warn!(target: "playback", "WASAPI source publication recovered a poisoned bank");
@@ -394,8 +405,12 @@ impl Drop for ExclusiveStream {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        let contended_periods = self.source_bank.contended_periods.load(Ordering::Relaxed);
-        let poisoned_periods = self.source_bank.poisoned_periods.load(Ordering::Relaxed);
+        // The bank outlives each stream; report this stream's periods only.
+        let contended_periods = self
+            .source_bank
+            .contended_periods
+            .swap(0, Ordering::Relaxed);
+        let poisoned_periods = self.source_bank.poisoned_periods.swap(0, Ordering::Relaxed);
         if contended_periods != 0 || poisoned_periods != 0 {
             warn!(target: "playback", contended_periods, poisoned_periods,
                 "WASAPI source bank rendered silence while unavailable");
@@ -1078,10 +1093,14 @@ fn initialize_candidates<T>(
     Err(final_failure)
 }
 
-fn select_probed_exclusive_format(
-    requested: WaveFormat,
+/// The driver-quirk representation (WAVEFORMATEX or another speaker mask)
+/// the support query accepted, when it differs from `requested` only in that
+/// representation. The query is unreliable while the shared engine holds the
+/// device, so it is only a fallback after Initialize rejects `requested`.
+fn quirk_exclusive_format(
+    requested: &WaveFormat,
     probed: std::result::Result<WaveFormat, WasapiError>,
-) -> WaveFormat {
+) -> Option<WaveFormat> {
     if let Ok(supported) = probed {
         let same_sample_type = matches!(
             (requested.get_subformat(), supported.get_subformat()),
@@ -1093,13 +1112,13 @@ fn select_probed_exclusive_format(
             && supported.get_validbitspersample() == requested.get_validbitspersample()
             && supported.get_blockalign() == requested.get_blockalign()
             && same_sample_type
+            && format!("{supported:?}") != format!("{requested:?}")
         {
-            return supported;
+            return Some(supported);
         }
     }
-    // Initialize remains authoritative when a driver's support query rejects
-    // the format; a probe must never alter source rate or PCM interpretation.
-    requested
+    // A probe must never alter source rate or PCM interpretation.
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1134,11 +1153,11 @@ fn try_initialize_one(
             .map_err(|e| ExclusiveInitFailure::Other(format!("default render device: {e}")))?,
     };
 
-    let mut audio_client = device
+    let audio_client = device
         .get_iaudioclient()
         .map_err(|e| ExclusiveInitFailure::Other(format!("get_iaudioclient: {e}")))?;
 
-    let format = WaveFormat::new(
+    let requested = WaveFormat::new(
         storebits,
         validbits,
         sample_type,
@@ -1146,9 +1165,56 @@ fn try_initialize_one(
         channels as usize,
         None,
     );
-    let probed = audio_client.is_supported_exclusive_with_quirks(&format);
-    let format = select_probed_exclusive_format(format, probed);
+    let quirk = quirk_exclusive_format(
+        &requested,
+        audio_client.is_supported_exclusive_with_quirks(&requested),
+    );
+    let initialize = |audio_client, format: &WaveFormat| {
+        initialize_exclusive_client(
+            &device,
+            audio_client,
+            format,
+            desired_sample_rate,
+            channels,
+            fmt_tag,
+            latency_mode,
+        )
+    };
+    match (initialize(audio_client, &requested), quirk) {
+        (Err(ExclusiveInitFailure::FormatRejected(reason)), Some(quirk)) => {
+            info!(
+                target: "playback",
+                "WASAPI exclusive retrying {:?} with the driver's accepted representation after: {reason}",
+                fmt_tag_label(fmt_tag)
+            );
+            let retry_client = device.get_iaudioclient().map_err(|err| {
+                ExclusiveInitFailure::Other(format!("get_iaudioclient quirk retry: {err}"))
+            })?;
+            initialize(retry_client, &quirk)
+        }
+        (result, _) => result,
+    }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn initialize_exclusive_client(
+    device: &wasapi::Device,
+    mut audio_client: wasapi::AudioClient,
+    format: &WaveFormat,
+    desired_sample_rate: u32,
+    channels: u16,
+    fmt_tag: Format,
+    latency_mode: &ExclusiveLatencyMode,
+) -> std::result::Result<
+    (
+        wasapi::AudioClient,
+        wasapi::AudioRenderClient,
+        wasapi::Handle,
+        usize,
+        Format,
+    ),
+    ExclusiveInitFailure,
+> {
     let blockalign = format.get_blockalign() as usize;
 
     let (def_period, min_period) = audio_client
@@ -1156,13 +1222,13 @@ fn try_initialize_one(
         .map_err(|e| ExclusiveInitFailure::Other(format!("get_device_period: {e}")))?;
     let target_period = target_exclusive_period_hns(def_period, min_period, latency_mode);
     let mut chosen_period = audio_client
-        .calculate_aligned_period_near(target_period, Some(128), &format)
+        .calculate_aligned_period_near(target_period, Some(128), format)
         .map_err(|e| ExclusiveInitFailure::Other(format!("calculate aligned period: {e}")))?;
     let mode = StreamMode::EventsExclusive {
         period_hns: chosen_period,
     };
 
-    if let Err(e) = audio_client.initialize_client(&format, &Direction::Render, &mode) {
+    if let Err(e) = audio_client.initialize_client(format, &Direction::Render, &mode) {
         let classification = classify_init_error_kind(&e);
         // Always log the raw HRESULT so we have ground-truth diagnostic data
         // when classification falls through to "Other" (i.e. something we
@@ -1201,7 +1267,7 @@ fn try_initialize_one(
                 period_hns: aligned_period,
             };
             if let Err(retry_err) =
-                retry_client.initialize_client(&format, &Direction::Render, &retry_mode)
+                retry_client.initialize_client(format, &Direction::Render, &retry_mode)
             {
                 return Err(classify_init_error(&retry_err));
             }
@@ -2296,7 +2362,7 @@ mod tests {
     fn exclusive_format_probe_uses_supported_channel_mask_without_changing_pcm_layout() {
         let requested = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(3));
         let supported = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(0));
-        let selected = select_probed_exclusive_format(requested, Ok(supported));
+        let selected = quirk_exclusive_format(&requested, Ok(supported)).expect("mask quirk");
         assert_eq!(selected.get_dwchannelmask(), 0);
         assert_eq!(selected.get_samplespersec(), 48_000);
         assert_eq!(selected.get_blockalign(), 8);
@@ -2312,31 +2378,28 @@ mod tests {
             WaveFormat::new(32, 32, &SampleType::Float, 48_000, 2, Some(3)),
         ] {
             let requested = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(3));
-            let selected = select_probed_exclusive_format(requested, Ok(supported));
-            assert_eq!(selected.get_samplespersec(), 48_000);
-            assert_eq!(selected.get_nchannels(), 2);
-            assert_eq!(selected.get_bitspersample(), 32);
-            assert_eq!(selected.get_validbitspersample(), 24);
-            assert_eq!(selected.get_dwchannelmask(), 3);
+            assert!(quirk_exclusive_format(&requested, Ok(supported)).is_none());
         }
+    }
+
+    #[test]
+    fn exclusive_format_probe_offers_no_retry_when_the_request_itself_was_accepted() {
+        let requested = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(3));
+        assert!(quirk_exclusive_format(&requested, Ok(requested.clone())).is_none());
     }
 
     #[test]
     fn exclusive_format_probe_failure_preserves_initialize_as_authoritative_attempt() {
         let requested = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, Some(3));
-        let selected =
-            select_probed_exclusive_format(requested, Err(WasapiError::UnsupportedFormat));
-        assert_eq!(selected.get_samplespersec(), 48_000);
-        assert_eq!(selected.get_bitspersample(), 32);
-        assert_eq!(selected.get_validbitspersample(), 24);
-        assert_eq!(selected.get_dwchannelmask(), 3);
+        assert!(quirk_exclusive_format(&requested, Err(WasapiError::UnsupportedFormat)).is_none());
     }
 
     #[test]
     fn exclusive_format_probe_accepts_unambiguous_waveformatex_representation() {
         let requested = WaveFormat::new(16, 16, &SampleType::Int, 44_100, 2, Some(3));
         let supported = requested.to_waveformatex().expect("unambiguous16-bit PCM");
-        let selected = select_probed_exclusive_format(requested, Ok(supported));
+        let selected =
+            quirk_exclusive_format(&requested, Ok(supported)).expect("WAVEFORMATEX quirk");
         let cb_size = selected.as_waveformatex_ref().cbSize;
         assert_eq!(cb_size, 0);
         assert_eq!(selected.get_samplespersec(), 44_100);

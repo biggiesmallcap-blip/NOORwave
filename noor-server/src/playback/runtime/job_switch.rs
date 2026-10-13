@@ -84,7 +84,7 @@ pub(super) fn transition_to_job(
 
     let output_state_update = transition_output_state_update(
         job.output_sample_rate,
-        state.current_sample_rate_follow,
+        state.follows_source_rate(),
         state.device_sample_rate,
     );
     if let Some(update) = output_state_update {
@@ -112,7 +112,7 @@ pub(super) fn transition_to_job(
                     && prepared_engine_matches_output_rate(
                         e.shared.target_sample_rate.load(Ordering::Relaxed),
                         job.output_sample_rate,
-                        state.current_sample_rate_follow,
+                        state.follows_source_rate(),
                     )
             })
             .unwrap_or(false);

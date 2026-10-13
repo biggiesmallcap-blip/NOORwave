@@ -15,17 +15,16 @@ pub(super) fn poll_exclusive_output_fault(
         return;
     };
     let output_live = stream.output_live();
-    let Some(engine) = state
-        .engine
-        .as_ref()
-        .or(state.next_engine.as_ref())
-        .or(state.fading_out_engine.as_ref())
-        .or(state.drop_preview_engine.as_ref())
-    else {
-        return;
+    // The render thread suppresses its release event for faults, so a fault
+    // while no deck is loaded must still be reported or the UI keeps showing
+    // exclusive mode engaged on a dead device.
+    let (generation, decoder_stop) = match state.live_engines().next() {
+        Some(engine) => (engine.generation, engine.shared.stop_flag()),
+        None => match state.requested_generation {
+            Some(generation) => (generation, Arc::new(AtomicBool::new(false))),
+            None => return,
+        },
     };
-    let generation = engine.generation;
-    let decoder_stop = engine.shared.stop_flag();
     hard_pause_for_output_fault(
         state,
         event_tx,
@@ -36,18 +35,13 @@ pub(super) fn poll_exclusive_output_fault(
     );
 }
 
-fn retarget_exclusive_engines<'a>(
-    engines: impl Iterator<Item = &'a mut PlaybackEngine>,
+/// Buffered PCM cannot change rate in place: every live deck must already be
+/// decoded at the exclusive stream's rate before the device is reopened.
+fn require_engines_decoded_at<'a>(
+    mut engines: impl Iterator<Item = &'a PlaybackEngine>,
     sample_rate: u32,
 ) -> Result<()> {
-    for engine in engines {
-        engine::require_decoded_output_rate(&engine.shared, sample_rate)?;
-        engine
-            .shared
-            .target_sample_rate
-            .store(sample_rate, Ordering::Relaxed);
-    }
-    Ok(())
+    engines.try_for_each(|engine| engine::require_decoded_output_rate(&engine.shared, sample_rate))
 }
 
 fn rebuild_shared_engine_outputs<'a>(
@@ -179,20 +173,20 @@ mod tests {
 
     #[test]
     fn exclusive_acquisition_rejects_mismatched_decoded_rates() {
-        let mut engines = [engine(1), engine(2), engine(3), engine(4)];
+        let engines = [engine(1), engine(2), engine(3), engine(4)];
         for engine in &engines {
             engine
                 .shared
                 .target_sample_rate
                 .store(48_000, Ordering::Relaxed);
         }
-        assert!(retarget_exclusive_engines(engines.iter_mut(), 96_000).is_err());
+        assert!(require_engines_decoded_at(engines.iter(), 96_000).is_err());
         assert!(
             engines
                 .iter()
                 .all(|engine| engine.shared.target_sample_rate.load(Ordering::Relaxed) == 48_000)
         );
-        assert!(retarget_exclusive_engines(engines.iter_mut(), 48_000).is_ok());
+        assert!(require_engines_decoded_at(engines.iter(), 48_000).is_ok());
     }
 }
 
@@ -263,8 +257,8 @@ pub(super) fn ensure_exclusive_sink_started(
         return Ok(stream.effective_sample_rate);
     }
     let output_identity = state.exclusive_sink.retire_stream();
-    retarget_exclusive_engines(
-        state.live_engines_mut(),
+    require_engines_decoded_at(
+        state.live_engines(),
         exclusive_plan.stream_config.sample_rate,
     )?;
 
@@ -299,8 +293,9 @@ pub(super) fn ensure_exclusive_sink_started(
         Ok(stream) => {
             let actual_rate = stream.effective_sample_rate;
             let transport_format = stream.transport_format.clone();
+            // The render thread opens exactly the planned rate, which was
+            // validated against every live deck above.
             state.exclusive_sink.stream = Some(stream);
-            retarget_exclusive_engines(state.live_engines_mut(), actual_rate)?;
             drop(pause_guards);
             let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
                 output_identity,

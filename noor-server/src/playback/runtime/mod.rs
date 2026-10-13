@@ -331,6 +331,14 @@ impl PlaybackRuntimeLoopState {
         .flatten()
     }
 
+    /// Source-rate matching changes the device rate, which only exclusive
+    /// output can do. cpal 0.18 shared streams accept any rate through the
+    /// Windows converter, so requesting the source rate there would hand
+    /// resampling to Windows and report a rate the device is not running at.
+    fn follows_source_rate(&self) -> bool {
+        self.current_sample_rate_follow && self.current_exclusive
+    }
+
     fn live_engines_mut(&mut self) -> impl Iterator<Item = &mut PlaybackEngine> {
         [
             self.engine.as_mut(),

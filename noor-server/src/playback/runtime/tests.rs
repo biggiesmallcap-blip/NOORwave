@@ -6753,3 +6753,47 @@ fn publishing_an_engine_keeps_identity_apart_from_dj_telemetry() {
         &engine.shared.handoff_elapsed_samples
     ));
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn exclusive_output_fault_without_a_loaded_deck_is_still_reported() {
+    use crate::playback::wasapi_exclusive::{ExclusiveRenderFault, ExclusiveStream};
+    let mut state = test_runtime_loop_state();
+    state.current_exclusive = true;
+    state.requested_generation = Some(7);
+    state.exclusive_sink.stream = Some(ExclusiveStream::test_released_with_fault(
+        ExclusiveRenderFault::DeviceWriteFailed,
+    ));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    poll_exclusive_output_fault(&mut state, &event_tx);
+    match event_rx.try_recv().unwrap() {
+        PlaybackRuntimeEvent::OutputFault {
+            active_track_id,
+            generation,
+            ..
+        } => {
+            assert_eq!(active_track_id, None);
+            assert_eq!(generation, 7);
+        }
+        other => panic!("expected output fault, got {other:?}"),
+    }
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::Paused { track_id: None })
+    ));
+}
+
+#[test]
+fn source_rate_matching_applies_to_exclusive_output_only() {
+    let mut state = test_runtime_loop_state();
+    state.current_sample_rate_follow = true;
+    state.current_exclusive = false;
+    assert!(
+        !state.follows_source_rate(),
+        "shared streams stay at the mix rate and resample in rubato"
+    );
+    state.current_exclusive = true;
+    assert!(state.follows_source_rate());
+    state.current_sample_rate_follow = false;
+    assert!(!state.follows_source_rate());
+}

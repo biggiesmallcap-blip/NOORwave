@@ -173,8 +173,9 @@ pub(crate) fn emit_cpal_stream_error(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        // The claim gives this producer sole access to initialization. Moving
-        // the owned diagnostic neither formats nor frees its payload here.
+        // Only the first fatal error is kept. The claim keeps the OnceLock
+        // initialization uncontended, so a callback never waits on another;
+        // later errors are simply dropped.
         let _ = callback.error.set(err);
     }
 }
