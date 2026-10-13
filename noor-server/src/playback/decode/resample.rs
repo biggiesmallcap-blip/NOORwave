@@ -82,9 +82,10 @@ impl StreamResampler {
             oversampling_factor: 256,
             window: rubato::WindowFunction::BlackmanHarris2,
         };
+        // The ratio never changes, so no relative headroom is needed.
         let inner = rubato::SincFixedIn::<f32>::new(
             out_rate as f64 / in_rate as f64,
-            2.0,
+            1.0,
             params,
             Self::CHUNK_SIZE_IN,
             channels,
