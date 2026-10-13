@@ -867,22 +867,33 @@
 	.fs-actions {
 		position: absolute;
 		z-index: 3;
-		right: 14px;
+		/* Right edges line up with the fullscreen button: 14px of padding
+		   plus the 6px its 34px button leaves in the bar's last 40px track. */
+		right: 20px;
 		bottom: 60px;
 		display: flex;
 		gap: 8px;
 		transition: opacity var(--motion-base), transform var(--motion-base);
 	}
 
+	/* The bar's own pill look (quality, autoplay): a light wash over the
+	   picture, the theme accent once saved. */
 	.fs-pill {
 		height: 34px;
-		padding: 0 12px;
+		padding: 0 14px;
 		border: 1px solid rgba(255, 255, 255, 0.16);
 		border-radius: 999px;
-		background: rgba(12, 12, 16, 0.76);
-		color: rgba(255, 255, 255, 0.92);
+		background: rgba(255, 255, 255, 0.1);
+		color: rgba(255, 255, 255, 0.84);
 		font-size: var(--font-size-xs);
 		font-weight: 800;
+		transition: background var(--motion-fast), color var(--motion-fast);
+	}
+
+	.fs-pill:hover:not(:disabled),
+	.fs-pill[aria-expanded='true'] {
+		background: rgba(255, 255, 255, 0.18);
+		color: #fff;
 	}
 
 	.fs-pill.heart {
