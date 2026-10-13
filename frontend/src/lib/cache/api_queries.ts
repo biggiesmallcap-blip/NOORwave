@@ -549,13 +549,13 @@ export const cachedApi = {
 			{ staleMs: 30 * MINUTE, staleMsForData: homeMuralStaleMs(30 * MINUTE), persist: scopedPersist(DAY) },
 		);
 	},
-	// The server holds each sample for five minutes, so refetching inside that
-	// window repaints the same picks rather than reshuffling.
+	// Random picks hold for an hour, so the murals stay put through a listening
+	// session (and across a restart) instead of reshuffling on every visit.
 	homeShufflePicksQuery(limit = 12) {
 		return query<HomeShufflePicksResponse>(
 			cacheKeys.homeShufflePicks(limit),
 			() => api.getHomeShufflePicks(limit).then(capMuralPayload),
-			{ staleMs: 5 * MINUTE, staleMsForData: homeMuralStaleMs(5 * MINUTE), persist: scopedPersist(DAY) },
+			{ staleMs: HOUR, staleMsForData: homeMuralStaleMs(HOUR), persist: scopedPersist(DAY) },
 		);
 	},
 	getLibraryTopArtists(limit = 20) {

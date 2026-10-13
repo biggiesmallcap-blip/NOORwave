@@ -8,8 +8,13 @@
 // A fixed modal rendered inside the page is therefore positioned relative to the
 // scrolling workspace, so it lands at the content's top origin and appears to
 // "jump to the top of the page" once you've scrolled down. Portalling the modal
-// out to <body> sidesteps every such ancestor.
-export function portal(node: HTMLElement, target: HTMLElement | string = 'body') {
+// out of the shell sidesteps every such ancestor.
+//
+// The default target is SvelteKit's root container (#app-root in app.html), not
+// <body>: SvelteKit intercepts link clicks on that container only, so an <a>
+// portalled to <body> would bypass the router and reload the whole app. The
+// container is `display: contents`, so it adds no box or containing block.
+export function portal(node: HTMLElement, target: HTMLElement | string = '#app-root') {
 	let resolved: HTMLElement | null = null;
 
 	function mount(t: HTMLElement | string) {

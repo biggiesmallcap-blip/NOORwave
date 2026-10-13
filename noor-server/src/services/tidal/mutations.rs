@@ -46,7 +46,7 @@ async fn create_playlist_snapshot_at(
             ])
         })
         .await?;
-    let body: serde_json::Value = checked_playlist_response(response).await?.json().await?;
+    let body: serde_json::Value = ensure_success_response(response).await?.json().await?;
     let uuid = body
         .pointer("/data/uuid")
         .and_then(|value| value.as_str())
@@ -55,17 +55,16 @@ async fn create_playlist_snapshot_at(
         .to_string();
     let populate = async {
         for batch in track_ids.chunks(100) {
-            let etag = get_playlist_etag(client, &uuid).await?;
             let ids = batch
                 .iter()
                 .map(i64::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            let response = client
-                .send_authed(|http, api_base, bearer| {
+            let response =
+                with_playlist_etag_response(client, &uuid, |http, api_base, bearer, etag| {
                     http.post(format!("{api_base}/playlists/{uuid}/items"))
                         .header("Authorization", bearer)
-                        .header("If-None-Match", &etag)
+                        .header("If-None-Match", etag)
                         .query(&[("countryCode", country_code)])
                         .form(&[
                             ("trackIds", ids.as_str()),
@@ -74,10 +73,12 @@ async fn create_playlist_snapshot_at(
                         ])
                 })
                 .await?;
-            let body: serde_json::Value = checked_playlist_response(response).await?.json().await?;
+            let body: serde_json::Value = response.json().await.unwrap_or_default();
+            // `onArtifactNotFound=FAIL` already rejects unknown ids. When TIDAL
+            // echoes the added items, a short list still means a partial save.
             let added = body.get("addedItemIds").and_then(|value| value.as_array());
             anyhow::ensure!(
-                added.is_some_and(|items| items.len() == batch.len()),
+                added.is_none_or(|items| items.len() == batch.len()),
                 "TIDAL did not save every track in the snapshot"
             );
         }
@@ -97,17 +98,6 @@ async fn create_playlist_snapshot_at(
     Ok(uuid)
 }
 
-async fn checked_playlist_response(response: reqwest::Response) -> Result<reqwest::Response> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-    let retry_after = crate::services::tidal::backoff::retry_after_secs(response.headers());
-    let body = response.text().await.unwrap_or_default();
-    crate::services::tidal::backoff::global().classify(status.as_u16(), &body, retry_after);
-    anyhow::bail!("TIDAL playlist error {status}: {body}")
-}
-
 fn writes_allowed(policy: Option<&str>, development: bool) -> bool {
     match policy {
         Some("allow") => true,
@@ -117,13 +107,17 @@ fn writes_allowed(policy: Option<&str>, development: bool) -> bool {
     }
 }
 
-/// A TIDAL library write refused by the development write gate. Typed so the
-/// API can say so instead of reporting it as TIDAL rejecting the change.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "TIDAL library writes are disabled for this development instance. Set NOOR_TIDAL_LIBRARY_WRITES=allow to enable them."
-)]
+/// TIDAL writes are switched off for this (development) instance.
+#[derive(Debug)]
 pub struct LibraryWritesDisabled;
+
+impl std::fmt::Display for LibraryWritesDisabled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TIDAL library writes are disabled for this development instance")
+    }
+}
+
+impl std::error::Error for LibraryWritesDisabled {}
 
 pub(crate) fn check_library_writes() -> Result<()> {
     let development = cfg!(debug_assertions)
@@ -368,9 +362,13 @@ mod write_policy_tests {
 
 /// Turn a non-success mutation answer into an error, feeding the backoff gate.
 async fn ensure_success(resp: reqwest::Response) -> Result<()> {
+    ensure_success_response(resp).await.map(drop)
+}
+
+async fn ensure_success_response(resp: reqwest::Response) -> Result<reqwest::Response> {
     let status = resp.status();
     if status.is_success() {
-        return Ok(());
+        return Ok(resp);
     }
     let retry_after = crate::services::tidal::backoff::retry_after_secs(resp.headers());
     let body = resp.text().await.unwrap_or_default();
@@ -573,6 +571,21 @@ async fn with_playlist_etag<F>(client: &TidalClient, playlist_uuid: &str, build:
 where
     F: Fn(&reqwest::Client, &str, &str, &str) -> reqwest::RequestBuilder,
 {
+    with_playlist_etag_response(client, playlist_uuid, build)
+        .await
+        .map(drop)
+}
+
+/// `with_playlist_etag`, keeping the successful response for callers that
+/// read its body.
+async fn with_playlist_etag_response<F>(
+    client: &TidalClient,
+    playlist_uuid: &str,
+    build: F,
+) -> Result<reqwest::Response>
+where
+    F: Fn(&reqwest::Client, &str, &str, &str) -> reqwest::RequestBuilder,
+{
     for attempt in 0..2 {
         let etag = get_playlist_etag(client, playlist_uuid).await?;
         let resp = client
@@ -580,7 +593,7 @@ where
             .await?;
         let status = resp.status();
         if status.is_success() {
-            return Ok(());
+            return Ok(resp);
         }
         if status == reqwest::StatusCode::PRECONDITION_FAILED && attempt == 0 {
             // Stale tag. Read the current one and try exactly once more.
@@ -635,7 +648,7 @@ pub async fn get_playlist_items(
                     ])
             })
             .await?;
-        let resp = checked_playlist_response(resp).await?;
+        let resp = ensure_success_response(resp).await?;
         let page_etag = resp
             .headers()
             .get(reqwest::header::ETAG)
@@ -777,8 +790,7 @@ pub async fn delete_playlist(client: &TidalClient, playlist_uuid: &str) -> Resul
     delete_playlist_unchecked(client, playlist_uuid).await
 }
 
-/// `delete_playlist` without the write gate, for removing a half-saved
-/// snapshot that was created under the gate a moment earlier.
+/// Snapshot cleanup: its creation already passed the write gate.
 async fn delete_playlist_unchecked(client: &TidalClient, playlist_uuid: &str) -> Result<()> {
     let country_code = client.country_code().to_string();
     let resp = client

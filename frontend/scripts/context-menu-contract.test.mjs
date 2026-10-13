@@ -93,7 +93,9 @@ describe('context menu coverage contract', () => {
 		expect(source).toContain('buildAlbumMenu');
 		expect(source).toContain('buildArtistMenu');
 		expect(source).toContain('openAlbumContextMenu');
-		expect(source).toContain('openTrackArtistContextMenu');
+		// Track and track-artist menus come from the shared rows.
+		expect(source).toContain('<TrackRow');
+		expect(source).toContain('openAlbumArtistContextMenu');
 	});
 
 	test('chart murals expose shared track menus', () => {

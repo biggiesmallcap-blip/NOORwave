@@ -158,7 +158,13 @@ export function manualPinResponseError(status: number): string | null {
 export class ReconnectScheduler {
 	private timer: ReturnType<typeof setTimeout> | null = null;
 	private attempt = 0;
-	constructor(private readonly connect: () => void, private readonly schedule = setTimeout, private readonly cancel = clearTimeout) {}
+	// Browsers reject native timers invoked with a non-window receiver, so the
+	// defaults wrap them instead of storing them as instance methods.
+	constructor(
+		private readonly connect: () => void,
+		private readonly schedule: (callback: () => void, ms: number) => ReturnType<typeof setTimeout> = (callback, ms) => setTimeout(callback, ms),
+		private readonly cancel: (timer: ReturnType<typeof setTimeout>) => void = (timer) => clearTimeout(timer),
+	) {}
 	succeeded(): void { this.attempt = 0; this.clear(); }
 	next(): void {
 		this.clear();

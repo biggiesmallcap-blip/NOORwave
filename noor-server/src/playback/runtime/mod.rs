@@ -172,11 +172,10 @@ impl PlaybackRuntimeConfig {
 }
 
 pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHandle> {
-    // Real-time safety: this channel MUST remain unbounded
-    // (std::sync::mpsc::channel, NOT sync_channel). The CPAL audio callback
-    // in shared.rs::write_output_buffer sends TrackTerminal and
-    // CrossfadeStart commands through command_tx; a bounded channel would
-    // block the audio thread on a full buffer and cause dropouts/underruns.
+    // The audio callback never sends here; it posts to the buffer's fixed
+    // mailbox, which the loop drains. Decoder threads and the loop itself do
+    // send (TrackTerminal, NextDecodeComplete), so keep it unbounded to never
+    // block them on a full queue.
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
     let worker_event_tx = event_tx.clone();
@@ -203,6 +202,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     let offset_source: Arc<Mutex<Arc<AtomicU64>>> =
         Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     let handoff_elapsed_source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX))));
+    let source_identity = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     let exclusive_event_identity = Arc::new(Mutex::new(Arc::new(())));
 
     let worker_volume_ctl = Arc::clone(&volume_ctl);
@@ -211,6 +211,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
     let worker_buffered_source = Arc::clone(&buffered_source);
     let worker_offset_source = Arc::clone(&offset_source);
     let worker_handoff_elapsed_source = Arc::clone(&handoff_elapsed_source);
+    let worker_source_identity = Arc::clone(&source_identity);
     let worker_exclusive_event_identity = Arc::clone(&exclusive_event_identity);
 
     thread::Builder::new()
@@ -227,6 +228,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
                 worker_buffered_source,
                 worker_offset_source,
                 worker_handoff_elapsed_source,
+                worker_source_identity,
                 worker_exclusive_event_identity,
             ) {
                 let _ = worker_event_tx.send(PlaybackRuntimeEvent::Error {
@@ -253,6 +255,7 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
         buffered_source,
         offset_source,
         handoff_elapsed_source,
+        source_identity,
         exclusive_event_identity,
     })
 }
@@ -260,6 +263,8 @@ pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHan
 struct PlaybackRuntimeLoopState {
     requested_generation: Option<u64>,
     handoff_elapsed_source: Arc<Mutex<Arc<AtomicU64>>>,
+    /// Shared with the handle; see `PlaybackEngine::source_identity`.
+    source_identity: Arc<Mutex<Arc<AtomicU64>>>,
     device_name: String,
     device_sample_rate: u32,
     device_channels: u16,
@@ -312,6 +317,39 @@ struct PlaybackRuntimeLoopState {
     silent_start_streak: u32,
 }
 
+impl PlaybackRuntimeLoopState {
+    /// Every deck slot that currently holds an engine.
+    fn live_engines(&self) -> impl Iterator<Item = &PlaybackEngine> {
+        [
+            self.engine.as_ref(),
+            self.next_engine.as_ref(),
+            self.fading_out_engine.as_ref(),
+            self.drop_preview_engine.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// Source-rate matching changes the device rate, which only exclusive
+    /// output can do. cpal 0.18 shared streams accept any rate through the
+    /// Windows converter, so requesting the source rate there would hand
+    /// resampling to Windows and report a rate the device is not running at.
+    fn follows_source_rate(&self) -> bool {
+        self.current_sample_rate_follow && self.current_exclusive
+    }
+
+    fn live_engines_mut(&mut self) -> impl Iterator<Item = &mut PlaybackEngine> {
+        [
+            self.engine.as_mut(),
+            self.next_engine.as_mut(),
+            self.fading_out_engine.as_mut(),
+            self.drop_preview_engine.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn receive_runtime_command(
     state: &PlaybackRuntimeLoopState,
@@ -322,15 +360,7 @@ fn receive_runtime_command(
 ) -> std::result::Result<PlaybackRuntimeCommand, mpsc::RecvTimeoutError> {
     // Reconcile a failed output before accepting Resume. The diagnostic lives
     // on its stream, so replacement streams cannot inherit an old fault.
-    for engine in [
-        state.engine.as_ref(),
-        state.next_engine.as_ref(),
-        state.fading_out_engine.as_ref(),
-        state.drop_preview_engine.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for engine in state.live_engines() {
         if let Some(command) = engine.take_output_error() {
             return Ok(command);
         }
@@ -342,15 +372,7 @@ fn receive_runtime_command(
         Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvTimeoutError::Disconnected),
         Err(mpsc::TryRecvError::Empty) => {}
     }
-    for engine in [
-        state.engine.as_ref(),
-        state.next_engine.as_ref(),
-        state.fading_out_engine.as_ref(),
-        state.drop_preview_engine.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for engine in state.live_engines() {
         if let Some(command) = engine.shared.take_rt_command(event_tx) {
             return Ok(command);
         }
@@ -369,6 +391,7 @@ fn run_runtime_loop(
     buffered_source: Arc<Mutex<Arc<AtomicU64>>>,
     offset_source: Arc<Mutex<Arc<AtomicU64>>>,
     handoff_elapsed_source: Arc<Mutex<Arc<AtomicU64>>>,
+    source_identity: Arc<Mutex<Arc<AtomicU64>>>,
     _exclusive_event_identity: Arc<Mutex<Arc<()>>>,
 ) -> Result<()> {
     let host = cpal::default_host();
@@ -385,6 +408,7 @@ fn run_runtime_loop(
     let mut state = PlaybackRuntimeLoopState {
         requested_generation: None,
         handoff_elapsed_source,
+        source_identity,
         device_name,
         device_sample_rate: output_config.sample_rate,
         device_channels: output_config.channels,
@@ -423,15 +447,7 @@ fn run_runtime_loop(
         #[cfg(target_os = "windows")]
         poll_exclusive_output_fault(&mut state, &event_tx);
         let mut output_running = false;
-        for engine in [
-            state.engine.as_ref(),
-            state.next_engine.as_ref(),
-            state.fading_out_engine.as_ref(),
-            state.drop_preview_engine.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for engine in state.live_engines() {
             let shared = &engine.shared;
             if !shared.paused.load(Ordering::SeqCst) && !shared.stopped.load(Ordering::SeqCst) {
                 output_running = true;
@@ -463,21 +479,47 @@ fn run_runtime_loop(
                 // Emit any warns the audio callback latched (underrun,
                 // rejected in-callback seek) - the callback itself must not
                 // touch tracing.
-                for engine in [
-                    state.engine.as_ref(),
-                    state.next_engine.as_ref(),
-                    state.fading_out_engine.as_ref(),
-                    state.drop_preview_engine.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
+                let mut default_output_changed = false;
+                for engine in state.live_engines() {
+                    default_output_changed |= engine.shared.drain_deferred_rt_logs();
+                }
+                // A shared stream opened on "Default" keeps rendering to the
+                // old endpoint after Windows switches defaults. Follow the new
+                // default through the ordinary device swap.
+                if default_output_changed
+                    && matches!(
+                        state.current_device_selection,
+                        OutputDeviceSelection::Default
+                    )
+                    && resolve_device(&OutputDeviceSelection::Default).is_some()
                 {
-                    engine.shared.drain_deferred_rt_logs();
+                    let _ = command_tx.send(PlaybackRuntimeCommand::DeviceSwap {
+                        released_output_identity: None,
+                        device: OutputDeviceSelection::Default,
+                        exclusive: state.current_exclusive,
+                        sample_rate_follow: state.current_sample_rate_follow,
+                        desired_sample_rate: None,
+                        exclusive_release_grace_secs: state.current_exclusive_release_grace_secs,
+                        exclusive_latency_mode: state.current_exclusive_latency_mode.clone(),
+                    });
                 }
                 // Idle tick: nothing to dispatch. Check whether the audible deck
                 // has frozen on a hung TIDAL segment and, if so, force the queue
                 // forward (the audio callback can't, because a starved-but-not-
                 // finished engine emits no command).
+                // A panic while the PCM lock was held leaves the deck silent
+                // and unusable in place. Restart it at its position the way
+                // an explicit Resume does; a failed restart pauses with an
+                // error, which ends these retries.
+                if !state.user_paused
+                    && state.engine.as_ref().is_some_and(|engine| {
+                        engine.shared.buffer.is_poisoned()
+                            || engine.shared.handoff_source_prefix.is_poisoned()
+                    })
+                {
+                    warn!("Playback buffer poisoned; restarting the active track in place");
+                    let _ = command_tx.send(PlaybackRuntimeCommand::Resume);
+                }
                 let stall = stall_tracker.poll(&state);
                 if let Some(track_id) = stall.just_stalled {
                     let _ = event_tx.send(PlaybackRuntimeEvent::Stalled { track_id });
@@ -561,6 +603,13 @@ fn run_runtime_loop(
                     }
                 }
                 PlaybackRuntimeCommand::Switch(job) => {
+                    // A transport rebuild after a fault re-sends the job this
+                    // runtime already holds, which `transition_to_job` skips.
+                    // Honour its play intent through the normal Resume path,
+                    // which also rebuilds faulted or released output.
+                    if switch_should_resume_active_job(&state, &job) {
+                        return handle_resume(env, &mut state);
+                    }
                     if let Err(error) = transition_to_job(
                         &config,
                         &command_tx,
@@ -725,27 +774,17 @@ fn run_runtime_loop(
                     // Pause the active engine AND the fading-out engine (if any), so
                     // pressing pause during a crossfade actually stops all audio. The
                     // pre-decoded next engine is already paused so we don't touch it.
-                    if let Some(engine) = state.engine.as_mut() {
-                        match engine.pause() {
-                            Ok(()) => {
-                                let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
-                                    track_id: Some(engine.track_id),
-                                });
-                            }
-                            Err(error) => {
-                                fail_runtime_command(&mut state, &event_tx, "Pause", error);
-                            }
-                        }
+                    if let Some(engine) = state.engine.as_ref() {
+                        engine.pause();
+                        let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
+                            track_id: Some(engine.track_id),
+                        });
                     }
-                    if let Some(engine) = state.fading_out_engine.as_mut()
-                        && let Err(error) = engine.pause()
-                    {
-                        fail_runtime_command(&mut state, &event_tx, "Pause", error);
+                    if let Some(engine) = state.fading_out_engine.as_ref() {
+                        engine.pause();
                     }
-                    if let Some(engine) = state.drop_preview_engine.as_mut()
-                        && let Err(error) = engine.pause()
-                    {
-                        fail_runtime_command(&mut state, &event_tx, "Pause", error);
+                    if let Some(engine) = state.drop_preview_engine.as_ref() {
+                        engine.pause();
                     }
                     // Instrumentation only (slice C0): correlate an explicit user
                     // pause with the render thread's idle-release timing in the logs.

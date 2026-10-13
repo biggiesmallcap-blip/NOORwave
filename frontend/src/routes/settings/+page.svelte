@@ -143,7 +143,11 @@
 	import { surfaceMode, type SurfaceMode } from '$lib/stores/surfaceMode';
 	import { horizontalShelfWheel } from '$lib/stores/shelf_scrolling';
 	import { audioSettings } from '$lib/stores/audio_settings';
-	import { audioDeviceSelectionValue } from '$lib/utils/audio_device_selection';
+	import {
+		audioDeviceSelectionStatus,
+		audioDeviceSelectionValue,
+		savedOutputLabel,
+	} from '$lib/utils/audio_device_selection';
 	import { exclusiveStatus } from '$lib/stores/exclusive_status';
 	import {
 		defaultDownloadFormat,
@@ -1534,6 +1538,7 @@
 
 	// ─── Audio output settings (TIDAL playback runtime) ─────────────────
 	let audioDevices = $state<AudioDevice[]>([]);
+	let audioDevicesState = $state<'loading' | 'ready' | 'failed'>('loading');
 	let isWindows = $derived(typeof navigator !== 'undefined' && /Win/i.test(navigator.platform));
 	let settingsBackgroundLoadCancelled = false;
 
@@ -1556,12 +1561,16 @@
 	];
 
 	async function loadAudioOutput() {
-		await audioSettings.load();
-		try {
-			const resp = await cachedApi.listAudioDevices();
-			audioDevices = resp.devices;
-		} catch (err) {
-			console.error('Failed to load audio devices', err);
+		audioDevicesState = 'loading';
+		// Fetch the device list fresh and alongside the settings: a cached or
+		// late list made a connected or re-plugged output read as unavailable.
+		const [, devices] = await Promise.allSettled([audioSettings.load(), api.listAudioDevices()]);
+		if (devices.status === 'fulfilled') {
+			audioDevices = devices.value.devices;
+			audioDevicesState = 'ready';
+		} else {
+			audioDevicesState = 'failed';
+			console.error('Failed to load audio devices', devices.reason);
 		}
 	}
 
@@ -2233,6 +2242,7 @@
 				{#if $audioSettings.settings}
 					{@const s = $audioSettings.settings}
 					{@const selection = audioDeviceSelectionValue(s.output_device, audioDevices)}
+					{@const selectionStatus = audioDeviceSelectionStatus(s.output_device, audioDevices)}
 					{#if isWindows}<label class="audio-field"><span>Output preset</span><select aria-label="Output preset" value={bitPerfectSettingsActive ? 'bit-perfect' : !s.exclusive_mode && !s.sample_rate_follow && s.quality === 'LOSSLESS' ? 'shared' : 'custom'} onchange={(event) => setOutputPreset(event.currentTarget.value === 'bit-perfect')} disabled={$audioSettings.pendingApply}><option value="shared">Shared</option><option value="bit-perfect">Bit-perfect</option><option value="custom" disabled>Custom</option></select></label><p class="setting-status">Presets change stream quality, exclusive access and source-rate matching.</p>{/if}<p class="setting-status">{bitPerfectActive ? 'Exclusive output engaged; DJ processing off' : s.exclusive_mode && djProcessingActive ? 'DJ processing active' : s.exclusive_mode && !$exclusiveStatus.engaged ? 'Exclusive output requested; engagement not confirmed' : 'Shared output'}</p><div class="audio-field-grid">
 						<label class="audio-field">
 							<span>Stream quality</span>
@@ -2254,8 +2264,16 @@
 								onchange={onAudioDeviceChange}
 							>
 								<option value="__default__">System default</option>
-								{#if selection !== '__default__' && !audioDevices.some((device) => device.id === selection)}
-									<option value={selection} disabled>Unavailable: {s.output_device}</option>
+								{#if selectionStatus === 'ambiguous'}
+									<option value={selection} disabled>Choose which {s.output_device} to use</option>
+								{:else if selectionStatus === 'missing' && s.output_device}
+									<option value={selection} disabled>
+										{savedOutputLabel(s.output_device)}{audioDevicesState === 'ready'
+											? ' (not connected)'
+											: audioDevicesState === 'failed'
+												? ' (device list unavailable)'
+												: ''}
+									</option>
 								{/if}
 								{#each audioDevices as d (d.id)}
 									<option value={d.id}>
@@ -2266,7 +2284,8 @@
 						</label>
 					</div>
 
-					{#if isWindows}
+					<!-- A failure can only come from a Windows host. isWindows reads the
+					     viewing browser, so it must not hide the server's failure. -->
 						{#if s.exclusive_mode && !$exclusiveStatus.engaged && $exclusiveStatus.failureReason}
 									<div class="exclusive-failed-banner" role="alert">
 										<strong>Exclusive mode unavailable</strong>
@@ -2292,7 +2311,9 @@
 											</button>
 										</div>
 									</div>
-								{/if}<details class="audio-advanced">
+								{/if}
+					{#if isWindows}
+						<details class="audio-advanced">
 							<summary>
 								<span>Advanced output</span>
 

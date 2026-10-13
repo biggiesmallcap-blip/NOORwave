@@ -46,3 +46,17 @@ export function setExclusiveReleased(device: string) {
 		transportFormat: null,
 	}));
 }
+
+/**
+ * A runtime poll only says "not engaged now": it cannot tell an idle release
+ * from a failed grab whose shared fallback is already playing. Keep a reported
+ * failure visible until a real engaged/released event replaces it.
+ */
+export function markExclusiveNotEngaged(device: string) {
+	exclusiveStatus.update((s) => ({
+		...s,
+		engaged: false,
+		device: s.device ?? device,
+		transportFormat: null,
+	}));
+}

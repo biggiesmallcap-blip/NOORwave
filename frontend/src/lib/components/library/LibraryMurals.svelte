@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { get } from 'svelte/store';
+	import { fade } from 'svelte/transition';
+	import { prefersReducedMotion } from '$lib/stores/motion';
 	import { api, type HomeShufflePicksResponse, type HomeSuggestionsResponse, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
@@ -119,6 +121,24 @@
 		});
 	}
 
+	// A panel whose picks change crossfades: the new collage fades in on top while
+	// the old one holds underneath, then leaves. Keyed on the picks, so lazy art
+	// resolving on a tile does not restart it. No fade on first paint (Svelte
+	// transitions are local) and none under reduced motion.
+	const SWAP_FADE_MS = 480;
+
+	function panelSignature(panel: HomeMuralPanel): string {
+		return panel.items.map(muralItemKey).join('|');
+	}
+
+	function swapFadeMs(): number {
+		return prefersReducedMotion() ? 0 : SWAP_FADE_MS;
+	}
+
+	function hold(_node: Element, { duration }: { duration: number }) {
+		return { duration };
+	}
+
 	// Empty or failed samples keep refreshing on a bounded backoff while the page
 	// stays open; the last-good payload stays on screen meanwhile.
 	$effect(() => {
@@ -194,35 +214,37 @@
 		<div class="mural-grid">
 			{#each panels as panel, i (panel.id)}
 				<article class="mural rise-in-card" aria-label={panel.label} style={`--rise-index: ${i}`}>
-					<div class="mosaic">
-						{#each panel.items as item (`${panel.id}-${item.kind}-${item.id}`)}
-							{@const art = tileArtwork(item)}
-							<!-- Native buttons activate on Enter and Space, so no keydown handler. -->
-							<button
-								class="tile"
-								type="button"
-								onclick={() => activateTile(item, panel)}
-								oncontextmenu={(event) => openTileMenu(event, item)}
-								aria-label={`${item.kind === 'track' ? 'Play' : 'Open'} ${item.title}`}
-								title={`${item.title}${item.subtitle ? ` - ${item.subtitle}` : ''}`}
-								use:lazyTidalArt={{
-									enabled: art === null,
-									query: muralItemLazyQuery(item),
-									onResolve: (url) => (lazyArt[muralItemKey(item)] = url),
-								}}
-							>
-								<ArtworkImage
-									className="mural-art"
-									src={art}
-									size={320}
-									fallbackText={fallbackLetters(item.title)}
-									decorative={true}
-									loading="eager"
-									fadeIn={true}
-								/>
-							</button>
-						{/each}
-					</div>
+					{#key panelSignature(panel)}
+						<div class="mosaic" in:fade={{ duration: swapFadeMs() }} out:hold={{ duration: swapFadeMs() }}>
+							{#each panel.items as item (`${panel.id}-${item.kind}-${item.id}`)}
+								{@const art = tileArtwork(item)}
+								<!-- Native buttons activate on Enter and Space, so no keydown handler. -->
+								<button
+									class="tile"
+									type="button"
+									onclick={() => activateTile(item, panel)}
+									oncontextmenu={(event) => openTileMenu(event, item)}
+									aria-label={`${item.kind === 'track' ? 'Play' : 'Open'} ${item.title}`}
+									title={`${item.title}${item.subtitle ? ` - ${item.subtitle}` : ''}`}
+									use:lazyTidalArt={{
+										enabled: art === null,
+										query: muralItemLazyQuery(item),
+										onResolve: (url) => (lazyArt[muralItemKey(item)] = url),
+									}}
+								>
+									<ArtworkImage
+										className="mural-art"
+										src={art}
+										size={320}
+										fallbackText={fallbackLetters(item.title)}
+										decorative={true}
+										loading="eager"
+										fadeIn={true}
+									/>
+								</button>
+							{/each}
+						</div>
+					{/key}
 					<div class="scrim" aria-hidden="true"></div>
 					<div class="copy">
 						<!-- One title; the source reads once in the line under it. -->

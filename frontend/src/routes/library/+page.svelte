@@ -16,7 +16,7 @@
 	import type { Snapshot } from './$types';
 	import { captureScroll, restoreScroll } from '$lib/navigation/scroll';
 	import {
-		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, totalTracks, totalAlbums,
+		tracks, albums, artists as artistsStore, isLoading, isLoadingMore, browseIsLoading, trackListIsLoading, totalTracks, totalAlbums,
 		sortBy, sortDir, viewMode, searchQuery,
 		loadTracks, loadAlbums, trackListRequestMatches, trackListNeedsReload, trackListError, retryTrackList, cancelTrackListRequests,
 		selectedTrackIds, selectedAlbumIds,
@@ -1750,9 +1750,9 @@
 		<div class="batch-feedback error">{batchError}</div>
 	{/if}
 
-	<!-- Landing queries own their loading state. Browse warmups must not hide
-	     cached shelves or postpone mounting the mural queries. -->
-	{#if $isLoading && activeTab !== 'all' && !isSearchMode}
+	<!-- Each tab owns its loading state: the landing has its queries, albums and
+	     artists their own skeletons below. A warmup for one tab must not hide another. -->
+	{#if activeTab === 'tracks' && $trackListIsLoading && !isSearchMode}
 		<Skeleton rows={10} label="Loading library" />
 
 	{:else if isSearchMode && searchFailed}
@@ -2064,7 +2064,7 @@
 
 	{:else if activeTab === 'albums'}
 		<!-- Skeleton grid while the first page loads, so we never flash an empty state -->
-		{#if $isLoading && visibleAlbums.length === 0 && !isSearchMode}
+		{#if $browseIsLoading && visibleAlbums.length === 0 && !isSearchMode}
 			<div class="album-grid" aria-hidden="true">
 				{#each Array(18) as _, i (i)}
 					<div class="album-card album-skeleton">
@@ -2159,7 +2159,7 @@
 			{/each}
 		</div>
 
-		{#if visibleAlbums.length === 0 && !$isLoading}
+		{#if visibleAlbums.length === 0 && !$browseIsLoading}
 			{#if isSearchMode}
 				<EmptyState title="No albums match this search" copy="Try another spelling, or look on TIDAL.">
 					{#snippet actions()}<a class="btn btn-primary" href={`/search?q=${encodeURIComponent($searchQuery.trim())}`}>Search TIDAL for "{$searchQuery.trim()}"</a>{/snippet}

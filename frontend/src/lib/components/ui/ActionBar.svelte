@@ -1,7 +1,9 @@
 <script lang="ts">
 	// The action row of a detail hero (STYLING.md "ActionBar"). Play is the
 	// labelled primary, Shuffle and Radio are labelled secondaries, Like and
-	// More are icons. Leave a handler out to drop its button. Below 1100px of
+	// More are icons. Leave a handler out to drop its button; set `disabled`
+	// to keep the buttons in place while there is nothing to act on yet, so the
+	// row never reflows (STYLING.md principle 6). Below 1100px of
 	// DetailHero width the labels are visually hidden and the title tooltip
 	// carries them. Extra page actions go in children, after More.
 	import type { Snippet } from 'svelte';
@@ -23,6 +25,7 @@
 		likePending = false,
 		onmore,
 		moreLabel = 'More options',
+		disabled = false,
 		children,
 	}: {
 		playing?: boolean;
@@ -43,13 +46,15 @@
 		likePending?: boolean;
 		onmore?: (event: MouseEvent) => void;
 		moreLabel?: string;
+		/** Disables Play, Shuffle, Radio and More; Like and children are unaffected. */
+		disabled?: boolean;
 		children?: Snippet;
 	} = $props();
 </script>
 
 <div class="action-bar">
 	{#if onplay}
-		<button type="button" class="ab-btn primary" title={playing ? 'Pause' : playLabel} onclick={onplay}>
+		<button type="button" class="ab-btn primary" title={playing ? 'Pause' : playLabel} {disabled} onclick={onplay}>
 			{#if playing}
 				<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" /><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" /></svg>
 			{:else}
@@ -60,7 +65,7 @@
 	{/if}
 
 	{#if onshuffle}
-		<button type="button" class="ab-btn secondary" title={shuffleHint} onclick={onshuffle}>
+		<button type="button" class="ab-btn secondary" title={shuffleHint} {disabled} onclick={onshuffle}>
 			<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M16 3h5v5M4 20l17-17M21 16v5h-5M4 4l5 5m6 6l6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" /></svg>
 			<span class="label">Shuffle</span>
 		</button>
@@ -71,7 +76,7 @@
 			type="button"
 			class="ab-btn secondary"
 			title={radioHint ?? radioLabel}
-			disabled={radioPending}
+			disabled={disabled || radioPending}
 			aria-busy={radioPending || undefined}
 			onclick={onradio}
 		>
@@ -100,7 +105,7 @@
 	{/if}
 
 	{#if onmore}
-		<button type="button" class="ab-btn icon" title={moreLabel} aria-label={moreLabel} aria-haspopup="menu" onclick={onmore}>
+		<button type="button" class="ab-btn icon" title={moreLabel} aria-label={moreLabel} aria-haspopup="menu" {disabled} onclick={onmore}>
 			<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="5" cy="12" r="1.8" fill="currentColor" /><circle cx="12" cy="12" r="1.8" fill="currentColor" /><circle cx="19" cy="12" r="1.8" fill="currentColor" /></svg>
 		</button>
 	{/if}

@@ -130,6 +130,9 @@ const API_BASE = `http://localhost:${NOOR_PORT}`;
 export const DEFAULT_API_TIMEOUT_MS = 20_000;
 export const BULK_QUEUE_API_TIMEOUT_MS = 90_000;
 export const TIDAL_CATALOG_API_TIMEOUT_MS = 40_000;
+// A TIDAL snapshot save makes two sequential calls per 100 tracks. The server
+// finishes it even if this client gives up, so wait long enough to report it.
+export const TIDAL_SNAPSHOT_SAVE_TIMEOUT_MS = 120_000;
 // VACUUM rewrites the entire database. On a multi-GB library that is minutes,
 // not seconds, and the default timeout would abort the request client-side while
 // the server carried on and finished successfully - reporting a failure for work
@@ -914,7 +917,7 @@ export const api = {
 		return fetchApi<{ playlist: Playlist }>('/api/playlists', undefined, {
 			method: 'POST',
 			body: JSON.stringify({ name, track_ids: trackIds, tidal_track_ids: tidalTrackIds, sync_to_tidal: true }),
-			timeoutMs: TIDAL_CATALOG_API_TIMEOUT_MS,
+			timeoutMs: TIDAL_SNAPSHOT_SAVE_TIMEOUT_MS,
 		});
 	},
 
@@ -1986,6 +1989,7 @@ export const api = {
 			playlist_id: number;
 			requested_tracks: number;
 			resolved_tracks: number;
+			skipped_not_on_tidal: number;
 			added: number;
 		}>('/api/library/batch/add-to-playlist', undefined, {
 			method: 'POST',

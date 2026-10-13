@@ -125,6 +125,8 @@
 	import { videoSession } from '$lib/stores/video_session';
 	import { isVideoSectionPath } from '$lib/video/section';
 	import VideoDock from '$lib/components/video/VideoDock.svelte';
+	import { handleVideoShortcut } from '$lib/video/controls';
+	import { installVideoMediaKeys } from '$lib/tauri/video_media_keys';
 	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 
 	let { children } = $props();
@@ -445,12 +447,14 @@
 		};
 
 		window.addEventListener('keydown', handleGlobalKeydown);
+		const cleanupVideoMediaKeys = installVideoMediaKeys();
 		window.addEventListener('wheel', handleGlobalWheel, { passive: false });
 		window.addEventListener('focus', refreshTidalAfterWake);
 		window.addEventListener('online', refreshTidalAfterWake);
 		document.addEventListener('visibilitychange', refreshTidalWhenVisible);
 		return () => {
 			window.removeEventListener('keydown', handleGlobalKeydown);
+			cleanupVideoMediaKeys();
 			window.removeEventListener('wheel', handleGlobalWheel);
 			window.removeEventListener('focus', refreshTidalAfterWake);
 			window.removeEventListener('online', refreshTidalAfterWake);
@@ -503,6 +507,7 @@
 	}
 
 	function handleGlobalKeydown(event: KeyboardEvent) {
+		if (event.defaultPrevented) return;
 		if (videoQueueDrawerOpen && event.key === 'Escape') {
 			event.preventDefault();
 			videoQueueDrawerOpen = false;
@@ -560,13 +565,18 @@
 
 		if (shortcutsBlocked()) return;
 
+		const target = event.target as HTMLElement | null;
+		// An active video session takes the playback shortcuts: resuming the
+		// paused music queue would end the video.
+		const spaceOnControl = (event.key === ' ' || event.key === 'Spacebar') && spaceActivatesFocusedControl(target);
+		if (!spaceOnControl && handleVideoShortcut(event)) return;
+
 		if (event.key === 'q' || event.key === 'Q') {
 			event.preventDefault();
 			togglePlayerQueue();
 			return;
 		}
 
-		const target = event.target as HTMLElement | null;
 		const inQueueSection = target?.closest?.('.queue-section') != null;
 		if (inQueueSection && event.key === 'ArrowUp' && !queueExpanded) {
 			event.preventDefault();
@@ -1133,6 +1143,12 @@
 		writePersisted(QUEUE_EXPANDED_KEY, queueExpanded ? '1' : '0');
 	}
 	function togglePlayerQueue() {
+		// The video queue panel stands in for the music queue during a video
+		// session; the side layout always shows its list.
+		if (videoChromeActive) {
+			if (effectivePlayerLayout === 'bottom') videoQueueDrawerOpen = !videoQueueDrawerOpen;
+			return;
+		}
 		if (effectivePlayerLayout === 'bottom') queueDrawerOpen = !queueDrawerOpen;
 		else toggleQueueExpanded();
 	}

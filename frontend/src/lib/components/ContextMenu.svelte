@@ -110,6 +110,7 @@
 	<div
 		bind:this={menuEl}
 		class="context-menu"
+		data-floating-layer
 		class:closing={$contextMenu.closing}
 		style="left: {position.left}px; top: {position.top}px;"
 		role="menu"

@@ -329,6 +329,8 @@ Albums have one content model shown in two containers:
 
 Do not add a third presentation. A new surface picks quick view or page by that rule.
 
+Album and TIDAL collection quick views share `QuickViewPopup` for the overlay surface, focus, and exit motion. Scrolling inside browses the track list; a wheel over the page outside dismisses the popup while the page keeps scrolling, and an outside click dismisses it without activating what was under the pointer. Layers that stack above it (`ContextMenu`, toasts, the command palette, the playlist picker) carry `data-floating-layer`, so interacting with them never dismisses the quick view; a new overlay that can open above a quick view needs the attribute too. Both quick views use `DetailHero`, `ActionBar` and the rows of their page (`TrackRow` for owned tracks, `TidalTrackRow` for the rest); `QuickViewPopup` takes the hero and the body as separate snippets and draws the refresh bar between them. Play becomes Pause once the collection is playing. Navigation inside a quick view uses real links with `onclick={requestClose}`, never `goto()`. Collection quick views add a compact Save playlist button that uses the collection title. Keep save forms out of the track list. Use `ActionBar`'s `disabled` while there is nothing to act on, rather than leaving handlers out, so the row does not reflow.
+
 ## Media links and context menus
 
 Track, album, artist, and video references should resolve inside NOORwave whenever the app has a route for them. Do not send media-reference clicks to `tidal.com` from cards, rows, now-playing metadata, quiet mode, or context menus.
@@ -356,7 +358,7 @@ All right-click menus are rendered by `ContextMenu.svelte`; do not create one-of
 - `.glass`, `.glass-panel`, `.glass-tile` - overlays and floating chrome only.
 - `.rise-in-shelf`, `.rise-in-card` - entry motion.
 
-Actions in [`src/lib/actions/`](src/lib/actions/): `use:dragReorder`, `use:wheelToHorizontal`, `use:portal`, `use:lazyTidalArt`. See their file headers.
+Actions in [`src/lib/actions/`](src/lib/actions/): `use:dragReorder`, `use:wheelToHorizontal`, `use:portal`, `use:lazyTidalArt`. See their file headers. `use:portal` moves a node into SvelteKit's root container (`#app-root`), not `<body>`, so links inside portalled overlays still go through the router.
 
 ## Persisted UI preferences
 

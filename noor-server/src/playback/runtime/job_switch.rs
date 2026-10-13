@@ -60,6 +60,7 @@ pub(super) fn transition_to_job(
     // they share a single fade window instead of serializing.
     state.dj.prepared_mixer = None;
     state.dj.prepared_drop_preview_mixer = None;
+    let inherited_identity = restarted_job_identity(state, &job, force_restart);
     let mut retiring: Vec<PlaybackEngine> = Vec::new();
     retiring.extend(state.engine.take());
     retiring.extend(state.fading_out_engine.take());
@@ -83,7 +84,7 @@ pub(super) fn transition_to_job(
 
     let output_state_update = transition_output_state_update(
         job.output_sample_rate,
-        state.current_sample_rate_follow,
+        state.follows_source_rate(),
         state.device_sample_rate,
     );
     if let Some(update) = output_state_update {
@@ -111,7 +112,7 @@ pub(super) fn transition_to_job(
                     && prepared_engine_matches_output_rate(
                         e.shared.target_sample_rate.load(Ordering::Relaxed),
                         job.output_sample_rate,
-                        state.current_sample_rate_follow,
+                        state.follows_source_rate(),
                     )
             })
             .unwrap_or(false);
@@ -128,7 +129,7 @@ pub(super) fn transition_to_job(
             stale.stop();
         }
         if state.current_exclusive {
-            let eng = PlaybackEngine::start_decoder_only(
+            let mut eng = PlaybackEngine::start_decoder_only(
                 config,
                 command_tx,
                 job,
@@ -137,22 +138,19 @@ pub(super) fn transition_to_job(
                 Arc::clone(volume_ctl),
                 Arc::clone(position_samples),
             )?;
-            *position_source.lock().unwrap() = Arc::clone(&eng.shared.source_position_samples);
-            *buffered_source.lock().unwrap() = Arc::clone(&eng.shared.buffered_samples);
-            *offset_source.lock().unwrap() = Arc::clone(&eng.shared.source_offset_samples);
-            *state.handoff_elapsed_source.lock().unwrap() =
-                Arc::clone(&eng.shared.handoff_elapsed_samples);
+            if let Some(identity) = &inherited_identity {
+                eng.source_identity = Arc::clone(identity);
+            }
+            publish_audible_engine(state, &eng, position_source, buffered_source, offset_source);
             state.engine = Some(eng);
         } else {
-            let eng = PlaybackEngine::start(
+            let mut eng = PlaybackEngine::start(
                 config,
                 command_tx,
                 device,
                 output_config,
                 output_sample_format,
                 job,
-                event_tx.clone(),
-                state.device_sample_rate,
                 state.device_channels,
                 Arc::clone(volume_ctl),
                 Arc::clone(position_samples),
@@ -160,11 +158,10 @@ pub(super) fn transition_to_job(
             let actual_start_rate = eng.shared.device_sample_rate;
             output_config.sample_rate = actual_start_rate;
             state.device_sample_rate = actual_start_rate;
-            *position_source.lock().unwrap() = Arc::clone(&eng.shared.source_position_samples);
-            *buffered_source.lock().unwrap() = Arc::clone(&eng.shared.buffered_samples);
-            *offset_source.lock().unwrap() = Arc::clone(&eng.shared.source_offset_samples);
-            *state.handoff_elapsed_source.lock().unwrap() =
-                Arc::clone(&eng.shared.handoff_elapsed_samples);
+            if let Some(identity) = &inherited_identity {
+                eng.source_identity = Arc::clone(identity);
+            }
+            publish_audible_engine(state, &eng, position_source, buffered_source, offset_source);
             state.engine = Some(eng);
         }
     }
@@ -180,7 +177,6 @@ pub(super) fn transition_to_job(
             desired_rate,
             state.current_exclusive_release_grace_secs,
             state.current_exclusive_latency_mode.clone(),
-            command_tx.clone(),
             event_tx.clone(),
         ) {
             Ok(actual_rate) => {
@@ -199,30 +195,32 @@ pub(super) fn transition_to_job(
                     .take()
                     .ok_or_else(|| anyhow!("missing active decoder for shared fallback"))?;
                 let job = previous.cold_restart_job(state.user_paused);
+                let identity = Arc::clone(&previous.source_identity);
                 previous.stop();
                 let job = job?;
                 state.exclusive_sink.clear_after_failed_start();
                 state.current_exclusive = false;
-                let engine = PlaybackEngine::start(
+                let mut engine = PlaybackEngine::start(
                     config,
                     command_tx,
                     device,
                     output_config,
                     output_sample_format,
                     job,
-                    event_tx.clone(),
-                    state.device_sample_rate,
                     state.device_channels,
                     Arc::clone(volume_ctl),
                     Arc::clone(position_samples),
                 )?;
                 let actual_rate = engine.shared.device_sample_rate;
-                *position_source.lock().unwrap() =
-                    Arc::clone(&engine.shared.source_position_samples);
-                *buffered_source.lock().unwrap() = Arc::clone(&engine.shared.buffered_samples);
-                *offset_source.lock().unwrap() = Arc::clone(&engine.shared.source_offset_samples);
-                *state.handoff_elapsed_source.lock().unwrap() =
-                    Arc::clone(&engine.shared.handoff_elapsed_samples);
+                // Same job at a new rate: keep its ownership identity.
+                engine.source_identity = identity;
+                publish_audible_engine(
+                    state,
+                    &engine,
+                    position_source,
+                    buffered_source,
+                    offset_source,
+                );
                 state.engine = Some(engine);
                 output_config.sample_rate = actual_rate;
                 state.device_sample_rate = actual_rate;
@@ -250,6 +248,65 @@ pub(super) fn switch_is_noop_for_active_job(
     !force_restart && active == Some((track_id, generation))
 }
 
+/// A transport rebuild after a fault re-sends the job this runtime already
+/// holds. With play intent over hard-paused decks, Switch must resume them
+/// rather than skip the job as a no-op.
+pub(super) fn switch_should_resume_active_job(
+    state: &PlaybackRuntimeLoopState,
+    job: &PreparedPlaybackJob,
+) -> bool {
+    state.user_paused
+        && !job.start_paused
+        && switch_is_noop_for_active_job(
+            false,
+            state
+                .engine
+                .as_ref()
+                .map(|engine| (engine.track_id, engine.generation)),
+            job.track.id,
+            job.generation,
+        )
+}
+
+/// A seek or recovery restart of the same job keeps its source identity: a
+/// queue handoff already tagged with it (a promotion's Finished for the
+/// previous track) must still land after the user scrubs.
+pub(super) fn restarted_job_identity(
+    state: &PlaybackRuntimeLoopState,
+    job: &PreparedPlaybackJob,
+    force_restart: bool,
+) -> Option<Arc<AtomicU64>> {
+    state
+        .engine
+        .as_ref()
+        .filter(|engine| {
+            force_restart && engine.track_id == job.track.id && engine.generation == job.generation
+        })
+        .map(|engine| Arc::clone(&engine.source_identity))
+}
+
+/// Point every public reader at `engine`, the deck that is now audible.
+pub(super) fn publish_audible_engine(
+    state: &PlaybackRuntimeLoopState,
+    engine: &PlaybackEngine,
+    position_source: &Mutex<Arc<AtomicU64>>,
+    buffered_source: &Mutex<Arc<AtomicU64>>,
+    offset_source: &Mutex<Arc<AtomicU64>>,
+) {
+    *position_source.lock().unwrap() = Arc::clone(&engine.shared.source_position_samples);
+    *buffered_source.lock().unwrap() = Arc::clone(&engine.shared.buffered_samples);
+    *offset_source.lock().unwrap() = Arc::clone(&engine.shared.source_offset_samples);
+    *state
+        .handoff_elapsed_source
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) =
+        Arc::clone(&engine.shared.handoff_elapsed_samples);
+    *state
+        .source_identity
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Arc::clone(&engine.source_identity);
+}
+
 /// A direct selection can consume a prepared next deck without going through
 /// promotion. Bind every public reader to that deck before exposing it.
 pub(super) fn adopt_predecoded_next_engine(
@@ -263,10 +320,7 @@ pub(super) fn adopt_predecoded_next_engine(
         .take()
         .expect("matching prepared next engine");
     pre.shared.paused.store(state.user_paused, Ordering::SeqCst);
-    *position_source.lock().unwrap() = Arc::clone(&pre.shared.source_position_samples);
-    *buffered_source.lock().unwrap() = Arc::clone(&pre.shared.buffered_samples);
-    *offset_source.lock().unwrap() = Arc::clone(&pre.shared.source_offset_samples);
-    *state.handoff_elapsed_source.lock().unwrap() = Arc::clone(&pre.shared.handoff_elapsed_samples);
+    publish_audible_engine(state, &pre, position_source, buffered_source, offset_source);
     state.engine = Some(pre);
 }
 

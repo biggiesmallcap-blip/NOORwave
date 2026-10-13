@@ -64,13 +64,13 @@ async fn skip_unplayable(
     snapshot: &player::PlaybackSnapshot,
     playback_generation: u64,
 ) -> Result<Outcome, CommandError> {
-    switch_runtime_to_snapshot_current(state, snapshot, playback_generation)
-        .await
-        .map_err(|error| {
-            let message = format!("Failed to advance past an unplayable track: {error}");
-            report_playback_failure(state, &message);
-            CommandError::UnplayableAdvance(message)
-        })?;
+    if let Err(error) =
+        switch_runtime_to_snapshot_current(state, snapshot, playback_generation).await
+    {
+        let message = format!("Failed to advance past an unplayable track: {error}");
+        report_playback_failure(state, &message).await;
+        return Err(CommandError::UnplayableAdvance(message));
+    }
     Ok(Outcome::Current)
 }
 

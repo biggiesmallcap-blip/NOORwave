@@ -14,6 +14,15 @@ describe('GitHub CI configuration', () => {
 		expect(workflow).toContain('pnpm test');
 	});
 
+	test('Windows CI compiles and tests the cfg(windows) playback code', () => {
+		const workflow = read('.github/workflows/windows-check.yml');
+
+		expect(workflow).toContain('runs-on: windows-latest');
+		expect(workflow).toContain('cargo test -p noor-server --locked');
+		expect(workflow).toContain('"noor-server/**"');
+		expect(workflow).toContain("save-if: ${{ github.ref == 'refs/heads/master' }}");
+	});
+
 	test('Dependabot covers Actions, Cargo, and frontend dependencies with guarded groups', () => {
 		const config = read('.github/dependabot.yml');
 

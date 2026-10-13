@@ -29,6 +29,14 @@ describe('shared track menus', () => {
 		expect(mocks.importTrack).not.toHaveBeenCalled();
 		expect(await mocks.choose.mock.calls[0][1]()).toEqual([7]);
 	});
+	test('TIDAL menus never stack or end on separators', () => {
+		for (const options of [{}, { remoteRoutes: true }, { queueItemId: 5 }, { remoteRoutes: true, queueItemId: 5 }]) {
+			const menu = buildTidalTrackMenu({ ...tidal, artist_tidal_id: 1, album_tidal_id: 2 }, options);
+			const separators = menu.map((item) => item.separator === true);
+			expect(separators.at(-1), JSON.stringify(options)).toBe(false);
+			expect(separators.some((sep, i) => sep && separators[i + 1]), JSON.stringify(options)).toBe(false);
+		}
+	});
 	test('unresolved queue rows still expose only the safe removal action', () => {
 		expect(buildTrackMenu({ id: 0, title: 'Pending' }, { isPending: true, queueItemId: 5 }).map((item) => item.label)).toEqual(['Remove from queue']);
 	});

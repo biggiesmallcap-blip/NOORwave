@@ -548,9 +548,7 @@ fn runtime_constructs_mixer_from_decoded_transition_windows() {
     let active = test_engine_with_shared(1, 20);
     {
         let mut buffer = active.shared.buffer.lock().expect("active buffer");
-        buffer
-            .samples
-            .extend_from_slice(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+        buffer.samples.extend(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
         buffer.read_pos = 2;
     }
 
@@ -559,9 +557,7 @@ fn runtime_constructs_mixer_from_decoded_transition_windows() {
         .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
     {
         let mut buffer = next.shared.buffer.lock().expect("next buffer");
-        buffer
-            .samples
-            .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
+        buffer.samples.extend(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
     }
 
     state.engine = Some(active);
@@ -590,7 +586,7 @@ fn runtime_rebuilds_mixer_from_latest_active_read_position() {
         let mut buffer = active.shared.buffer.lock().expect("active buffer");
         buffer
             .samples
-            .extend_from_slice(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4]);
+            .extend(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4]);
     }
 
     let mut next = test_engine_with_shared(2, 21);
@@ -598,9 +594,7 @@ fn runtime_rebuilds_mixer_from_latest_active_read_position() {
         .with_prepared_transition(test_prepared_transition_program(20, Some(11), Some(12)));
     {
         let mut buffer = next.shared.buffer.lock().expect("next buffer");
-        buffer
-            .samples
-            .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
+        buffer.samples.extend(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5]);
     }
 
     state.engine = Some(active);
@@ -784,7 +778,7 @@ fn handoff_mixer_preserves_unfinished_next_estimated_total() {
         let mut buffer = next.shared.buffer.lock().expect("next buffer");
         buffer
             .samples
-            .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+            .extend(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
     }
 
     state.engine = Some(active);
@@ -840,7 +834,7 @@ fn installs_rate_adjusted_handoff_remainder_from_consumed_frames() {
     let next = state.next_engine.as_ref().expect("next engine");
     let buffer = next.shared.buffer.lock().expect("buffer lock");
     assert_eq!(buffer.samples.len(), 10);
-    assert_samples_close(&buffer.samples[4..], &[0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+    assert_samples_close(buffer.samples.range(4..), &[0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
     assert_eq!(next.shared.total_samples.load(Ordering::Relaxed), 10);
 }
 
@@ -872,7 +866,7 @@ fn handoff_mixer_preserves_unfinished_next_buffer() {
         let mut buffer = next.shared.buffer.lock().expect("next buffer");
         buffer
             .samples
-            .extend_from_slice(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
+            .extend(&[0.0, 0.0, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6]);
     }
 
     state.engine = Some(active);
@@ -1281,7 +1275,14 @@ fn unverified_preview_clears_stale_render_without_handoff_fallback() {
     let mut state = verified_preview_fixture();
     prepare_drop_preview_mixer(&mut state, 1024).unwrap();
     let preview = state.drop_preview_engine.as_ref().unwrap();
-    preview.shared.buffer.lock().unwrap().samples.fill(0.2);
+    preview
+        .shared
+        .buffer
+        .lock()
+        .unwrap()
+        .samples
+        .iter_mut()
+        .for_each(|sample| *sample = 0.2);
     assert_eq!(
         prepare_drop_preview_mixer(&mut state, 1024),
         Err(DjRuntimeRendererReason::MixerRejected)
@@ -1684,7 +1685,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
         next.shared
             .total_samples
             .store(192_000 * 2, Ordering::Relaxed);
-        next.shared.buffer.lock().unwrap().samples = original_b[..160_000 * 2].to_vec();
+        next.shared.buffer.lock().unwrap().samples = original_b[..160_000 * 2].to_vec().into();
         state.engine = Some(active);
         state.next_engine = Some(next);
         assert!(prepare_dj_mixer_for_pair(&mut state, 1024).is_ok());
@@ -1693,6 +1694,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
         let (command_tx, _) = mpsc::channel();
         let mut handle = PlaybackRuntimeHandle::test_with_command_tx(command_tx);
         handle.handoff_elapsed_source = Arc::clone(&state.handoff_elapsed_source);
+        handle.source_identity = Arc::clone(&state.source_identity);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         promote_next_to_active(
             &mut state,
@@ -1716,7 +1718,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
         // buffer, then EOF publishes offset + output-buffer length.
         {
             let mut guard = incoming.shared.buffer.lock().unwrap();
-            guard.samples.extend_from_slice(&original_b[160_000 * 2..]);
+            guard.samples.extend(&original_b[160_000 * 2..]);
             guard.mark_finished();
             let total = incoming
                 .shared
@@ -1735,9 +1737,8 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
             192_000 * 2
         );
         let frames_to_play = if seek_during_mix { 24_000 } else { 60_000 };
-        let (callback_tx, _) = mpsc::channel();
         let mut output = vec![0.0; frames_to_play * 2];
-        write_output_f32(&mut output, &incoming.shared, &callback_tx, &event_tx);
+        write_output_f32(&mut output, &incoming.shared);
         let source_frame = if seek_during_mix { 120_375 } else { 156_750 };
         assert_eq!(
             incoming
@@ -1827,7 +1828,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
             .load(Ordering::Relaxed);
         assert_eq!(
             incoming.shared.buffer.lock().unwrap().samples,
-            original_b[restored_offset as usize..]
+            original_b[restored_offset as usize..].to_vec()
         );
         incoming
             .shared
@@ -1837,7 +1838,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
             .shared
             .set_manual_seek_crossfade_suppression(seek_frame * 2);
         let mut after_seek = [0.0; 256];
-        write_output_f32(&mut after_seek, &incoming.shared, &callback_tx, &event_tx);
+        write_output_f32(&mut after_seek, &incoming.shared);
         assert_eq!(
             &after_seek[..],
             &original_b[(seek_frame * 2) as usize..(seek_frame * 2 + 256) as usize],
@@ -1863,7 +1864,7 @@ fn callback_countdown_target_uses_decoded_end_and_survives_dispatch_delay() {
         .shared
         .position_samples
         .store(402_850 * 96, Ordering::Relaxed);
-    active.shared.buffer.lock().unwrap().samples = vec![0.2; 256];
+    active.shared.buffer.lock().unwrap().samples = vec![0.2; 256].into();
     let mut transition = test_prepared_transition_program(20, Some(11), Some(12));
     transition.fire_ahead_ms = 150;
     transition.anchor_start_ms = None;
@@ -1881,12 +1882,7 @@ fn callback_countdown_target_uses_decoded_end_and_survives_dispatch_delay() {
     assert!(arm_active_transition_window(&mut state, &job));
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(8);
-    write_output_f32(
-        &mut [0.0; 256],
-        &state.engine.as_ref().unwrap().shared,
-        &command_tx,
-        &event_tx,
-    );
+    write_output_f32(&mut [0.0; 256], &state.engine.as_ref().unwrap().shared);
     state
         .engine
         .as_ref()
@@ -2286,7 +2282,7 @@ fn long_bass_mix_verifies_musical_prefixes_before_using_a_protected_overlap() {
         let mut next = test_engine_with_shared(2, 21);
         next.job = PreparedPlaybackJob::test_fixture(2, 21).with_prepared_transition(transition);
         // The short-window cases deliberately never emit decode EOF.
-        next.shared.buffer.lock().unwrap().samples = kicks(incoming_seconds, None, None);
+        next.shared.buffer.lock().unwrap().samples = kicks(incoming_seconds, None, None).into();
         state.engine = Some(active);
         state.next_engine = Some(next);
         let buffer = crossfade_readiness_snapshot(state.next_engine.as_ref().unwrap()).unwrap();
@@ -3546,12 +3542,7 @@ fn automatic_crossfade_promotion_emits_timing_event() {
             assert_eq!(generation, 20);
             assert!(Arc::ptr_eq(
                 &source_identity,
-                &state
-                    .engine
-                    .as_ref()
-                    .unwrap()
-                    .shared
-                    .handoff_elapsed_samples
+                &state.engine.as_ref().unwrap().source_identity
             ));
         }
         other => panic!("expected finished event, got {other:?}"),
@@ -3719,12 +3710,7 @@ fn boundary_fallback_promotion_emits_missed_timing_event() {
             assert_eq!(generation, 20);
             assert!(Arc::ptr_eq(
                 &source_identity,
-                &state
-                    .engine
-                    .as_ref()
-                    .unwrap()
-                    .shared
-                    .handoff_elapsed_samples
+                &state.engine.as_ref().unwrap().source_identity
             ));
         }
         other => panic!("expected finished event, got {other:?}"),
@@ -3966,7 +3952,6 @@ fn swap_pause_guard_restores_previous_pause_state_on_drop() {
 #[test]
 fn write_output_f32_drains_ready_buffer_at_96khz() {
     let (command_tx, _command_rx) = mpsc::channel();
-    let (event_tx, _) = tokio::sync::broadcast::channel(8);
     let position = Arc::new(AtomicU64::new(0));
     let shared = Arc::new(PlaybackSharedState::new(
         42,
@@ -3983,12 +3968,12 @@ fn write_output_f32_drains_ready_buffer_at_96khz() {
     ));
     {
         let mut buffer = shared.buffer.lock().unwrap();
-        buffer.samples.extend_from_slice(&[0.25, -0.25, 0.5, -0.5]);
+        buffer.samples.extend(&[0.25, -0.25, 0.5, -0.5]);
         buffer.mark_finished();
     }
 
     let mut out = vec![0.0_f32; 4];
-    write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+    write_output_f32(&mut out, &shared);
 
     assert_eq!(out, vec![0.25, -0.25, 0.5, -0.5]);
     assert_eq!(position.load(Ordering::Relaxed), 4);
@@ -3997,7 +3982,6 @@ fn write_output_f32_drains_ready_buffer_at_96khz() {
 #[test]
 fn write_output_f32_outputs_silence_when_paused_at_96khz() {
     let (command_tx, _command_rx) = mpsc::channel();
-    let (event_tx, _) = tokio::sync::broadcast::channel(8);
     let position = Arc::new(AtomicU64::new(0));
     let shared = Arc::new(PlaybackSharedState::new(
         42,
@@ -4015,12 +3999,12 @@ fn write_output_f32_outputs_silence_when_paused_at_96khz() {
     shared.paused.store(true, Ordering::SeqCst);
     {
         let mut buffer = shared.buffer.lock().unwrap();
-        buffer.samples.extend_from_slice(&[0.25, -0.25, 0.5, -0.5]);
+        buffer.samples.extend(&[0.25, -0.25, 0.5, -0.5]);
         buffer.mark_finished();
     }
 
     let mut out = vec![1.0_f32; 4];
-    write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+    write_output_f32(&mut out, &shared);
 
     assert_eq!(out, vec![0.0, 0.0, 0.0, 0.0]);
     assert_eq!(position.load(Ordering::Relaxed), 0);
@@ -4229,6 +4213,7 @@ fn buffered_source_redirect_makes_handle_read_from_new_engine() {
         buffered_source: Arc::clone(&buffered_source),
         offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
 
@@ -4272,6 +4257,7 @@ fn get_buffered_ms_returns_zero_for_invalid_device_config() {
         buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(48_000)))),
         offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
     assert_eq!(handle.get_buffered_ms(0, 2), 0);
@@ -4356,8 +4342,8 @@ fn command_error_keeps_generation_and_reader_identity_after_engine_teardown() {
     let mut state = test_runtime_loop_state();
     state.requested_generation = Some(7);
     let engine = test_engine_with_shared(17, 7);
-    let source = Arc::clone(&engine.shared.handoff_elapsed_samples);
-    *state.handoff_elapsed_source.lock().unwrap() = Arc::clone(&source);
+    let source = Arc::clone(&engine.source_identity);
+    *state.source_identity.lock().unwrap() = Arc::clone(&source);
     state.engine = Some(engine);
     stop_all_engines(&mut state);
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
@@ -4384,7 +4370,7 @@ fn command_error_keeps_generation_and_reader_identity_after_engine_teardown() {
 fn track_error_keeps_failed_decoder_identity_after_engine_teardown() {
     let mut state = test_runtime_loop_state();
     let engine = test_engine_with_shared(17, 7);
-    let failed_source = Arc::clone(&engine.shared.handoff_elapsed_samples);
+    let failed_source = Arc::clone(&engine.source_identity);
     let stop = engine.shared.stop_flag();
     state.engine = Some(engine);
     let (event_tx, mut events) = tokio::sync::broadcast::channel(8);
@@ -4415,7 +4401,7 @@ fn track_error_keeps_failed_decoder_identity_after_engine_teardown() {
             // reader happens to be published when teardown finishes.
             assert!(!Arc::ptr_eq(
                 &source_identity,
-                &state.handoff_elapsed_source.lock().unwrap()
+                &state.source_identity.lock().unwrap()
             ));
         }
         other => panic!("expected decoder error, got {other:?}"),
@@ -4519,7 +4505,7 @@ fn crossfade_promotion_gate_accepts_next_deck_that_cannot_cover_the_fade() {
     let (unread, ready) = {
         let mut buf = next_shared.buffer.lock().unwrap();
         let threshold = buf.start_threshold_samples;
-        buf.samples = vec![0.1f32; threshold];
+        buf.samples = vec![0.1f32; threshold].into();
         (buf.samples.len() - buf.read_pos, buf.is_ready())
     };
 
@@ -4882,7 +4868,7 @@ fn stall_tracker_ignores_finished_engine_still_draining() {
     {
         let mut guard = engine.shared.buffer.lock().unwrap();
         guard.started = true;
-        guard.samples = vec![0.0; 4_800];
+        guard.samples = vec![0.0; 4_800].into();
         guard.read_pos = 0;
         guard.mark_finished();
     }
@@ -4927,7 +4913,7 @@ fn stall_tracker_force_advances_finished_drained_engine() {
     {
         let mut guard = engine.shared.buffer.lock().unwrap();
         guard.started = true;
-        guard.samples = vec![0.0; 4_800];
+        guard.samples = vec![0.0; 4_800].into();
         guard.read_pos = 4_800; // fully drained
         guard.mark_finished();
         guard.finished_notified = true; // terminal already consumed and lost
@@ -4988,6 +4974,7 @@ fn test_runtime_loop_state() -> PlaybackRuntimeLoopState {
     PlaybackRuntimeLoopState {
         requested_generation: None,
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         device_name: "test".to_string(),
         device_sample_rate: 48_000,
         device_channels: 2,
@@ -5068,6 +5055,10 @@ fn cpal_output_fault_hard_pauses_graph_without_finishing_queue() {
         }
         other => panic!("expected typed fault, got {other:?}"),
     }
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::Paused { track_id: Some(1) })
+    ));
     assert!(event_rx.try_recv().is_err());
 }
 
@@ -5244,14 +5235,7 @@ fn queued_terminal_from_same_job_retired_decoder_cannot_remove_replacement() {
     retired.stop();
     state.engine = Some(test_engine_with_shared(1, 7));
     let replacement = state.engine.as_ref().unwrap().shared.stop_flag();
-    let replacement_source = Arc::clone(
-        &state
-            .engine
-            .as_ref()
-            .unwrap()
-            .shared
-            .handoff_elapsed_samples,
-    );
+    let replacement_source = Arc::clone(&state.engine.as_ref().unwrap().source_identity);
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
     let source = Arc::new(Mutex::new(Arc::new(AtomicU64::new(0))));
     if let PlaybackRuntimeCommand::TrackTerminal {
@@ -5380,6 +5364,10 @@ fn exclusive_output_fault_poll_pauses_graph_once_without_queue_advance() {
             }
             other => panic!("expected output fault, got {other:?}"),
         }
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(PlaybackRuntimeEvent::Paused { track_id: Some(1) })
+        ));
         poll_exclusive_output_fault(&mut state, &event_tx);
         assert!(event_rx.try_recv().is_err());
     }
@@ -5510,7 +5498,7 @@ fn missing_output_device_swap_pauses_actual_decks_and_reports_error() {
         assert!(engine.shared.paused.load(Ordering::Acquire));
         assert!(!engine.shared.stopped.load(Ordering::Acquire));
         let mut data = [1.0_f32; 8];
-        write_output_f32(&mut data, &engine.shared, &command_tx, &event_tx);
+        write_output_f32(&mut data, &engine.shared);
         assert_eq!(data, [0.0; 8]);
     }
     match event_rx.try_recv().expect("user-visible failure") {
@@ -5625,7 +5613,6 @@ fn existing_exclusive_sink_reports_actual_rate_when_request_changes() {
     let mut state = test_runtime_loop_state();
     state.exclusive_sink.stream =
         Some(crate::playback::wasapi_exclusive::ExclusiveStream::test_live_at_rate(44_100));
-    let (command_tx, _) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(8);
     let rate = ensure_exclusive_sink_started(
         &mut state,
@@ -5634,7 +5621,6 @@ fn existing_exclusive_sink_reports_actual_rate_when_request_changes() {
         Some(96_000),
         1,
         ExclusiveLatencyMode::Stable,
-        command_tx,
         event_tx,
     )
     .unwrap();
@@ -5655,7 +5641,7 @@ fn queued_control_precedes_callback_mailbox_and_seek_retires_transition() {
     let shared = &state.engine.as_ref().unwrap().shared;
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(8);
-    write_output_f32(&mut [0.0; 8], shared, &command_tx, &event_tx);
+    write_output_f32(&mut [0.0; 8], shared);
     command_tx.send(PlaybackRuntimeCommand::Pause).unwrap();
     assert!(matches!(
         receive_runtime_command(
@@ -5773,6 +5759,10 @@ fn runtime_recovery_composes_after_command_error_and_panic() {
         }
         other => panic!("expected error event, got {other:?}"),
     }
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::Paused { .. })
+    ));
 
     // 2. Simulate a subsequent successful Play: engine re-populates.
     state.engine = Some(test_engine_with_shared(10, 2));
@@ -6234,6 +6224,7 @@ fn selecting_predecoded_next_binds_transport_readers_and_preserves_pause() {
     let (command_tx, _) = mpsc::channel();
     let handle = PlaybackRuntimeHandle::test_with_command_tx(command_tx);
     state.handoff_elapsed_source = Arc::clone(&handle.handoff_elapsed_source);
+    state.source_identity = Arc::clone(&handle.source_identity);
     handle.test_publish_position(9_600_000);
     adopt_predecoded_next_engine(
         &mut state,
@@ -6393,7 +6384,7 @@ fn early_gridless_preparation_waits_for_length_and_renders_the_tail_not_the_open
     let active = state.engine.as_ref().unwrap();
     let mut samples = vec![0.2; 6 * 96_000];
     samples.extend(vec![0.7; 96_000]);
-    active.shared.buffer.lock().unwrap().samples = samples;
+    active.shared.buffer.lock().unwrap().samples = samples.into();
     active
         .shared
         .total_samples
@@ -6406,7 +6397,7 @@ fn early_gridless_preparation_waits_for_length_and_renders_the_tail_not_the_open
         .buffer
         .lock()
         .unwrap()
-        .samples = vec![0.3; 2 * 96_000];
+        .samples = vec![0.3; 2 * 96_000].into();
     assert!(can_prepare_dj_mixer_before_fire(&state));
     prepare_dj_mixer_for_pair(&mut state, 1024).unwrap();
     let rendered = state.dj.prepared_mixer.as_ref().unwrap();
@@ -6432,7 +6423,7 @@ fn rhythmic_tail_snapshot_retains_fractional_millisecond_frames_at_eof() {
     transition.anchor_start_ms = None;
     transition.program.resolve_at = 371_618; // 7.7420417s at 48 kHz.
     let total_frames = 10 * 48_000;
-    active.shared.buffer.lock().unwrap().samples = vec![0.2; total_frames * 2];
+    active.shared.buffer.lock().unwrap().samples = vec![0.2; total_frames * 2].into();
     active
         .shared
         .total_samples
@@ -6522,13 +6513,17 @@ fn state_with_ready_dj_pair() -> PlaybackRuntimeLoopState {
 
 fn finish_engine_buffer(engine: &PlaybackEngine, samples: &[f32]) {
     let mut buffer = engine.shared.buffer.lock().expect("buffer lock");
-    buffer.samples.extend_from_slice(samples);
+    buffer.samples.extend(samples);
     buffer.mark_finished();
 }
 
-fn assert_samples_close(actual: &[f32], expected: &[f32]) {
+fn assert_samples_close<'a>(
+    actual: impl IntoIterator<Item = &'a f32, IntoIter: ExactSizeIterator>,
+    expected: &[f32],
+) {
+    let actual = actual.into_iter();
     assert_eq!(actual.len(), expected.len());
-    for (actual, expected) in actual.iter().zip(expected) {
+    for (actual, expected) in actual.zip(expected) {
         assert!(
             (*actual - *expected).abs() < 1e-6,
             "expected {expected}, got {actual}"
@@ -6651,6 +6646,7 @@ fn offset_source_redirect_makes_handle_read_from_new_engine() {
         buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         offset_source: Arc::clone(&offset_source),
         handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+        source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
         exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
     };
 
@@ -6665,4 +6661,139 @@ fn offset_source_redirect_makes_handle_read_from_new_engine() {
     // Stale writes to engine A must not leak through.
     engine_a_offset.store(999_999, Ordering::Relaxed);
     assert_eq!(handle.buffered_start_samples(), 48_000 * 2 * 30);
+}
+
+#[test]
+fn switch_to_the_held_job_resumes_hard_paused_decks() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(17, 9));
+    state.user_paused = true;
+    let play = PreparedPlaybackJob::test_fixture(17, 9);
+    assert!(!play.start_paused);
+    assert!(switch_should_resume_active_job(&state, &play));
+
+    let mut paused = play.clone();
+    paused.start_paused = true;
+    assert!(!switch_should_resume_active_job(&state, &paused));
+    assert!(!switch_should_resume_active_job(
+        &state,
+        &PreparedPlaybackJob::test_fixture(17, 10)
+    ));
+    assert!(!switch_should_resume_active_job(
+        &state,
+        &PreparedPlaybackJob::test_fixture(18, 9)
+    ));
+    state.user_paused = false;
+    assert!(!switch_should_resume_active_job(&state, &play));
+}
+
+#[test]
+fn failed_commands_acknowledge_the_hard_pause() {
+    let mut state = test_runtime_loop_state();
+    state.engine = Some(test_engine_with_shared(17, 9));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    fail_runtime_command(&mut state, &event_tx, "Resume", anyhow!("device gone"));
+    assert!(state.user_paused);
+    assert!(
+        state
+            .engine
+            .as_ref()
+            .unwrap()
+            .shared
+            .paused
+            .load(Ordering::SeqCst)
+    );
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::CommandError { .. })
+    ));
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::Paused { track_id: Some(17) })
+    ));
+}
+
+#[test]
+fn same_job_restart_keeps_source_identity_and_other_jobs_do_not() {
+    let mut state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(17, 9);
+    let identity = Arc::clone(&engine.source_identity);
+    state.engine = Some(engine);
+    let same = PreparedPlaybackJob::test_fixture(17, 9);
+    assert!(Arc::ptr_eq(
+        &restarted_job_identity(&state, &same, true).unwrap(),
+        &identity
+    ));
+    assert!(restarted_job_identity(&state, &same, false).is_none());
+    assert!(
+        restarted_job_identity(&state, &PreparedPlaybackJob::test_fixture(18, 9), true).is_none()
+    );
+    assert!(
+        restarted_job_identity(&state, &PreparedPlaybackJob::test_fixture(17, 10), true).is_none()
+    );
+}
+
+#[test]
+fn publishing_an_engine_keeps_identity_apart_from_dj_telemetry() {
+    let state = test_runtime_loop_state();
+    let engine = test_engine_with_shared(17, 9);
+    let readers = || Mutex::new(Arc::new(AtomicU64::new(0)));
+    let (position, buffered, offset) = (readers(), readers(), readers());
+    publish_audible_engine(&state, &engine, &position, &buffered, &offset);
+    assert!(Arc::ptr_eq(
+        &state.source_identity.lock().unwrap(),
+        &engine.source_identity
+    ));
+    assert!(Arc::ptr_eq(
+        &state.handoff_elapsed_source.lock().unwrap(),
+        &engine.shared.handoff_elapsed_samples
+    ));
+    assert!(!Arc::ptr_eq(
+        &engine.source_identity,
+        &engine.shared.handoff_elapsed_samples
+    ));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn exclusive_output_fault_without_a_loaded_deck_is_still_reported() {
+    use crate::playback::wasapi_exclusive::{ExclusiveRenderFault, ExclusiveStream};
+    let mut state = test_runtime_loop_state();
+    state.current_exclusive = true;
+    state.requested_generation = Some(7);
+    state.exclusive_sink.stream = Some(ExclusiveStream::test_released_with_fault(
+        ExclusiveRenderFault::DeviceWriteFailed,
+    ));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    poll_exclusive_output_fault(&mut state, &event_tx);
+    match event_rx.try_recv().unwrap() {
+        PlaybackRuntimeEvent::OutputFault {
+            active_track_id,
+            generation,
+            ..
+        } => {
+            assert_eq!(active_track_id, None);
+            assert_eq!(generation, 7);
+        }
+        other => panic!("expected output fault, got {other:?}"),
+    }
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(PlaybackRuntimeEvent::Paused { track_id: None })
+    ));
+}
+
+#[test]
+fn source_rate_matching_applies_to_exclusive_output_only() {
+    let mut state = test_runtime_loop_state();
+    state.current_sample_rate_follow = true;
+    state.current_exclusive = false;
+    assert!(
+        !state.follows_source_rate(),
+        "shared streams stay at the mix rate and resample in rubato"
+    );
+    state.current_exclusive = true;
+    assert!(state.follows_source_rate());
+    state.current_sample_rate_follow = false;
+    assert!(!state.follows_source_rate());
 }
