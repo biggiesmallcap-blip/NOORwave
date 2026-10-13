@@ -193,9 +193,11 @@
 		{/if}
 	{/if}
 
-	<p class="editorial">
-		Looking for TIDAL's own picks? <a href="/videos/editorial">Browse TIDAL editorial videos</a>
-	</p>
+	{#if !building}
+		<p class="editorial">
+			Looking for TIDAL's own picks? <a href="/videos/editorial">Browse TIDAL editorial videos</a>
+		</p>
+	{/if}
 </div>
 
 {#if openSong}
