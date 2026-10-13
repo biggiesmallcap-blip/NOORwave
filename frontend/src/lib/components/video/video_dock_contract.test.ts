@@ -29,7 +29,7 @@ describe('persistent video dock contract', () => {
 
 	test('both video queues share one row list with the shared video menu', () => {
 		expect(queuePanel).toContain('<VideoQueueList videos={$videoSessionUpcoming.slice(0, 60)} />');
-		expect(fullscreenQueue).toContain('<VideoQueueList videos={$videoSessionUpcoming} actions />');
+		expect(fullscreenQueue).toContain('<VideoQueueList videos={$videoSessionUpcoming} actions inverted />');
 		expect(queueList).toContain('buildVideoMenu(video, { inQueue: true })');
 		expect(queueList).toContain('oncontextmenu={(event) => openVideoQueueMenu(video, event)}');
 		// No backdrop blur over live video: it re-blurs every frame.

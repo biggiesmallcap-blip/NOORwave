@@ -2,6 +2,12 @@
 	Up-next rows of the video session, shared by the shell's video queue panel
 	and the fullscreen player's queue. Click plays, right-click (or the menu
 	key) opens the shared video menu; `actions` adds inline Move next and Remove.
+	`inverted` stacks the rows upward from the bottom (next nearest the
+	controls), for the fullscreen queue that grows out of its button.
+
+	Rows fold in and out: a played video folds away and the rest close up
+	under it, a refill unfolds at the far end. Keys are the video id plus its
+	occurrence, so rows keep their identity as the head of the queue moves.
 -->
 <script lang="ts">
 	import { buildVideoMenu } from '$lib/player/video_menu';
@@ -14,13 +20,55 @@
 	} from '$lib/stores/video_session';
 	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
 	import { formatTrackDuration } from '$lib/utils/format';
+	import { prefersReducedMotion } from '$lib/stores/motion';
+	import { cubicOut } from 'svelte/easing';
 
 	interface Props {
 		videos: VideoSessionItem[];
 		actions?: boolean;
+		inverted?: boolean;
 	}
 
-	let { videos, actions = false }: Props = $props();
+	let { videos, actions = false, inverted = false }: Props = $props();
+
+	const FOLD_IN_MS = 220;
+	const FOLD_OUT_MS = 180;
+
+	/** Stable keys: a video queued twice gets its second occurrence's key. */
+	let rows = $derived.by(() => {
+		const seen = new Map<number, number>();
+		return videos.map((video) => {
+			const n = seen.get(video.tidal_id) ?? 0;
+			seen.set(video.tidal_id, n + 1);
+			return { video, key: `${video.tidal_id}:${n}` };
+		});
+	});
+
+	/** Height, opacity and a short slide toward where the row comes from. */
+	function fold(node: HTMLElement, { duration, from }: { duration: number; from: number }) {
+		if (prefersReducedMotion()) return { duration: 0 };
+		const height = node.offsetHeight;
+		return {
+			duration,
+			easing: cubicOut,
+			css: (t: number) =>
+				`overflow: hidden; height: ${t * height}px; opacity: ${t}; transform: translateY(${(1 - t) * from}px);`,
+		};
+	}
+
+	// The fullscreen list fades out at its far end when it scrolls.
+	let listEl = $state<HTMLDivElement | null>(null);
+	let overflowing = $state(false);
+	$effect(() => {
+		const el = listEl;
+		if (!el) return;
+		const measure = () => (overflowing = el.scrollHeight > el.clientHeight + 1);
+		const observer = new ResizeObserver(measure);
+		observer.observe(el);
+		void rows.length;
+		measure();
+		return () => observer.disconnect();
+	});
 
 	const artwork = createArtworkFallback();
 	const artworkCandidate = artwork.candidate;
@@ -38,10 +86,16 @@
 	}
 </script>
 
-<div class="video-queue-list">
-	{#each videos as video, i (`video-${video.tidal_id}-${i}`)}
+<div class="video-queue-list" class:inverted class:overflowing bind:this={listEl}>
+	{#each rows as { video, key }, i (key)}
 		{@const videoArt = artworkCandidate(video.artwork_url, 320)}
-		<div class="video-queue-row">
+		<div
+			class="video-queue-row"
+			class:next={inverted && i === 0}
+			style:--i={Math.min(i, 10)}
+			in:fold={{ duration: FOLD_IN_MS, from: inverted ? -8 : 8 }}
+			out:fold={{ duration: FOLD_OUT_MS, from: inverted ? 10 : -10 }}
+		>
 			<button
 				type="button"
 				class="video-queue-play"
@@ -98,13 +152,62 @@
 	}
 
 	.video-queue-row {
+		position: relative;
 		display: flex;
+		flex: none;
 		align-items: center;
 		gap: 2px;
 		min-width: 0;
 		padding-right: 4px;
 		border: 1px solid transparent;
 		border-radius: 8px;
+	}
+
+	/* Upward: the next video sits at the bottom, nearest the controls, and
+	   the list starts scrolled there. The far end fades when it scrolls. */
+	.video-queue-list.inverted {
+		flex-direction: column-reverse;
+	}
+
+	.video-queue-list.inverted.overflowing {
+		mask-image: linear-gradient(to bottom, transparent, #000 40px);
+	}
+
+	/* The next video: a short accent bar at its left edge. */
+	.video-queue-row.next::before {
+		content: '';
+		position: absolute;
+		left: 1px;
+		top: 50%;
+		width: 3px;
+		height: 22px;
+		border-radius: 2px;
+		background: var(--accent);
+		transform: translateY(-50%);
+	}
+
+	/* Opening the fullscreen queue: rows rise one after another from the
+	   bottom, next first. */
+	.video-queue-list.inverted .video-queue-row {
+		animation: row-rise 260ms var(--ease-standard) both;
+		animation-delay: calc(var(--i) * 24ms);
+	}
+
+	@keyframes row-rise {
+		from {
+			opacity: 0;
+			transform: translateY(10px);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.video-queue-list.inverted .video-queue-row {
+			animation: none;
+		}
+	}
+
+	:global(:root[data-motion='reduce']) .video-queue-list.inverted .video-queue-row {
+		animation: none;
 	}
 
 	.video-queue-row:hover,
