@@ -22,6 +22,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub mod hybrid;
+
 mod rerank;
 pub(crate) use rerank::*;
 
@@ -279,6 +281,46 @@ where
     Ok(tracks)
 }
 
+/// Last.fm's similar tracks for a seed (artist fallback when the track has
+/// none), as unresolved Last.fm-lane candidates in Last.fm's order. A failed
+/// lookup is logged and yields nothing.
+pub async fn lastfm_similar_candidates(
+    client: &LastFmClient,
+    cache: Option<&LastFmSimilarCache>,
+    artist: &str,
+    title: &str,
+    fetch_limit: usize,
+) -> Vec<RadioCandidate> {
+    let hits = lastfm_similar_with_cache(cache, artist, title, fetch_limit, || {
+        client.track_get_similar_with_artist_fallback(artist, title, fetch_limit)
+    })
+    .await;
+    if let Err(ref e) = hits {
+        tracing::warn!(artist, title, error = %e, "radio: Last.fm track_get_similar failed");
+    }
+    hits.unwrap_or_default()
+        .into_iter()
+        .map(|hit| RadioCandidate {
+            track_id: 0,
+            tidal_track_id: None,
+            title: hit.title,
+            artist_name: hit.artist,
+            album_title: None,
+            artwork_url: None,
+            duration_ms: None,
+            isrc: None,
+            is_in_library: false,
+            source: RadioSource::Lastfm,
+            reason: format!("Last.fm match {:.2}", hit.match_score),
+            similarity_score: hit.match_score.clamp(0.0, 1.0),
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        })
+        .collect()
+}
+
 // ─── Public orchestrators ────────────────────────────────────────────────────
 
 /// Build a Song Radio queue seeded from a single library track.
@@ -290,6 +332,39 @@ pub async fn orchestrate_song(
     blend: RadioBlend,
     limit: usize,
     exclude_track_ids: &[i64],
+) -> Result<RadioQueue> {
+    orchestrate_song_with(
+        db,
+        lastfm,
+        lastfm_similar_cache,
+        seed_track_id,
+        blend,
+        limit,
+        exclude_track_ids,
+        Diagnostics::Log,
+    )
+    .await
+}
+
+/// Whether a radio build writes its `radio_diagnostics` row. Previews that
+/// play nothing (the blind comparison) skip it so they are not counted as
+/// stations someone started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Diagnostics {
+    Log,
+    Skip,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn orchestrate_song_with(
+    db: &Database,
+    lastfm: Option<&LastFmClient>,
+    lastfm_similar_cache: Option<&LastFmSimilarCache>,
+    seed_track_id: i64,
+    blend: RadioBlend,
+    limit: usize,
+    exclude_track_ids: &[i64],
+    diagnostics: Diagnostics,
 ) -> Result<RadioQueue> {
     // Load Tier 2 feature flags. With `radio_use_legacy_pipeline` set they all
     // read as off (see `load_radio_flags`), so one config row reverts radio to
@@ -398,46 +473,22 @@ pub async fn orchestrate_song(
             "orchestrate_song: seed has no artist_name; Last.fm source skipped"
         );
     }
-    let mut lastfm_results: Vec<RadioCandidate> = if let (Some(client), Some(artist)) =
-        (lastfm, seed_meta.artist_name.as_deref())
-    {
-        let fetch_limit = lfm_target.max(20);
-        let lfm = lastfm_similar_with_cache(
-            lastfm_similar_cache,
-            artist,
-            &seed_meta.title,
-            fetch_limit,
-            || client.track_get_similar_with_artist_fallback(artist, &seed_meta.title, fetch_limit),
-        )
-        .await;
-        if let Err(ref e) = lfm {
-            tracing::warn!(seed_track_id, artist, title = %seed_meta.title, error = %e, "orchestrate_song: Last.fm track_get_similar failed");
-        }
-        lfm.unwrap_or_default()
+    let mut lastfm_results: Vec<RadioCandidate> =
+        if let (Some(client), Some(artist)) = (lastfm, seed_meta.artist_name.as_deref()) {
+            lastfm_similar_candidates(
+                client,
+                lastfm_similar_cache,
+                artist,
+                &seed_meta.title,
+                lfm_target.max(20),
+            )
+            .await
             .into_iter()
             .take(lfm_target * 2)
-            .map(|hit| RadioCandidate {
-                track_id: 0,
-                tidal_track_id: None,
-                title: hit.title,
-                artist_name: hit.artist,
-                album_title: None,
-                artwork_url: None,
-                duration_ms: None,
-                isrc: None,
-                is_in_library: false,
-                source: RadioSource::Lastfm,
-                reason: format!("Last.fm match {:.2}", hit.match_score),
-                similarity_score: hit.match_score.clamp(0.0, 1.0),
-                confidence: None,
-                candidate_in_degree_percentile: None,
-                support_count: None,
-                primary_reason: None,
-            })
             .collect()
-    } else {
-        Vec::new()
-    };
+        } else {
+            Vec::new()
+        };
 
     // Adventurous reaches one Last.fm hop further: stored Last.fm links of the
     // seed's learned neighbors, discounted. Familiar and Mixed stay with the
@@ -598,7 +649,7 @@ pub async fn orchestrate_song(
     // the plan's "kill-switch produces no row" contract. avg_confidence and
     // avg_candidate_in_degree_pct sample only library candidates that carry
     // those fields; non-library lanes contribute nothing to the average.
-    if !flags.use_legacy_pipeline {
+    if !flags.use_legacy_pipeline && diagnostics == Diagnostics::Log {
         let profile = crate::services::radio_config::RadioProfile::from_blend(blend);
         let mut diag = crate::services::radio_config::RadioDiagnosticsRow {
             seed_track_id: Some(seed_track_id),
@@ -705,12 +756,7 @@ pub async fn orchestrate_album(
 ) -> Result<RadioQueue> {
     let album_id = seed_album_id;
     let (seed_track_ids, album_title, album_artist) = db.with_conn(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT t.id FROM tracks t WHERE t.album_id = ?1 ORDER BY t.disc_number ASC, t.track_number ASC LIMIT 3",
-        )?;
-        let ids: Vec<i64> = stmt
-            .query_map(rusqlite::params![album_id], |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let ids = album_seed_track_ids(conn, album_id)?;
         let meta = conn
             .query_row(
                 "SELECT al.title, ar.name FROM albums al LEFT JOIN artists ar ON al.artist_id = ar.id WHERE al.id = ?1",
@@ -773,14 +819,13 @@ pub async fn orchestrate_artist(
 ) -> Result<RadioQueue> {
     let artist_id = seed_artist_id;
     let (seed_track_ids, artist_name) = db.with_conn(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM tracks WHERE artist_id = ?1 ORDER BY play_count DESC, last_played_at DESC LIMIT 3",
-        )?;
-        let ids: Vec<i64> = stmt
-            .query_map(rusqlite::params![artist_id], |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let ids = artist_seed_track_ids(conn, artist_id)?;
         let name: Option<String> = conn
-            .query_row("SELECT name FROM artists WHERE id = ?1", rusqlite::params![artist_id], |row| row.get(0))
+            .query_row(
+                "SELECT name FROM artists WHERE id = ?1",
+                rusqlite::params![artist_id],
+                |row| row.get(0),
+            )
             .ok();
         Ok((ids, name))
     })?;
@@ -825,13 +870,41 @@ pub async fn orchestrate_artist(
     })
 }
 
+/// The tracks album radio seeds from: the album's first three.
+pub(crate) fn album_seed_track_ids(
+    conn: &rusqlite::Connection,
+    album_id: i64,
+) -> anyhow::Result<Vec<i64>> {
+    Ok(conn
+        .prepare(
+            "SELECT t.id FROM tracks t WHERE t.album_id = ?1
+             ORDER BY t.disc_number ASC, t.track_number ASC LIMIT 3",
+        )?
+        .query_map(rusqlite::params![album_id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The tracks artist radio seeds from: the artist's three most played.
+pub(crate) fn artist_seed_track_ids(
+    conn: &rusqlite::Connection,
+    artist_id: i64,
+) -> anyhow::Result<Vec<i64>> {
+    Ok(conn
+        .prepare(
+            "SELECT id FROM tracks WHERE artist_id = ?1
+             ORDER BY play_count DESC, last_played_at DESC LIMIT 3",
+        )?
+        .query_map(rusqlite::params![artist_id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 /// Album and artist radio: one final selection over every seed's picks. Each
 /// seed's radio was spaced on its own, but their union could still put one
 /// artist several times in a row, so the artist cap runs again on the blend.
 /// The blend reaches past `limit` so the cap has substitutes.
-fn select_across_seeds(
+pub(crate) fn select_across_seeds(
     db: &Database,
     candidates: Vec<RadioCandidate>,
     blend: RadioBlend,

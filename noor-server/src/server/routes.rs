@@ -81,7 +81,9 @@ mod library_batch_routes;
 pub(crate) mod maintenance_routes;
 mod playlist_routes;
 mod queue_routes;
+mod radio_compare_routes;
 mod radio_routes;
+pub(crate) mod radio_station;
 mod resolve_routes;
 mod search_routes;
 mod setup_discovery_routes;
@@ -500,6 +502,23 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/radio/album", post(radio_album))
         .route("/api/radio/artist", post(radio_artist))
         .route("/api/radio/start", post(radio_start))
+        .route(
+            "/api/radio/settings",
+            get(get_radio_settings).put(put_radio_settings),
+        )
+        .route(
+            "/api/radio/compare",
+            post(radio_compare_routes::radio_compare_seed),
+        )
+        .route(
+            "/api/radio/compare/seeds",
+            get(radio_compare_routes::radio_compare_seeds),
+        )
+        .route(
+            "/api/radio/compare/session",
+            get(radio_compare_routes::get_radio_compare_session)
+                .put(radio_compare_routes::put_radio_compare_session),
+        )
         .route(
             "/api/discovery/space/meta",
             get(discovery_space_routes::get_discovery_space_meta),
@@ -1965,6 +1984,42 @@ pub(crate) fn sqlite_database_locked(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether `full` is the same recording as local row `track_id` under another
+/// TIDAL id, strongly enough to keep it as an alias.
+pub(crate) fn verified_alias_of(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+    full: &crate::services::tidal::client::TidalTrack,
+) -> anyhow::Result<bool> {
+    let incoming = crate::library::duplicates::IncomingTrack {
+        tidal_id: full.id,
+        title: &full.title,
+        artist_name: &full.artist.name,
+        isrc: full.isrc.as_deref(),
+        duration_ms: full.duration * 1000,
+        version: full.extra.get("version").and_then(|v| v.as_str()),
+        explicit: full.extra.get("explicit").and_then(|v| v.as_bool()),
+    };
+    let candidates = crate::library::duplicates::fetch_import_candidates(
+        conn,
+        full.id,
+        full.artist.id,
+        full.isrc.as_deref(),
+        incoming.duration_ms,
+    )?;
+    let same = candidates
+        .into_iter()
+        .filter(|c| c.track_id == track_id)
+        .collect::<Vec<_>>();
+    Ok(matches!(
+        crate::library::duplicates::decide_import(&incoming, &same),
+        crate::library::duplicates::ImportDecision::LinkAlias { .. }
+    ))
+}
+
+/// Search matches the heal tries before giving up on a recording.
+const RERESOLVE_CANDIDATE_TRIES: usize = 3;
+
 /// Returns `Some(new_tidal_id)` when the row was healed with a fresh, verified
 /// id; `None` when no better id was found. Errors only on infrastructure
 /// failures (DB, no TIDAL session), never on "couldn't find a match".
@@ -2010,55 +2065,38 @@ pub(crate) async fn reresolve_tidal_id(
     let client = TidalClient::for_session(state.read().await.tidal.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
     let query = format!("{artist} {title}");
-    let results = client.search(&query, TIDAL_RESOLVE_POOL).await?;
-    let Some((_score, candidate)) = select_best_tidal_match(&artist, &title, results) else {
+    let mut results = client.search(&query, TIDAL_RESOLVE_POOL).await?;
+    // TIDAL can list a re-recorded release first; the same recording may be
+    // the next best match.
+    let mut verified_release = None;
+    for _ in 0..RERESOLVE_CANDIDATE_TRIES {
+        let Some((_score, candidate)) = select_best_tidal_match(&artist, &title, results.clone())
+        else {
+            break;
+        };
+        results.retain(|track| track.id != candidate.id);
+        // Same id that just failed: nothing to heal with.
+        if Some(candidate.id) == old_tidal_id {
+            continue;
+        }
+        // Don't swap one dead id for another: confirm the candidate actually
+        // streams before rewriting the row.
+        let request = tidal_stream::StreamRequest::new(candidate.id, "LOSSLESS");
+        if tidal_stream::resolve_stream(&http, &tokens.access_token, &request)
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        let full = client.get_track(candidate.id).await?;
+        if db.with_conn(|conn| verified_alias_of(conn, track_id, &full))? {
+            verified_release = Some(full);
+            break;
+        }
+    }
+    let Some(full) = verified_release else {
         return Ok(None);
     };
-    // Same id that just failed, or a match we can't distinguish: nothing to heal.
-    if Some(candidate.id) == old_tidal_id {
-        return Ok(None);
-    }
-
-    // Don't swap one dead id for another: confirm the candidate actually streams
-    // before rewriting the row.
-    let request = tidal_stream::StreamRequest::new(candidate.id, "LOSSLESS");
-    if tidal_stream::resolve_stream(&http, &tokens.access_token, &request)
-        .await
-        .is_err()
-    {
-        return Ok(None);
-    }
-
-    let full = client.get_track(candidate.id).await?;
-    let verified = db.with_conn(|conn| {
-        let incoming = crate::library::duplicates::IncomingTrack {
-            tidal_id: full.id,
-            title: &full.title,
-            artist_name: &full.artist.name,
-            isrc: full.isrc.as_deref(),
-            duration_ms: full.duration * 1000,
-            version: full.extra.get("version").and_then(|v| v.as_str()),
-            explicit: full.extra.get("explicit").and_then(|v| v.as_bool()),
-        };
-        let candidates = crate::library::duplicates::fetch_import_candidates(
-            conn,
-            full.id,
-            full.artist.id,
-            full.isrc.as_deref(),
-            incoming.duration_ms,
-        )?;
-        let same = candidates
-            .into_iter()
-            .filter(|c| c.track_id == track_id)
-            .collect::<Vec<_>>();
-        Ok(matches!(
-            crate::library::duplicates::decide_import(&incoming, &same),
-            crate::library::duplicates::ImportDecision::LinkAlias { .. }
-        ))
-    })?;
-    if !verified {
-        return Ok(None);
-    }
     // A transient asset failure does not prove that a catalogue release was withdrawn.
     let unavailable = if let Some(old) = old_tidal_id {
         match client.get_track(old).await {
@@ -2075,6 +2113,32 @@ pub(crate) async fn reresolve_tidal_id(
         false
     };
     let new_id = full.id;
+    let twin = db.with_conn(|conn| {
+        Ok(crate::db::catalogue::track_id(conn, new_id)?.filter(|&id| id != track_id))
+    })?;
+    if let Some(twin) = twin {
+        // The playable release already lives on another local row (a copy
+        // imported without the shared ISRC). Only a confirmed withdrawal folds
+        // the dead row into it.
+        if !unavailable {
+            return Ok(None);
+        }
+        let outcome = db.with_conn(|conn| {
+            if let Some(old) = old_tidal_id {
+                crate::db::catalogue::observe(conn, old, "unavailable", "metadata_check")?;
+            }
+            crate::library::duplicates::merge_into_twin(conn, track_id, twin)
+        })?;
+        let s = state.read().await;
+        if outcome.reconcile.queue_changed {
+            let _ = s.event_tx.send(AppEvent::QueueUpdated);
+        }
+        if outcome.reconcile.current_changed {
+            let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
+        }
+        let _ = s.event_tx.send(AppEvent::LibrarySynced);
+        return Ok(Some(new_id));
+    }
     let updated = db.with_conn(|conn| {
         let tx = conn.unchecked_transaction()?;
         if crate::db::catalogue::track_id(&tx, new_id)?.is_some_and(|id| id != track_id) {
