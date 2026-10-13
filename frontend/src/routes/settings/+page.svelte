@@ -2524,16 +2524,18 @@
 					<Segmented label="Crossfade" options={CROSSFADE_OPTIONS} value={crossfadeStep} onchange={(value) => void setPlayerCrossfadeMs(Number(value))} />
 				</SettingRow>
 				<p class="setting-status">DJ transition style, mix intent and speed are on the <a href="/mix">Mix page</a>.</p>
-			</section><section class="glass-tile section-panel" data-setting-id="radio"><SectionHeader title="Radio" />
-				<SettingRow label="Station source" hint="Where song, artist and album radio find their tracks. If a source has nothing for a seed, that station uses Balanced instead.">
+			</section><SettingGroup title="Radio">
+				<SettingRow label="Station source" id="radio" hint={`${RADIO_SOURCE_DESCRIPTIONS[radioSettings?.source ?? 'balanced']} If a source has nothing for a seed, that station uses Balanced instead.`}>
 					<Segmented label="Station source" options={RADIO_SOURCE_OPTIONS} value={radioSettings?.source ?? 'balanced'} disabled={radioSettings === null} onchange={(value) => void saveRadioSettings({ source: value })} />
 				</SettingRow>
-				<SettingRow label="Discovery" hint="How far stations reach from the seed. Familiar stays close; Adventurous reaches further.">
+				<SettingRow label="Discovery" id="radio-discovery" hint="How far stations reach from the seed. Familiar stays close; Adventurous reaches further.">
 					<Segmented label="Discovery" options={RADIO_BLEND_OPTIONS} value={radioSettings?.blend ?? 'mixed'} disabled={radioSettings === null} onchange={(value) => void saveRadioSettings({ blend: value })} />
 				</SettingRow>
-				<p class="setting-status">{RADIO_SOURCE_DESCRIPTIONS[radioSettings?.source ?? 'balanced']} Not sure which you prefer? Compare them blind in the <a href="/radio-compare">radio blind test</a>.</p>
+				<SettingRow label="Blind test" id="radio-blind-test" hint="Hear the station sources side by side for the same seed without knowing which is which.">
+					<button type="button" class="btn btn-secondary" onclick={() => void goto('/radio-compare')}>Open blind test</button>
+				</SettingRow>
 				{#if radioSettingsError}<p class="error" role="alert">{radioSettingsError}</p>{/if}
-			</section><section class="glass-tile section-panel" data-setting-id="library-audio-data"><SectionHeader title="Analysis" />
+			</SettingGroup><section class="glass-tile section-panel" data-setting-id="library-audio-data"><SectionHeader title="Analysis" />
 <SettingRow label="Analyse while playing" hint="Save BPM, key and energy as tracks play for DJ transitions and harmonic shuffle. Turning this off keeps existing analysis."><Toggle label="Analyse while playing" checked={$audioAnalysis.passiveEnabled} disabled={!$passiveDspKnown || $passiveDspPending} onchange={(event) => void setPassiveDspEnabled(event.currentTarget.checked)} /></SettingRow>
 {#if $audioAnalysisError}<p class="error" role="alert">{$audioAnalysisError}</p><button class="btn btn-glass" onclick={() => void loadPassiveDspState()} disabled={$passiveDspPending}>Retry setting</button>{/if}
 <details><summary>Analysis statistics</summary>
@@ -3068,10 +3070,7 @@
 				</div>
 				<button class="btn btn-glass" onclick={() => void loadRadioSimilarityStatus()}>Refresh status</button>{#if radioSimilarityLabel}
 					<p class="galaxy-refresh-label">{radioSimilarityLabel}</p>
-				{/if}</details><details data-setting-id="radio-blind-test" class="glass-tile section-panel"><summary>Radio blind test</summary><p class="setting-status">Compare stations for the same seed without knowing which is which: today's station, Last.fm alone, TIDAL's own radio and a hybrid of TIDAL and Last.fm shaped by your listening. Nothing is queued until you press Play.</p>
-				<div class="action-row">
-					<button class="btn btn-primary" onclick={() => void goto('/radio-compare')}>Open blind test</button>
-				</div></details><details data-setting-id="portable-snapshot" class="glass-tile section-panel"><summary>Enrichment transfer</summary><div class="stat-grid inner-metrics">
+				{/if}</details><details data-setting-id="portable-snapshot" class="glass-tile section-panel"><summary>Enrichment transfer</summary><div class="stat-grid inner-metrics">
 					<div class="info-row"><span>Snapshot checked</span><strong>{portableSnapshot?.checked_rows?.toLocaleString() ?? '0'}</strong></div>
 					<div class="info-row"><span>Snapshot genres</span><strong>{portableSnapshot?.genre_rows?.toLocaleString() ?? '0'}</strong></div>
 					<div class="info-row"><span>Last.fm checked</span><strong>{portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'}</strong></div>

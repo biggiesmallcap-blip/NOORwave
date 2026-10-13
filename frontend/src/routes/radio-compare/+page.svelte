@@ -288,7 +288,7 @@
 							{@const marked = active.misfits[armId] ?? []}
 							{@const isBest = active.best === armId}
 							{@const isWorst = active.worst === armId}
-							<div class="station" class:best={isBest} class:worst={isWorst}>
+							<div class="station" class:worst={isWorst}>
 								<div class="station-head">
 									<div class="station-name">
 										<span class="t-label">Station {label}</span>
@@ -472,18 +472,10 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
-		padding-top: var(--space-3);
-		border-top: 2px solid transparent;
 	}
 
-	.station.best {
-		border-top-color: var(--accent);
-	}
-
-	.station.worst {
-		border-top-color: var(--state-error);
-	}
-
+	/* The pick shows on the station's label and button, not as a border. */
+	.station.worst .station-name .t-label,
 	.worst-btn[aria-pressed='true'] {
 		color: var(--state-error);
 	}
@@ -577,6 +569,10 @@
 	td {
 		text-align: left;
 		padding: var(--space-2) var(--space-3);
+	}
+
+	/* The one divider a table gets: under its column header row. */
+	thead th {
 		border-bottom: 1px solid var(--border-subtle);
 	}
 
