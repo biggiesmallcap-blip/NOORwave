@@ -880,3 +880,31 @@ fn trainer_config_version_defaults_to_one_for_old_models() {
         3
     );
 }
+
+#[test]
+fn liked_tracks_are_not_fed_to_training_as_a_sequence() {
+    // Favorites sorted by play count and split into chunks of eight made
+    // neighbors of unrelated liked tracks. A like is preference for one
+    // recording, not adjacency to the next liked one.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::db::schema::run_migrations(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO artists (id, name) VALUES (1, 'Enya'), (2, 'Slayer');
+         INSERT INTO tracks (id, title, artist_id, is_favorite) VALUES
+             (1, 'Orinoco Flow', 1, 1),
+             (2, 'Raining Blood', 2, 1);",
+    )
+    .unwrap();
+    let input = build_trainer_input(&conn, DiscoveryIntensity::Low.params(), true, false).unwrap();
+    let liked_pair = input
+        .sequences
+        .iter()
+        .flat_map(|group| {
+            group
+                .sequences
+                .iter()
+                .map(move |s| (group.label.as_str(), s))
+        })
+        .find(|(_, sequence)| sequence.contains(&1) && sequence.contains(&2));
+    assert_eq!(liked_pair.map(|(label, _)| label), None);
+}

@@ -2834,11 +2834,3 @@ pub fn get_genre_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
     }
     Ok(seqs)
 }
-
-pub fn get_favorite_track_ids(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt = conn
-        .prepare("SELECT id FROM tracks WHERE is_favorite = 1 ORDER BY play_count DESC, id ASC")?;
-    stmt.query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
-}
