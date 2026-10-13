@@ -82,6 +82,13 @@ export interface LabelPlanInput {
 
 const SCENE_ID_BASE = 10_000_000;
 
+/** Breathing room around a scene name, in CSS px, so neighbouring scene
+ *  names never sit shoulder to shoulder: a smaller scene's name waits for
+ *  the zoom instead of squeezing in. Artist names keep the placer's gap. */
+export function sceneLabelPad(compact: boolean): { x: number; y: number } {
+	return compact ? { x: 8, y: 4 } : { x: 14, y: 6 };
+}
+
 /** Pick and place every label for one camera position. */
 export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 	const { data, names, camera, viewport, fitScale, compact } = input;
@@ -96,6 +103,7 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 
 	// Scenes.
 	const lift = sceneLift(k);
+	const pad = sceneLabelPad(compact);
 	const maxVideos = data.scenes.reduce((m, s) => Math.max(m, s.videos), 0);
 	const sAlpha = sceneLabelAlpha(k);
 	data.scenes.forEach((scene, index) => {
@@ -110,10 +118,10 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 		const focus = index === input.focusScene;
 		rects.push({
 			id,
-			x: sx - box.width / 2,
-			y: sy + dy,
-			width: box.width,
-			height: box.height,
+			x: sx - box.width / 2 - pad.x,
+			y: sy + dy - pad.y,
+			width: box.width + pad.x * 2,
+			height: box.height + pad.y * 2,
 			priority: (focus ? 950 : 500) + (maxVideos > 0 ? (scene.videos / maxVideos) * 100 : 0),
 		});
 		meta.set(id, {
@@ -197,9 +205,10 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 		if (!placed.has(rect.id)) continue;
 		const label = meta.get(rect.id);
 		if (!label) continue;
-		// placeLabels may have moved the rect to its altY spot.
+		// placeLabels may have moved the rect to its altY spot. Scene rects
+		// carry padding the drawn label does not.
 		const anchorSy = toSy(label.wy);
-		label.dy = rect.y - anchorSy;
+		label.dy = rect.y + (label.kind === 'scene' ? pad.y : 0) - anchorSy;
 		out.push(label);
 	}
 	return out;
