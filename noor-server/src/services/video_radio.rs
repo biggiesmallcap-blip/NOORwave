@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::video_intel::cuts;
 use super::video_sets::{AnchorArtist, VideoCandidate, VideoSetItem};
 
 const GENRE_CACHE_DAYS: i64 = 14;
@@ -363,10 +364,13 @@ pub fn load_candidates(
     let mut seen = HashSet::new();
     for row in rows {
         let (artist_id, json) = row?;
+        // Radio only plays what any channel may: the shared programmable
+        // rule drops clips, interviews, trailers and compilations.
         if let (Some(priority), Ok(video)) = (
             artist_id.and_then(|id| lane.get(&id)),
             serde_json::from_str::<VideoCandidate>(&json),
         ) && seen.insert(video.tidal_id)
+            && cuts::is_programmable(&video)
         {
             out.push((video, *priority));
         }
@@ -400,22 +404,23 @@ pub fn load_candidates(
         if !seen.insert(video_id) {
             continue;
         }
-        out.push((
-            VideoCandidate {
-                tidal_id: video_id,
-                title,
-                duration_s,
-                artist_id: Some(artist_id),
-                artist_name: Some(artist_name),
-                album_tidal_id: None,
-                artwork_url: crate::services::tidal::client::TidalClient::get_artwork_url(
-                    &image_id, 640,
-                ),
-                release_year,
-                ..Default::default()
-            },
-            *lane.get(&artist_id).unwrap_or(&SourceLane::Library),
-        ));
+        let video = VideoCandidate {
+            tidal_id: video_id,
+            title,
+            duration_s,
+            artist_id: Some(artist_id),
+            artist_name: Some(artist_name),
+            album_tidal_id: None,
+            artwork_url: crate::services::tidal::client::TidalClient::get_artwork_url(
+                &image_id, 640,
+            ),
+            release_year,
+            ..Default::default()
+        };
+        if !cuts::is_programmable(&video) {
+            continue;
+        }
+        out.push((video, *lane.get(&artist_id).unwrap_or(&SourceLane::Library)));
     }
     Ok(out)
 }

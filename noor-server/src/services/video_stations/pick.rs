@@ -1,12 +1,13 @@
 //! Pure ordering for station refills: no database access. Pipeline: drop
 //! excluded and twice-skipped videos, keep one cut per song, order by the
 //! station's rule (once-skipped videos go last), then space artists out.
+//! Random orders sample the artist first (weight sqrt of its playable
+//! videos), then the video, so big catalogs never crowd a station.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use crate::services::video_radio::video_song_key;
@@ -37,11 +38,13 @@ pub struct Candidate {
 pub enum Order {
     /// Each slot draws near/mid/far 60/30/10, then leans within the ring.
     Rings,
+    /// Artist first (sqrt of playable videos), then a uniform video.
     Uniform,
     /// Most-played liked artists first, round-robin, most popular video first.
     DeepCuts,
     Popularity,
-    /// Weighted shuffle by relevance x popularity.
+    /// Artist first (sqrt of playable videos x relevance), then a
+    /// popularity-weighted video.
     Lean,
     /// Lean, alternating liked and unknown artists.
     LeanMixed,
@@ -154,11 +157,7 @@ fn by_popularity(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
 
 fn order(candidates: Vec<Candidate>, order: Order, rng: &mut StdRng) -> Vec<Candidate> {
     match order {
-        Order::Uniform => {
-            let mut shuffled = candidates;
-            shuffled.shuffle(rng);
-            shuffled
-        }
+        Order::Uniform => artist_first(candidates, rng, |_| 1.0, |_| 1.0),
         Order::Lean => lean(candidates, rng),
         Order::LeanMixed => alternate_liked(candidates, rng),
         Order::Rings => rings(candidates, rng),
@@ -184,25 +183,69 @@ fn order(candidates: Vec<Candidate>, order: Order, rng: &mut StdRng) -> Vec<Cand
     }
 }
 
-fn weight(c: &Candidate) -> f64 {
-    let popularity = c
-        .video
+fn popularity_weight(c: &Candidate) -> f64 {
+    c.video
         .popularity
-        .map_or(1.0, |p| 0.5 + f64::from(p.clamp(0, 100)) / 200.0);
-    c.relevance.max(RELEVANCE_FLOOR) * popularity
+        .map_or(1.0, |p| 0.5 + f64::from(p.clamp(0, 100)) / 200.0)
+}
+
+fn relevance_pull(c: &Candidate) -> f64 {
+    c.relevance.max(RELEVANCE_FLOOR)
 }
 
 /// Weighted shuffle without replacement (Efraimidis-Spirakis keys).
-fn lean(candidates: Vec<Candidate>, rng: &mut StdRng) -> Vec<Candidate> {
+fn weighted_shuffle(
+    candidates: Vec<Candidate>,
+    rng: &mut StdRng,
+    weight: impl Fn(&Candidate) -> f64,
+) -> Vec<Candidate> {
     let mut keyed: Vec<(f64, Candidate)> = candidates
         .into_iter()
         .map(|c| {
             let u: f64 = rng.random_range(f64::EPSILON..1.0);
-            (u.powf(1.0 / weight(&c)), c)
+            (u.powf(1.0 / weight(&c).max(f64::EPSILON)), c)
         })
         .collect();
     keyed.sort_by(|a, b| b.0.total_cmp(&a.0));
     keyed.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Artist first, then the video. Each artist draws with weight
+/// sqrt(its playable videos) x its pull, so a hub with 400 videos is not 400
+/// times as likely as a newcomer with one; within an artist, videos come in
+/// a weighted shuffle. Built as competing exponential clocks: artist a fires
+/// at rate w_a and its k-th firing yields its k-th video, so sorting every
+/// firing equals "pick an artist with probability proportional to w_a among
+/// those with videos left, then its next video", in O(n log n).
+fn artist_first(
+    candidates: Vec<Candidate>,
+    rng: &mut StdRng,
+    pull: impl Fn(&Candidate) -> f64,
+    video_weight: impl Fn(&Candidate) -> f64,
+) -> Vec<Candidate> {
+    let mut by_artist: BTreeMap<i64, Vec<Candidate>> = BTreeMap::new();
+    for c in candidates {
+        let artist = c.video.artist_id.unwrap_or(-c.video.tidal_id);
+        by_artist.entry(artist).or_default().push(c);
+    }
+    let mut timed: Vec<(f64, Candidate)> = Vec::new();
+    for (_, videos) in by_artist {
+        let pull = videos.iter().map(&pull).fold(0.0_f64, f64::max);
+        let rate = (videos.len() as f64).sqrt() * pull.max(f64::EPSILON);
+        let mut clock = 0.0;
+        for c in weighted_shuffle(videos, rng, &video_weight) {
+            let u: f64 = rng.random_range(f64::EPSILON..1.0);
+            clock += -u.ln() / rate;
+            timed.push((clock, c));
+        }
+    }
+    timed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    timed.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Relevance-led artist-first order (Lean, and each ring of Rings).
+fn lean(candidates: Vec<Candidate>, rng: &mut StdRng) -> Vec<Candidate> {
+    artist_first(candidates, rng, relevance_pull, popularity_weight)
 }
 
 fn alternate_liked(candidates: Vec<Candidate>, rng: &mut StdRng) -> Vec<Candidate> {
@@ -550,6 +593,29 @@ mod tests {
             assert_eq!(picked[1].tidal_id, 2, "the guest follows the duet");
         }
         assert_eq!(picked.len(), 3);
+    }
+
+    #[test]
+    fn artists_are_sampled_by_the_square_root_of_their_videos() {
+        // One hub with 100 videos against 50 artists with one each. Per-video
+        // sampling would give the hub two thirds of the slots; artist-first
+        // with sqrt weighting gives it about 10 / (10 + 50), a sixth.
+        let mut all: Vec<Candidate> = (0..100).map(|i| cand(i, 1)).collect();
+        all.extend((100..150).map(|i| cand(i, 1000 + i)));
+        let none = HashSet::new();
+        for order in [Order::Uniform, Order::Lean] {
+            let mut hub = 0;
+            for seed in 0..40 {
+                let mut run = input(order, 20, &none);
+                run.seed = seed;
+                hub += pick(all.clone(), &run)
+                    .iter()
+                    .filter(|v| v.artist_id == Some(1))
+                    .count();
+            }
+            let share = hub as f64 / (40.0 * 20.0);
+            assert!((0.08..0.30).contains(&share), "{order:?} hub share {share}");
+        }
     }
 
     #[test]
