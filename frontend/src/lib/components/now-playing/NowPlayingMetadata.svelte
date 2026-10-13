@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { Track } from '$lib/api/client';
 	import type { QualityDisplay } from '$lib/stores/playerInformation';
-	import { formatPlayerStreamTooltip } from '$lib/player/stream_display';
+	import { formatPlayerStreamTooltip, type PlayerStreamDisplay } from '$lib/player/stream_display';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import {
 		albumRefFromTrack,
@@ -10,12 +10,6 @@
 		mediaHref,
 		trackRefFromTrack,
 	} from '$lib/player/media_link';
-
-	type Stream = {
-		audio_quality?: string | null;
-		sample_rate?: number | null;
-		bit_depth?: number | null;
-	} | null;
 
 	let {
 		track,
@@ -32,7 +26,7 @@
 		 * surface, so only callers that need a label (quiet mode) pass one. */
 		eyebrow?: string | null;
 		nowPlayingAttribution?: string | null;
-		stream?: Stream;
+		stream?: PlayerStreamDisplay;
 		streamDetail?: string;
 		/** Single quality statement for the surface (e.g. "Lossless"). The
 		 * artwork carries no badges of its own. */

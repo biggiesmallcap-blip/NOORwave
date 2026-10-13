@@ -416,6 +416,7 @@ pub(crate) async fn resolve_pending_current_queue_item(
         .flatten()
 }
 
+#[cfg(test)]
 pub(crate) async fn adopt_resolved_current_queue_item(
     state: &SharedState,
     queue_item_id: i64,

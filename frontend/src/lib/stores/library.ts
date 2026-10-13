@@ -21,6 +21,10 @@ export const isLoading = derived(
 	[browseLoading, trackListLoading],
 	([browse, trackList]) => browse || trackList,
 );
+// Per-surface first-page loads. A tab gates only on its own data so a warmup
+// for another tab never hides it behind a skeleton.
+export const browseIsLoading = { subscribe: browseLoading.subscribe };
+export const trackListIsLoading = { subscribe: trackListLoading.subscribe };
 export const isLoadingMore = derived(
 	[browseLoadingMore, trackListLoadingMore],
 	([browse, trackList]) => browse || trackList,

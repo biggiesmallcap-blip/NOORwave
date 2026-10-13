@@ -11,7 +11,6 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
-    mpsc,
 };
 use tracing::warn;
 
@@ -339,6 +338,7 @@ mod tests {
     use crate::playback::gapless::GaplessPlan;
     use crate::playback::player::PlaybackSourceKind;
     use std::sync::atomic::{AtomicU32, AtomicU64};
+    use std::sync::mpsc;
 
     fn shared(command_tx: mpsc::Sender<PlaybackRuntimeCommand>) -> PlaybackSharedState {
         PlaybackSharedState::new(

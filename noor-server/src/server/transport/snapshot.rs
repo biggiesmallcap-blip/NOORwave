@@ -14,6 +14,7 @@ pub(crate) async fn load_persisted_playback_snapshot(
     state_guard.db.with_conn(player::load_snapshot)
 }
 
+#[cfg(test)]
 pub(crate) async fn previous_persisted_playback_snapshot(
     state: &SharedState,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
