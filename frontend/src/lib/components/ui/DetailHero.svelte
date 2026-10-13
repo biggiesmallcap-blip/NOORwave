@@ -114,7 +114,10 @@
 		container: detail-hero / inline-size;
 		position: relative;
 		isolation: isolate;
-		overflow: hidden;
+		/* clip, not hidden: the backdrop bleeds 64px past the hero, and a hidden
+		   box is still a scroll container that scrollIntoView or focus can
+		   scroll, shoving the title out of view. */
+		overflow: clip;
 		padding: var(--space-4) 0;
 	}
 

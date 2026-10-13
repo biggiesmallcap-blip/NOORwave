@@ -5,19 +5,15 @@
 <script lang="ts">
 	import PlayerLayoutSelect from '$lib/shell/PlayerLayoutSelect.svelte';
 	import QueueEmpty from '$lib/shell/QueueEmpty.svelte';
-	import { buildVideoMenu } from '$lib/player/video_menu';
-	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
+	import VideoQueueList from '$lib/components/video/VideoQueueList.svelte';
 	import type { EffectivePlayerLayout } from '$lib/stores/playerLayout';
 	import {
-		playQueuedVideo,
 		clearVideoSession,
 		videoPanelAnchor,
 		videoSession,
 		videoSessionUpcoming,
-		type VideoSessionItem,
 	} from '$lib/stores/video_session';
 	import { createArtworkFallback } from '$lib/utils/artwork_fallback.svelte';
-	import { formatTrackDuration } from '$lib/utils/format';
 
 	interface Props {
 		layout: EffectivePlayerLayout;
@@ -31,17 +27,6 @@
 	const artworkCandidate = artwork.candidate;
 	const markArtworkFailed = artwork.markFailed;
 	let currentVideoArtwork = $derived(artworkCandidate($videoSession.current?.artwork_url, 320));
-
-	function openVideoQueueMenu(video: VideoSessionItem, event: MouseEvent) {
-		openContextMenu(event, buildVideoMenu(video, { inQueue: true }), video.title);
-	}
-
-	function videoQueueKeydown(video: VideoSessionItem, event: KeyboardEvent) {
-		if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
-		event.preventDefault();
-		event.stopPropagation();
-		openMenuAtElement(event.currentTarget as HTMLElement, buildVideoMenu(video, { inQueue: true }), video.title);
-	}
 
 	function formatVideoSourceLabel(source: string, label: string | null): string {
 		if (source === 'mix') return label ?? 'Video mix';
@@ -130,35 +115,7 @@
 		>⌫</button>
 	</div>
 	{#if $videoSessionUpcoming.length > 0}
-		<div class="video-panel-list">
-			{#each $videoSessionUpcoming.slice(0, 60) as video, i (`video-${video.tidal_id}-${i}`)}
-				{@const videoArt = artworkCandidate(video.artwork_url, 320)}
-				<button
-					type="button"
-					class="video-panel-row"
-					onclick={() => void playQueuedVideo(video.tidal_id)}
-					oncontextmenu={(event) => openVideoQueueMenu(video, event)}
-					onkeydown={(event) => videoQueueKeydown(video, event)}
-					aria-label={`Play ${video.title}`}
-				>
-					{#if videoArt}
-						<img
-							class="video-panel-row-art"
-							src={videoArt}
-							alt=""
-							onerror={() => markArtworkFailed(videoArt)}
-						/>
-					{:else}
-						<span class="video-panel-row-art placeholder">▶</span>
-					{/if}
-					<span class="video-panel-row-copy">
-						<strong>{video.title}</strong>
-						<span>{video.artist_name ?? 'Unknown artist'}</span>
-					</span>
-					<span class="video-panel-row-time">{formatTrackDuration(video.duration_ms ?? 0)}</span>
-				</button>
-			{/each}
-		</div>
+		<VideoQueueList videos={$videoSessionUpcoming.slice(0, 60)} />
 	{:else}
 		<QueueEmpty title={$videoSession.continuous ? 'Finding more videos…' : 'No videos up next.'}>
 			{$videoSession.continuous ? 'More from this artist and related artists will appear here.' : 'Start radio to keep listening.'}
@@ -373,79 +330,6 @@
 	.video-panel-queue-clear:hover {
 		color: var(--text-primary);
 		background: var(--bg-hover);
-	}
-
-	.video-panel-list {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		overflow-y: auto;
-		padding-right: 2px;
-	}
-
-	.video-panel-row {
-		width: 100%;
-		min-width: 0;
-		display: grid;
-		grid-template-columns: 48px minmax(0, 1fr) auto;
-		align-items: center;
-		gap: 10px;
-		border: 1px solid transparent;
-		border-radius: 8px;
-		background: transparent;
-		color: inherit;
-		font: inherit;
-		text-align: left;
-		padding: 7px;
-		cursor: pointer;
-	}
-
-	.video-panel-row:hover,
-	.video-panel-row:focus-visible {
-		background: color-mix(in srgb, var(--instrument-surface) 78%, transparent);
-		border-color: var(--border-subtle);
-		outline: none;
-	}
-
-	.video-panel-row-art {
-		width: 48px;
-		aspect-ratio: 16 / 9;
-		border-radius: 4px;
-		object-fit: cover;
-		background: color-mix(in srgb, var(--instrument-surface-strong) 85%, transparent);
-	}
-
-	.video-panel-row-art.placeholder {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-sm);
-	}
-
-	.video-panel-row-copy {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
-	}
-
-	.video-panel-row-copy strong,
-	.video-panel-row-copy span {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.video-panel-row-copy strong {
-		font-size: var(--font-size-sm);
-		color: var(--text-primary);
-	}
-
-	.video-panel-row-copy span,
-	.video-panel-row-time {
-		font-size: var(--font-size-xs);
-		color: var(--text-secondary);
 	}
 
 	@media (max-width: 1050px) and (min-width: 680px) {

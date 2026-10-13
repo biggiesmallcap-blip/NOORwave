@@ -163,7 +163,7 @@ impl StallTracker {
         //
         // `finished` used to be exempted here too, on the reasoning that such an
         // engine "emits its own terminal via the audio callback". That terminal
-        // is one-shot (`finished_notified` is latched before the send and never
+        // is one-shot (`finished_notified` latches once it is queued and is never
         // re-armed), so when it was lost the exemption meant nothing recovered
         // the queue and playback froze at the end of the track until the user
         // hit Next. Worse, the decoder marks `finished` as soon as decode

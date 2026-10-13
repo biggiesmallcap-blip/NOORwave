@@ -6329,6 +6329,48 @@ async fn playlist_add_to_tidal_requires_connection_and_preserves_local_contents(
 }
 
 #[tokio::test]
+async fn batch_playlist_add_shares_the_tidal_path_and_explains_failures() {
+    // The menu and dialog use the batch endpoint. It must give the same
+    // explained errors as the single-playlist route, not a bare status.
+    let db = fresh_migrated_db();
+    let id = seed_local_playlist(&db, "Synced", 1);
+    db.with_conn(|conn| {
+        conn.execute("UPDATE playlists SET tidal_uuid='remote' WHERE id=?1", [id])?;
+        conn.execute("UPDATE tracks SET tidal_id=42", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let track_id = db
+        .with_conn(|conn| Ok(queries::get_playlist_tracks(conn, id)?[0].id))
+        .unwrap();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/library/batch/add-to-playlist")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"playlist_id": id, "track_ids": [track_id]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["message"], "Connect TIDAL to add to this playlist");
+    assert_eq!(playlist_titles(&db, id), ["Track 0"]);
+}
+
+#[tokio::test]
 async fn rename_playlist_updates_a_regular_row() {
     // The old PUT /api/smart/playlists/{id} is gated on is_smart = 1 in SQL, so
     // a regular playlist could not be renamed at all before this route existed.

@@ -2,10 +2,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::playback::wasapi_exclusive::{
-    ExclusiveInitFailure, ExclusiveRenderSourceBank, ExclusiveStream,
+pub(crate) use crate::playback::wasapi_exclusive::{
+    ExclusiveRenderRole, ExclusiveRenderSource, build_exclusive_stream,
 };
-pub(crate) use crate::playback::wasapi_exclusive::{ExclusiveRenderRole, ExclusiveRenderSource};
+use crate::playback::wasapi_exclusive::{ExclusiveRenderSourceBank, ExclusiveStream};
 
 pub(crate) struct ExclusiveRuntimeSink {
     pub(crate) source_bank: Arc<ExclusiveRenderSourceBank>,
@@ -82,33 +82,6 @@ impl Drop for ExclusiveRuntimeSink {
     fn drop(&mut self) {
         self.retire_stream();
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_exclusive_stream(
-    device_pref: Option<&str>,
-    device_label: String,
-    desired_sample_rate: u32,
-    channels: u16,
-    grace_secs: u32,
-    latency_mode: crate::db::audio_settings::ExclusiveLatencyMode,
-    source_bank: Arc<ExclusiveRenderSourceBank>,
-    command_tx: std::sync::mpsc::Sender<crate::playback::runtime::PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<crate::playback::runtime::PlaybackRuntimeEvent>,
-    output_identity: Arc<()>,
-) -> std::result::Result<ExclusiveStream, ExclusiveInitFailure> {
-    crate::playback::wasapi_exclusive::build_exclusive_stream(
-        device_pref,
-        device_label,
-        desired_sample_rate,
-        channels,
-        grace_secs,
-        latency_mode,
-        source_bank,
-        command_tx,
-        event_tx,
-        output_identity,
-    )
 }
 
 #[cfg(test)]

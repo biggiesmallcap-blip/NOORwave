@@ -90,88 +90,23 @@ fn album_requires_catalog_retention(conn: &Connection, album_id: i64) -> rusqlit
 pub(super) async fn batch_add_to_playlist(
     State(state): State<SharedState>,
     Json(payload): Json<BatchPlaylistRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    require_positive_batch_id(payload.playlist_id)?;
-
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let bad_request =
+        |message: &str| (StatusCode::BAD_REQUEST, Json(json!({ "message": message })));
+    require_positive_batch_id(payload.playlist_id).map_err(|_| bad_request("Choose a playlist"))?;
     let track_ids = dedupe_positive_ids(&payload.track_ids);
     if track_ids.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(bad_request("No tracks to add"));
     }
-
-    let (playlist, track_pairs) = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(|conn| {
-                let playlist = queries::get_playlist(conn, payload.playlist_id)?;
-                let track_pairs = queries::get_track_tidal_ids(conn, &track_ids)?;
-                Ok((playlist, track_pairs))
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    let playlist = playlist.ok_or(StatusCode::NOT_FOUND)?;
-    if playlist.is_smart {
-        // A smart playlist's contents come from its rules; adding to it directly
-        // is meaningless and would be silently discarded on the next evaluation.
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // A locally created playlist has no TIDAL counterpart. It used to be
-    // rejected outright here, which made it impossible to add tracks to any
-    // playlist NOORwave itself had created; now the remote leg is simply
-    // skipped and only the local write runs.
-    //
-    // Which tracks land also differs by path. `get_track_tidal_ids` drops
-    // local-only tracks, which is right for a synced playlist - we can only
-    // mirror what TIDAL accepted - but wrong for a local one, where a local-only
-    // track is exactly what the user is trying to add.
-    let local_ids: Vec<i64> = if let Some(playlist_uuid) = playlist.tidal_uuid.as_deref() {
-        let tidal_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
-        if tidal_track_ids.is_empty() {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-
-        let client = state
-            .read()
-            .await
-            .tidal
-            .client()
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-
-        tidal_mutations::add_to_playlist(&client, playlist_uuid, &tidal_track_ids)
-            .await
-            .map_err(|error| {
-                tracing::error!("Batch add to playlist failed: {error}");
-                StatusCode::BAD_GATEWAY
-            })?;
-
-        track_pairs.iter().map(|(track_id, _)| *track_id).collect()
-    } else {
-        track_ids.clone()
-    };
-
-    let added = {
-        let state = state.read().await;
-        state
-            .db
-            .with_conn(|conn| {
-                // Goes through the shared helper so this path dedupes by track id
-                // and recomputes track_count exactly like every other add. The
-                // inline `INSERT OR IGNORE` this replaced only suppressed
-                // position collisions, so re-adding a track inserted it twice.
-                queries::add_tracks_to_playlist(conn, payload.playlist_id, &local_ids)
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    super::playlist_routes::notify_playlists_changed(&state).await;
-
+    let outcome =
+        super::playlist_routes::add_tracks_mirrored(&state, payload.playlist_id, &track_ids)
+            .await?;
     Ok(Json(json!({
         "playlist_id": payload.playlist_id,
         "requested_tracks": track_ids.len(),
-        "resolved_tracks": local_ids.len(),
-        "added": added
+        "resolved_tracks": outcome.resolved,
+        "skipped_not_on_tidal": outcome.skipped_not_on_tidal,
+        "added": outcome.added
     })))
 }
 

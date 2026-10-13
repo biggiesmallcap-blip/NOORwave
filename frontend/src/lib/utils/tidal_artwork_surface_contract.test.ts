@@ -13,6 +13,7 @@ function source(path: string): string {
 const playerBar = source('lib/shell/PlayerBar.svelte');
 const appShell = source('routes/+layout.svelte');
 const videoPanel = source('lib/shell/VideoQueuePanel.svelte');
+const videoQueueList = source('lib/components/video/VideoQueueList.svelte');
 const mobileSheet = source('lib/shell/MobileNowPlayingSheet.svelte');
 // The artist view (hero artwork, rails) is shared by the library and TIDAL
 // routes via ArtistDetail; both route files are thin wrappers.
@@ -41,6 +42,9 @@ describe('TIDAL artwork surface contracts', () => {
 		expect(appShell).not.toContain('src={item.track.artwork_url}');
 		expect(appShell).not.toContain('src={video.artwork_url}');
 		expect(videoPanel).not.toContain('src={video.artwork_url}');
+		expect(videoQueueList).toContain('{@const videoArt = artworkCandidate(video.artwork_url, 320)}');
+		expect(videoQueueList).toContain('onerror={() => markArtworkFailed(videoArt)}');
+		expect(videoQueueList).not.toContain('src={video.artwork_url}');
 	});
 
 	test('artist routes render TIDAL artwork through allowed sizes with fallbacks', () => {

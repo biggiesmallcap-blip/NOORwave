@@ -18,6 +18,8 @@
 		"smoke": "node scripts/smoke.mjs",
 		"smoke:library-loading": "node scripts/library-loading-smoke.ts",
 		"smoke:exclusive-warning": "node scripts/exclusive-warning-smoke.ts",
+		"smoke:playlist-surface": "node scripts/playlist-surface-smoke.mjs",
+		"smoke:library-hero-artwork": "node scripts/library-hero-artwork-smoke.mjs",
 		"smoke:full": "node scripts/smoke.mjs --phase full",
 		"smoke:headed": "node scripts/smoke.mjs --headed",
 		"test": "vitest run",

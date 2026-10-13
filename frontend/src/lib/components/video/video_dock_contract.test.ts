@@ -8,6 +8,10 @@ const dock = readFileSync(join(here, 'VideoDock.svelte'), 'utf8');
 const store = readFileSync(join(here, '../../stores/video_session.ts'), 'utf8');
 const client = readFileSync(join(here, '../../api/client.ts'), 'utf8');
 const layout = readFileSync(join(here, '../../../routes/+layout.svelte'), 'utf8');
+const player = readFileSync(join(here, 'VideoPlayer.svelte'), 'utf8');
+const fullscreenQueue = readFileSync(join(here, 'FullscreenVideoQueue.svelte'), 'utf8');
+const queueList = readFileSync(join(here, 'VideoQueueList.svelte'), 'utf8');
+const queuePanel = readFileSync(join(here, '../../shell/VideoQueuePanel.svelte'), 'utf8');
 
 describe('persistent video dock contract', () => {
 	test('renders a single persistent player mounted from the layout', () => {
@@ -15,6 +19,35 @@ describe('persistent video dock contract', () => {
 		// route) so navigation never unmounts the <video> and audio keeps going.
 		expect((dock.match(/<VideoPlayer/g) ?? []).length).toBe(1);
 		expect(layout).toContain('<VideoDock />');
+	});
+
+	test('loading another stream keeps the session mounted and fullscreen active', () => {
+		expect(dock).toContain('let active = $derived($videoSession.active);');
+		expect(dock).toContain("src={$videoSession.streamUrl ?? ''}");
+		expect(dock).not.toContain('$videoSession.active && Boolean($videoSession.streamUrl)');
+	});
+
+	test('both video queues share one row list with the shared video menu', () => {
+		expect(queuePanel).toContain('<VideoQueueList videos={$videoSessionUpcoming.slice(0, 60)} />');
+		expect(fullscreenQueue).toContain('<VideoQueueList videos={$videoSessionUpcoming} actions />');
+		expect(queueList).toContain('buildVideoMenu(video, { inQueue: true })');
+		expect(queueList).toContain('oncontextmenu={(event) => openVideoQueueMenu(video, event)}');
+		// No backdrop blur over live video: it re-blurs every frame.
+		expect(fullscreenQueue).not.toContain('backdrop-filter');
+	});
+
+	test('a stream that fails at 0:00 gets one fresh URL, not a refetch loop', () => {
+		expect(player).toContain('if (!retry) retryUsed = false;');
+		expect(player).toContain('await load(next, resumeAt, true);');
+		expect(player).toContain('if (!mounted || retrying || src === currentSrc) return;');
+		expect(player).not.toContain('retryUsed = resumeAt > 0');
+	});
+
+	test('Esc closes the fullscreen queue before the dock can leave fullscreen', () => {
+		expect(player).toContain("window.addEventListener('keydown', onKeydown, true);");
+		expect(player).toContain('if (get(contextMenu).open) closeContextMenu();');
+		// Q opens the video queue drawer, not the hidden music drawer.
+		expect(layout).toContain("if (effectivePlayerLayout === 'bottom') videoQueueDrawerOpen = !videoQueueDrawerOpen;");
 	});
 
 	test('docks into the watch page stage, corner player everywhere else', () => {

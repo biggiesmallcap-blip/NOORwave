@@ -1,6 +1,6 @@
 //! CPAL shared-mode output helpers.
 
-use crate::playback::runtime::commands::{PlaybackRuntimeCommand, PlaybackRuntimeEvent};
+use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::{
     PlaybackSharedState, write_output_f32, write_output_f64, write_output_i16, write_output_i24,
     write_output_i32, write_output_u16,
@@ -11,7 +11,6 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
-    mpsc,
 };
 use tracing::warn;
 
@@ -52,7 +51,7 @@ pub(crate) fn effective_output_config(
     base: &StreamConfig,
     desired_sample_rate: Option<u32>,
 ) -> StreamConfig {
-    let mut config = base.clone();
+    let mut config = *base;
     if let Some(rate) = desired_sample_rate {
         config.sample_rate = rate;
     }
@@ -63,7 +62,7 @@ pub(crate) fn output_rate_fallback_config(
     attempted: &StreamConfig,
     base: &StreamConfig,
 ) -> Option<StreamConfig> {
-    (attempted.sample_rate != base.sample_rate).then(|| base.clone())
+    (attempted.sample_rate != base.sample_rate).then_some(*base)
 }
 
 /// Retire the callback identity before CPAL tears down its native stream.
@@ -144,6 +143,20 @@ pub(crate) fn emit_cpal_stream_error(
         cpal::ErrorKind::Xrun => 1,
         cpal::ErrorKind::RealtimeDenied => 2,
         cpal::ErrorKind::DeviceChanged => 4,
+        // cpal 0.18 WASAPI reports a system default-device change on a
+        // default-device stream as a message-less StreamInvalidated (or
+        // DeviceNotAvailable when no default remains). Every genuine WASAPI
+        // fault carries a message. The stream keeps rendering to its original
+        // endpoint, so the runtime follows the new default instead of pausing.
+        cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable
+            if err.message().is_none() =>
+        {
+            8
+        }
+        // WASAPI falls back to SetThreadPriority when MMCSS refuses and
+        // reports that fallback's failure as a backend error. Audio still
+        // plays, so it is a notice rather than a fault.
+        _ if is_priority_boost_failure(&err) => 2,
         _ => 0,
     };
     if notice != 0 {
@@ -159,10 +172,16 @@ pub(crate) fn emit_cpal_stream_error(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        // The claim gives this producer sole access to initialization. Moving
-        // the owned diagnostic neither formats nor frees its payload here.
+        // Only the first fatal error is kept. The claim keeps the OnceLock
+        // initialization uncontended, so a callback never waits on another;
+        // later errors are simply dropped.
         let _ = callback.error.set(err);
     }
+}
+
+fn is_priority_boost_failure(err: &cpal::Error) -> bool {
+    err.message()
+        .is_some_and(|message| message.starts_with("Failed to promote audio thread"))
 }
 
 fn build_output_stream(
@@ -170,8 +189,6 @@ fn build_output_stream(
     output_config: &StreamConfig,
     output_sample_format: SampleFormat,
     shared: Arc<PlaybackSharedState>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<CpalOutputStream> {
     let live = Arc::new(AtomicBool::new(true));
     let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
@@ -188,7 +205,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [f32], _| write_output_f32(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [f32], _| write_output_f32(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -198,7 +215,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [f64], _| write_output_f64(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [f64], _| write_output_f64(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -208,9 +225,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [cpal::I24], _| {
-                    write_output_i24(data, &shared, &command_tx, &event_tx)
-                },
+                move |data: &mut [cpal::I24], _| write_output_i24(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -220,7 +235,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [i16], _| write_output_i16(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [i16], _| write_output_i16(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -230,7 +245,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [i32], _| write_output_i32(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [i32], _| write_output_i32(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -240,7 +255,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [u16], _| write_output_u16(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [u16], _| write_output_u16(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -270,17 +285,8 @@ fn build_started_output_stream(
     output_config: &StreamConfig,
     output_sample_format: SampleFormat,
     shared: Arc<PlaybackSharedState>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<CpalOutputStream> {
-    let stream = build_output_stream(
-        device,
-        output_config,
-        output_sample_format,
-        shared,
-        command_tx,
-        event_tx,
-    )?;
+    let stream = build_output_stream(device, output_config, output_sample_format, shared)?;
     start_cpal_stream(&stream)?;
     Ok(stream)
 }
@@ -291,16 +297,12 @@ pub(crate) fn build_started_output_stream_with_rate_fallback(
     fallback_config: &StreamConfig,
     output_sample_format: SampleFormat,
     shared: Arc<PlaybackSharedState>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<(CpalOutputStream, u32)> {
     match build_started_output_stream(
         device,
         attempted_config,
         output_sample_format,
         Arc::clone(&shared),
-        command_tx.clone(),
-        event_tx.clone(),
     ) {
         Ok(stream) => Ok((stream, attempted_config.sample_rate)),
         Err(primary_error) => {
@@ -318,8 +320,6 @@ pub(crate) fn build_started_output_stream_with_rate_fallback(
                 &fallback_config,
                 output_sample_format,
                 shared,
-                command_tx,
-                event_tx,
             )
             .with_context(|| {
                 format!(
@@ -338,6 +338,7 @@ mod tests {
     use crate::playback::gapless::GaplessPlan;
     use crate::playback::player::PlaybackSourceKind;
     use std::sync::atomic::{AtomicU32, AtomicU64};
+    use std::sync::mpsc;
 
     fn shared(command_tx: mpsc::Sender<PlaybackRuntimeCommand>) -> PlaybackSharedState {
         PlaybackSharedState::new(
@@ -355,17 +356,22 @@ mod tests {
         )
     }
 
+    /// WASAPI device removal always carries the HRESULT text; only a
+    /// default-device change arrives without a message.
+    fn device_removed() -> cpal::Error {
+        cpal::Error::with_message(
+            cpal::ErrorKind::DeviceNotAvailable,
+            "The audio endpoint device has been unplugged",
+        )
+    }
+
     #[test]
     fn cpal_error_callback_retains_identity_for_runtime_reconciliation() {
         let (command_tx, command_rx) = mpsc::channel();
         let shared = shared(command_tx);
         let live = Arc::new(AtomicBool::new(true));
         let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
-        emit_cpal_stream_error(
-            &shared,
-            &callback,
-            cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
-        );
+        emit_cpal_stream_error(&shared, &callback, device_removed());
         assert!(command_rx.try_recv().is_err());
         match callback.take_command(&shared).unwrap() {
             PlaybackRuntimeCommand::CpalOutputError {
@@ -391,37 +397,43 @@ mod tests {
         let shared = shared(command_tx);
         let live = Arc::new(AtomicBool::new(false));
         let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
-        emit_cpal_stream_error(
-            &shared,
-            &callback,
-            cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
-        );
+        emit_cpal_stream_error(&shared, &callback, device_removed());
         live.store(true, Ordering::Release);
         shared.stopped.store(true, Ordering::Release);
-        emit_cpal_stream_error(
-            &shared,
-            &callback,
-            cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
-        );
+        emit_cpal_stream_error(&shared, &callback, device_removed());
         assert!(command_rx.try_recv().is_err());
         assert!(callback.take_command(&shared).is_none());
     }
 
     #[test]
     fn recoverable_cpal_notices_do_not_queue_faults() {
-        for (kind, notice) in [
-            (cpal::ErrorKind::Xrun, 1),
-            (cpal::ErrorKind::RealtimeDenied, 2),
-            (cpal::ErrorKind::DeviceChanged, 4),
+        for (error, notice) in [
+            (cpal::Error::new(cpal::ErrorKind::Xrun), 1),
+            (cpal::Error::new(cpal::ErrorKind::RealtimeDenied), 2),
+            (cpal::Error::new(cpal::ErrorKind::DeviceChanged), 4),
+            (cpal::Error::new(cpal::ErrorKind::StreamInvalidated), 8),
+            (cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable), 8),
+            (
+                cpal::Error::with_message(
+                    cpal::ErrorKind::BackendError,
+                    "Failed to promote audio thread to real-time priority: Access is denied.",
+                ),
+                2,
+            ),
         ] {
             let (command_tx, command_rx) = mpsc::channel();
             let shared = shared(command_tx);
             let live = Arc::new(AtomicBool::new(true));
             let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
-            emit_cpal_stream_error(&shared, &callback, cpal::Error::new(kind));
+            let label = error.to_string();
+            emit_cpal_stream_error(&shared, &callback, error);
             assert!(
                 command_rx.try_recv().is_err(),
-                "recoverable notice {kind:?} stopped playback"
+                "recoverable notice {label} stopped playback"
+            );
+            assert!(
+                callback.take_command(&shared).is_none(),
+                "{label} became fatal"
             );
             assert_eq!(shared.deferred_cpal_notices.load(Ordering::Relaxed), notice);
             assert!(!shared.paused.load(Ordering::Acquire));

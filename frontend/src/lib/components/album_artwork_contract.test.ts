@@ -51,10 +51,12 @@ describe('album artwork contracts', () => {
 		expect(artistCarousel).not.toContain('style="background:');
 	});
 
-	test('album detail popup routes artwork through TIDAL fallback sizes', () => {
-		expect(albumDetailPopup).toContain('createArtworkFallback()');
-		expect(albumDetailPopup).toContain('let popupArtwork = $derived(artworkCandidate(album.artwork_url, 640));');
-		expect(albumDetailPopup).toContain('onerror={() => markArtworkFailed(popupArtwork)}');
+	test('album detail popup routes artwork through DetailHero', () => {
+		// DetailHero renders the cover through ArtworkImage, which owns the TIDAL
+		// size steps and the fallback.
+		expect(albumDetailPopup).toContain('<DetailHero');
+		expect(albumDetailPopup).toContain('artwork={album.artwork_url}');
+		expect(albumDetailPopup).not.toContain('<img');
 		expect(albumDetailPopup).not.toContain('src={album.artwork_url}');
 	});
 });

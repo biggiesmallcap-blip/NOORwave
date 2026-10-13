@@ -14,7 +14,7 @@ import {
 	type TidalPlayable,
 	type Track
 } from '$lib/api/client';
-import { setExclusiveEngaged, setExclusiveReleased } from '$lib/stores/exclusive_status';
+import { markExclusiveNotEngaged, setExclusiveEngaged } from '$lib/stores/exclusive_status';
 import { showToast, dismissToast } from '$lib/stores/toast';
 import { announceQueue, announceResolved } from '$lib/stores/queue_announcer';
 import { offerUndo } from '$lib/stores/queue_undo';
@@ -312,9 +312,15 @@ export function assertOnline(): boolean {
 	return false;
 }
 
+let playbackRuntimeRefreshSeq = 0;
+
 export async function refreshPlaybackRuntime() {
+	const seq = ++playbackRuntimeRefreshSeq;
 	try {
 		const result = await api.getPlaybackRuntime();
+		// TrackChanged fires at dispatch and again at Started. An older response
+		// landing last would show the previous output rate.
+		if (seq !== playbackRuntimeRefreshSeq) return;
 		currentStreamDisplayStore.set(result.stream ?? null);
 		playbackRuntimeInfoStore.set(result.runtime ?? null);
 		// Sync exclusive status store so the pill shows correctly after page load
@@ -326,7 +332,7 @@ export async function refreshPlaybackRuntime() {
 					result.runtime.exclusive_transport_format
 				);
 			} else {
-				setExclusiveReleased(result.runtime.device_name ?? '');
+				markExclusiveNotEngaged(result.runtime.device_name ?? '');
 			}
 		}
 		noteSuccess();

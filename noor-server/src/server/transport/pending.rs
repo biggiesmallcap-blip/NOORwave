@@ -8,7 +8,9 @@ use crate::server::routes::{
     import_metadata_from_tidal_track, load_persisted_tidal_tokens, refresh_dj_after_queue_change,
     reresolve_tidal_id, select_best_tidal_match,
 };
-use crate::server::transport::generation::is_current as playback_generation_is_current;
+use crate::server::transport::generation::{
+    is_current as playback_generation_is_current, mutate_if_owner_current,
+};
 use crate::services::tidal::{client::TidalClient, import as tidal_import};
 use crate::{AppEvent, SharedState};
 use rusqlite::{OptionalExtension, params};
@@ -25,16 +27,12 @@ async fn pending_runtime_owner_is_current(
     generation: u64,
     expected_owner: Option<PendingRuntimeOwner<'_>>,
 ) -> bool {
-    let Some((runtime, source)) = expected_owner else {
+    let Some((runtime, _)) = expected_owner else {
         return true;
     };
     let guard = state.read().await;
-    super::generation::current(&guard) == generation
-        && guard
-            .playback_runtime
-            .as_ref()
-            .is_some_and(|current| current.handle.is_same_runtime(runtime))
-        && Arc::ptr_eq(&runtime.lock_playback_source_identity(), source)
+    let source_guard = runtime.lock_playback_source_identity();
+    super::generation::owner_is_current(&guard, generation, expected_owner, Some(&source_guard))
 }
 
 pub(crate) async fn find_pending_tidal_match(
@@ -418,6 +416,7 @@ pub(crate) async fn resolve_pending_current_queue_item(
         .flatten()
 }
 
+#[cfg(test)]
 pub(crate) async fn adopt_resolved_current_queue_item(
     state: &SharedState,
     queue_item_id: i64,
@@ -438,17 +437,12 @@ pub(crate) async fn adopt_resolved_current_queue_item_for_owner(
     let _admission = admission.lock().await;
     let state_guard = state.read().await;
     let source_guard = expected_owner.map(|(runtime, _)| runtime.lock_playback_source_identity());
-    if super::generation::current(&state_guard) != generation
-        || expected_owner.is_some_and(|(runtime, source)| {
-            !state_guard
-                .playback_runtime
-                .as_ref()
-                .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                || !source_guard
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(current, source))
-        })
-    {
+    if !super::generation::owner_is_current(
+        &state_guard,
+        generation,
+        expected_owner,
+        source_guard.as_deref(),
+    ) {
         return Ok(None);
     }
 
@@ -629,18 +623,13 @@ async fn resolve_or_skip_pending_current_in_direction_for_owner(
             return load_persisted_playback_snapshot(state).await;
         }
 
-        let adopted = match expected_owner {
-            Some(owner) => {
-                adopt_resolved_current_queue_item_for_owner(
-                    state,
-                    queue_item_id,
-                    generation,
-                    Some(owner),
-                )
-                .await?
-            }
-            None => adopt_resolved_current_queue_item(state, queue_item_id, generation).await?,
-        };
+        let adopted = adopt_resolved_current_queue_item_for_owner(
+            state,
+            queue_item_id,
+            generation,
+            expected_owner,
+        )
+        .await?;
         if let Some(adopted_snapshot) = adopted {
             return Ok(adopted_snapshot);
         }
@@ -678,24 +667,38 @@ async fn resolve_or_skip_pending_current_in_direction_for_owner(
             "current pending row did not resolve; stepping over queue item"
         );
 
+        // Every write below runs only while this flow still owns the queue:
+        // a user command admitted since the checks above must not be undone.
         if skipped > PLAYBACK_ADVANCE_PENDING_SKIP_LIMIT {
-            return match give_up {
-                PendingGiveUp::StopPlayback => {
-                    stop_persisted_playback_after_advance_failure(state, context).await
+            let given_up = mutate_if_owner_current(state, generation, expected_owner, |s| {
+                match give_up {
+                    PendingGiveUp::StopPlayback => stop_playback_after_advance_failure(s, context),
+                    PendingGiveUp::RestoreAnchor(saved) => {
+                        tracing::warn!(
+                            target: "noor.playback.advance",
+                            event = "previous_restored_after_pending_skip_limit",
+                            context,
+                            "restoring playback anchor after pending rows failed to resolve on previous"
+                        );
+                        restore_playback_anchor_in(s, saved)
+                    }
                 }
-                PendingGiveUp::RestoreAnchor(saved) => {
-                    tracing::warn!(
-                        target: "noor.playback.advance",
-                        event = "previous_restored_after_pending_skip_limit",
-                        context,
-                        "restoring playback anchor after pending rows failed to resolve on previous"
-                    );
-                    restore_playback_anchor(state, saved).await
-                }
+            })
+            .await?;
+            return match given_up {
+                Some(snapshot) => Ok(snapshot),
+                None => load_persisted_playback_snapshot(state).await,
             };
         }
 
-        snapshot = step_persisted_playback_snapshot(state, direction).await?;
+        match mutate_if_owner_current(state, generation, expected_owner, |s| {
+            step_playback_snapshot(s, direction)
+        })
+        .await?
+        {
+            Some(stepped) => snapshot = stepped,
+            None => return load_persisted_playback_snapshot(state).await,
+        }
     }
 }
 

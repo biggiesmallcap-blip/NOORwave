@@ -34,3 +34,18 @@ export function describeError(error: unknown): ErrorDescription {
 	else message = 'Something went wrong loading this. Try again.';
 	return { message, detail };
 }
+
+/**
+ * Copy for a failed action (add, save, remove). The API writes its 4xx
+ * messages for people ("This track is not available on TIDAL", "Connect TIDAL
+ * to save this playlist"), so those are shown as they are; anything else, or a
+ * bare "API error: 500", falls back to `fallback`.
+ */
+export function actionErrorMessage(error: unknown, fallback: string): string {
+	const status = statusOf(error);
+	const message = error instanceof Error ? error.message.trim() : '';
+	if (status != null && status >= 400 && status < 500 && message && !/^API error/i.test(message)) {
+		return message;
+	}
+	return fallback;
+}

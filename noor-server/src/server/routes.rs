@@ -1198,11 +1198,11 @@ async fn command_response(
             "queue_revision": snapshot.queue_revision
         }))),
         Ok(transport_command::Outcome::Current) => current_playback_snapshot_json(state).await,
-        Err(error) => Err(command_error_response(state, error)),
+        Err(error) => Err(command_error_response(state, error).await),
     }
 }
 
-fn command_error_response(
+async fn command_error_response(
     state: &SharedState,
     error: transport_command::CommandError,
 ) -> (StatusCode, Json<Value>) {
@@ -1220,7 +1220,7 @@ fn command_error_response(
             track_id,
             stream_context,
             runtime_message,
-        } => start_error_response(state, error, track_id, stream_context, runtime_message),
+        } => start_error_response(state, error, track_id, stream_context, runtime_message).await,
         CommandError::UnplayableAdvance(message) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({
@@ -1275,7 +1275,7 @@ fn command_error_response(
 /// stream failures; `runtime_message`, when set, replaces every runtime
 /// acquisition error with a 502 carrying that message (the behaviour callers
 /// had when they wrapped runtime errors themselves).
-fn start_error_response(
+async fn start_error_response(
     state: &SharedState,
     error: StartError,
     track_id: i64,
@@ -1309,7 +1309,7 @@ fn start_error_response(
                 Dispatch::Switch => "switch",
             };
             let message = format!("Failed to {verb} host audio playback: {error}");
-            report_playback_failure(state, &message);
+            report_playback_failure(state, &message).await;
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({

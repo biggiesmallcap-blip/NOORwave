@@ -1,4 +1,4 @@
-import { api, type Playlist } from '$lib/api/client';
+import { api, ApiError, type Playlist } from '$lib/api/client';
 import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
 import { showToast } from '$lib/stores/toast';
 import type { MenuItem } from '$lib/stores/context_menu';
@@ -105,14 +105,17 @@ export function buildAddToPlaylistSubmenu(
 				const trackIds = await getTrackIds();
 				if (!trackIds.length) return;
 				try {
-					const { added } = await api.batchAddToPlaylist(playlist.id, trackIds);
+					const { added, skipped_not_on_tidal: skipped = 0 } = await api.batchAddToPlaylist(playlist.id, trackIds);
 					invalidatePlaylistCaches();
+					const notOnTidal = skipped > 0 ? ` (${skipped} not on TIDAL)` : '';
 					showToast(
-						`Added ${added} track${added !== 1 ? 's' : ''} to ${playlist.name}`,
+						`Added ${added} track${added !== 1 ? 's' : ''} to ${playlist.name}${notOnTidal}`,
 						'success',
 					);
-				} catch {
-					showToast(`Could not add to ${playlist.name}`, 'error');
+				} catch (error) {
+					// The server explains TIDAL conflicts and connection problems.
+					const reason = error instanceof ApiError && error.body ? `: ${error.message}` : '';
+					showToast(`Could not add to ${playlist.name}${reason}`, 'error');
 				}
 			},
 		}));

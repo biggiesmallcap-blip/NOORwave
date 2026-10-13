@@ -148,6 +148,31 @@ it('uses one reconnect timer, bounded backoff, and complete cleanup', () => {
 	vi.useRealTimers();
 });
 
+it('never calls the native timers with the scheduler as receiver', () => {
+	// Browsers throw "Illegal invocation" for that receiver; Node does not.
+	const receivers: unknown[] = [];
+	const realSetTimeout = globalThis.setTimeout;
+	const realClearTimeout = globalThis.clearTimeout;
+	globalThis.setTimeout = function (this: unknown, ...args: Parameters<typeof setTimeout>) {
+		receivers.push(this);
+		return realSetTimeout(...args);
+	} as typeof setTimeout;
+	globalThis.clearTimeout = function (this: unknown, timer?: Parameters<typeof clearTimeout>[0]) {
+		receivers.push(this);
+		realClearTimeout(timer);
+	} as typeof clearTimeout;
+	try {
+		const scheduler = new ReconnectScheduler(() => {});
+		scheduler.next();
+		scheduler.clear();
+		expect(receivers).toHaveLength(2);
+		expect(receivers).not.toContain(scheduler);
+	} finally {
+		globalThis.setTimeout = realSetTimeout;
+		globalThis.clearTimeout = realClearTimeout;
+	}
+});
+
 it('bounds explicit connection retries until a successful reset', () => {
 	const retries = new BoundedRetry(2);
 	expect(retries.tryBegin()).toBe(true);

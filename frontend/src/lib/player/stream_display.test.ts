@@ -62,6 +62,9 @@ describe('formatPlayerStreamDetail', () => {
 		expect(formatPlayerStreamTooltip({ sample_rate: 44_100, bit_depth: 16 }, '96 kHz output \u00b7 Excl'))
 			.toBe('96 kHz output \u00b7 Excl \u00b7 44.1 kHz / 16-bit source');
 		expect(formatPlayerStreamTooltip(null, '96 kHz output')).toBe('96 kHz output');
+		// Matching rates: the label already names the source.
+		expect(formatPlayerStreamTooltip({ sample_rate: 96_000, bit_depth: 24 }, '96 kHz · 24-bit · Excl'))
+			.toBe('96 kHz · 24-bit · Excl');
 	});
 
 	test.each([undefined, 0, -1, NaN, Infinity])('does not invent an output rate for %s', (sampleRate) => {

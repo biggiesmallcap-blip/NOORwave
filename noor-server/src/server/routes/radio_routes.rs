@@ -628,9 +628,10 @@ pub(in crate::server) async fn spawn_pending_resolvers_for_queue_items(
 pub(in crate::server) async fn start_first_radio_queue_item(
     state: &SharedState,
 ) -> Result<player::PlaybackSnapshot, (StatusCode, Json<Value>)> {
-    transport_command::start_queue_from_beginning(state)
-        .await
-        .map_err(|error| command_error_response(state, error))
+    match transport_command::start_queue_from_beginning(state).await {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) => Err(command_error_response(state, error).await),
+    }
 }
 
 pub(super) async fn radio_start(

@@ -380,10 +380,11 @@
 {#if $commandPaletteOpen}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="palette-backdrop" onclick={close} transition:fade={{ duration: 140 }}></div>
+	<div class="palette-backdrop" data-floating-layer onclick={close} transition:fade={{ duration: 140 }}></div>
 
 	<div
 		class="palette-panel"
+		data-floating-layer
 		role="dialog"
 		aria-modal="true"
 		aria-label="Command palette"

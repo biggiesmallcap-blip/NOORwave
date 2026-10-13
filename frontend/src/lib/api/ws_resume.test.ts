@@ -6,9 +6,9 @@ vi.mock('$lib/stores/tidal', () => ({ loadTidalStatus: vi.fn() }));
 vi.mock('$lib/stores/training', () => ({}));
 vi.mock('$lib/stores/audio_analysis', () => ({}));
 vi.mock('$lib/components/DiscoverSpace/discover_space_store', () => ({}));
-vi.mock('$lib/stores/exclusive_status', () => ({}));
+vi.mock('$lib/stores/exclusive_status', () => ({ setExclusiveEngaged: vi.fn(), setExclusiveFailed: vi.fn(), setExclusiveReleased: vi.fn() }));
 vi.mock('$lib/stores/downloads', () => ({}));
-vi.mock('$lib/stores/toast', () => ({ showToast: vi.fn() }));
+vi.mock('$lib/stores/toast', () => ({ showToast: vi.fn(), showUniqueToast: vi.fn() }));
 vi.mock('$lib/stores/audioSpectrum', () => ({ setAudioSpectrum: vi.fn() }));
 vi.mock('$lib/cache/ws_events', () => ({ applyCacheUpdateForWsMessage: vi.fn() }));
 
@@ -76,5 +76,19 @@ describe('WebSocket resume recovery', () => {
 	it('keeps a quiet socket from a server that never promised heartbeats', async () => {
 		await connectAndWait({ type: 'connected' });
 		expect(FakeSocket.instances).toHaveLength(1);
+	});
+
+	it('reports repeated exclusive failures through one unique toast', async () => {
+		const { connectWebSocket } = await import('./ws');
+		const { setExclusiveFailed } = await import('$lib/stores/exclusive_status');
+		const { showUniqueToast } = await import('$lib/stores/toast');
+		connectWebSocket();
+		const socket = FakeSocket.instances[0];
+		socket.open();
+		for (let i = 0; i < 2; i++) {
+			socket.message({ type: 'audio_exclusive_failed', device: 'DAC', reason: 'Device in use' });
+		}
+		expect(setExclusiveFailed).toHaveBeenCalledWith('DAC', 'Device in use');
+		expect(showUniqueToast).toHaveBeenCalledWith('Exclusive mode unavailable: Device in use', 'error', 8000);
 	});
 });

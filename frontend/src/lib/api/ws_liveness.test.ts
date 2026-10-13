@@ -11,7 +11,7 @@ vi.mock('$lib/stores/audio_analysis', () => ({}));
 vi.mock('$lib/components/DiscoverSpace/discover_space_store', () => ({}));
 vi.mock('$lib/stores/exclusive_status', () => ({}));
 vi.mock('$lib/stores/downloads', () => ({}));
-vi.mock('$lib/stores/toast', () => ({ showToast: vi.fn() }));
+vi.mock('$lib/stores/toast', () => ({ showToast: vi.fn(), showUniqueToast: vi.fn() }));
 vi.mock('$lib/stores/audioSpectrum', () => ({ setAudioSpectrum: vi.fn() }));
 vi.mock('$lib/cache/ws_events', () => ({ applyCacheUpdateForWsMessage: vi.fn() }));
 
