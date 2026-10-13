@@ -21,10 +21,11 @@
 
 	let tab = $derived(videoTabFor(page.url.pathname));
 	let onWatchPage = $derived(page.url.pathname === WATCH_PATH);
+	let onLiked = $derived(page.url.pathname === '/videos/liked');
 	let query = $derived($videoSectionQuery.trim());
 	// Liked filters its own wall with the field; everywhere else the field
 	// searches TIDAL and the results take the page while it has text.
-	let searchingTidal = $derived(query.length > 0 && tab !== 'liked');
+	let searchingTidal = $derived(query.length > 0 && !onLiked);
 
 	// A new page starts with an empty field, except when the Liked tab hands
 	// its filter over to a full TIDAL search.
@@ -69,8 +70,8 @@
 			<SearchField
 				bind:value={$videoSectionQuery}
 				variant="page"
-				placeholder={tab === 'liked' ? 'Search your liked videos' : 'Search TIDAL videos'}
-				ariaLabel={tab === 'liked' ? 'Search your liked videos' : 'Search TIDAL videos'}
+				placeholder={onLiked ? 'Search your liked videos' : 'Search TIDAL videos'}
+				ariaLabel={onLiked ? 'Search your liked videos' : 'Search TIDAL videos'}
 				suppressSuggestions
 			/>
 		{/snippet}
@@ -79,7 +80,7 @@
 			     entry, so Back leaves the section in one step. -->
 			<ScopeTabs tabs={VIDEO_TABS} current={tab} label="Video pages" replaceState />
 		{/snippet}
-		{#if tab === 'liked' && query}
+		{#if onLiked && query}
 			<p class="scope-note">
 				Filtering your liked videos.
 				<button type="button" class="link-btn" onclick={searchAllOfTidal}>Search all of TIDAL for "{query}"</button>

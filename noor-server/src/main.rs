@@ -995,6 +995,9 @@ async fn main() -> Result<()> {
     // minutes after boot so the liked-video scanner and sync go first.
     services::video_discovery::crawler::spawn(state.clone());
 
+    // Atlas and Air: derived video tables rebuild in the background.
+    services::video_intel::job::spawn(state.clone());
+
     // Radio similarity index auto-rebuild.
     //
     // `track_similarity` feeds radio's Engine recall lane but has no trigger of
