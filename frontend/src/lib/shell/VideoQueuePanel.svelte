@@ -9,6 +9,7 @@
 	import type { EffectivePlayerLayout } from '$lib/stores/playerLayout';
 	import {
 		clearVideoSession,
+		videoChannelOnAir,
 		videoPanelAnchor,
 		videoSession,
 		videoSessionUpcoming,
@@ -72,7 +73,8 @@
 			disabled={!$videoSession.active}
 			onclick={() => $videoSession.continuous ? videoSession.stopRadio() : videoSession.startRadio()}
 		>
-			{$videoSession.continuous ? 'Stop radio' : 'Start radio'}
+			<!-- On a channel, stopping its refills is leaving the channel. -->
+			{$videoChannelOnAir ? 'Leave channel' : $videoSession.continuous ? 'Stop radio' : 'Start radio'}
 		</button>
 		<button
 			class="video-panel-chip"
@@ -85,13 +87,15 @@
 		</button>
 	</div>
 	<p class="video-panel-source" aria-live="polite">
-		{$videoSession.radioIssue ?? ($videoSession.continuous
+		{$videoChannelOnAir
+			? `On air: ${String($videoChannelOnAir.no).padStart(2, '0')} ${$videoChannelOnAir.title}. The channel's schedule plays on; +/- on the stage steer it.`
+			: $videoSession.radioIssue ?? ($videoSession.continuous
 			? (!$videoSession.autoplay ? 'Radio paused. Turn on autoplay to resume.'
 				: $videoSession.radioSearching ? `Checking ${$videoSession.radioSeedArtistName ?? 'this artist'} and related artists…`
 				: $videoSession.radioDiscoveryMessage ?? 'Radio checks related artists as the queue plays.')
 			: 'Radio adds new videos beyond this queue.')}
 	</p>
-	{#if $videoSession.continuous && $videoSession.radioHits.length > 0}
+	{#if $videoSession.continuous && !$videoChannelOnAir && $videoSession.radioHits.length > 0}
 		<div class="video-radio-hits" aria-label="Recent radio discoveries">
 			{#each $videoSession.radioHits as hit, index (`${hit.artist}-${index}`)}
 				<div class="video-radio-hit"><strong>+{hit.count}</strong><span>{hit.count === 1 ? 'video' : 'videos'} from {hit.artist}</span></div>
@@ -118,7 +122,7 @@
 		<VideoQueueList videos={$videoSessionUpcoming.slice(0, 60)} />
 	{:else}
 		<QueueEmpty title={$videoSession.continuous ? 'Finding more videos…' : 'No videos up next.'}>
-			{$videoSession.continuous ? 'More from this artist and related artists will appear here.' : 'Start radio to keep listening.'}
+			{$videoChannelOnAir ? 'The channel is lining up what airs next.' : $videoSession.continuous ? 'More from this artist and related artists will appear here.' : 'Start radio to keep listening.'}
 		</QueueEmpty>
 	{/if}
 </section>
