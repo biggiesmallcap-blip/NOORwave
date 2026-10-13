@@ -441,7 +441,8 @@ fn track_ids(
 
 /// Hard cases for a station, where the designs should differ most, taken in
 /// turn from each source and never two by one artist:
-/// - stations you started that had nothing learned to go on (no library lane),
+/// - stations you started (Last.fm picks; Home runs have none) that had
+///   nothing learned to go on (no library lane),
 /// - played tracks your listening model does not know yet,
 /// - the most played track of each rare genre held with confidence,
 /// - tracks added recently and not played yet.
@@ -455,11 +456,14 @@ fn hard_compare_seeds(
             .collect()
     };
 
+    // Home suggestions run radio without Last.fm, so a row with Last.fm picks
+    // is a station the listener started.
     let cold = track_ids(
         conn,
         "SELECT d.seed_track_id FROM radio_diagnostics d
          JOIN tracks t ON t.id = d.seed_track_id
-         WHERE d.actual_library_count = 0 AND t.tidal_id > 0
+         WHERE d.actual_library_count = 0 AND d.actual_lastfm_count > 0
+           AND t.tidal_id > 0
          GROUP BY d.seed_track_id
          ORDER BY MAX(d.id) DESC
          LIMIT 20",
@@ -813,10 +817,21 @@ mod tests {
                  VALUES (5, 3, ?1, 1, 0.9)",
                 [model.id],
             )?;
+            // A station you started: Last.fm picks, nothing learned.
             crate::services::radio_config::log_radio_diagnostics(
                 conn,
                 &crate::services::radio_config::RadioDiagnosticsRow {
                     seed_track_id: Some(1),
+                    profile_name: "mixed".into(),
+                    actual_lastfm_count: 24,
+                    ..Default::default()
+                },
+            )?;
+            // A Home suggestion run, newer: Home runs radio without Last.fm.
+            crate::services::radio_config::log_radio_diagnostics(
+                conn,
+                &crate::services::radio_config::RadioDiagnosticsRow {
+                    seed_track_id: Some(2),
                     profile_name: "mixed".into(),
                     ..Default::default()
                 },
@@ -837,6 +852,11 @@ mod tests {
             assert_eq!(
                 reason(1),
                 "A station you started had nothing learned to go on"
+            );
+            assert_eq!(
+                reason(2),
+                "Your listening model doesn't know it yet",
+                "a Home suggestion run is not a station you started"
             );
             assert_eq!(reason(3), "Rare genre: Dub Techno");
             assert_eq!(reason(4), "Added recently, not played yet");

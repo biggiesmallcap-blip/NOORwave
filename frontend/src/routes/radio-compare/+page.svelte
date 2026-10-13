@@ -183,7 +183,6 @@
 				class="btn btn-secondary"
 				onclick={() => addSuggested('hard')}
 				disabled={suggesting !== null}
-				title="Seeds where the stations should differ most: cold stations, tracks your model doesn't know, rare genres, new additions"
 			>
 				{suggesting === 'hard' ? 'Adding...' : 'Add hard seeds'}
 			</button>
@@ -224,11 +223,11 @@
 				<FilterChip
 					pressed={entry.seed.local_id === activeId}
 					onclick={() => entry.seed.local_id != null && select(entry.seed.local_id)}
-					title={entry.best ? 'Judged' : 'Not judged yet'}
 				>
 					{#snippet children()}
 						<span class="chip-mark" aria-hidden="true">{entry.best ? '✓' : ''}</span>
 						{entry.seed.title}
+						{#if entry.best}<span class="visually-hidden">, judged</span>{/if}
 					{/snippet}
 				</FilterChip>
 			{/each}
@@ -417,6 +416,15 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--space-2);
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
 	}
 
 	.chip-mark {
