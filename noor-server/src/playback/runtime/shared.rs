@@ -624,8 +624,9 @@ pub(crate) struct PlaybackSharedState {
 }
 
 impl PlaybackSharedState {
-    /// Called by the runtime actor. Channel allocation and reference ownership
-    /// stay here; the device callback only writes Copy values into the buffer.
+    /// Test helper: drains the callback mailbox into commands and events.
+    /// Production delivery is `receive_runtime_command` in the runtime loop,
+    /// which differs on a failed send.
     #[cfg(test)]
     pub(crate) fn drain_rt_notifications(
         &self,

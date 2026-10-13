@@ -172,11 +172,10 @@ impl PlaybackRuntimeConfig {
 }
 
 pub fn spawn_runtime(config: PlaybackRuntimeConfig) -> Result<PlaybackRuntimeHandle> {
-    // Real-time safety: this channel MUST remain unbounded
-    // (std::sync::mpsc::channel, NOT sync_channel). The CPAL audio callback
-    // in shared.rs::write_output_buffer sends TrackTerminal and
-    // CrossfadeStart commands through command_tx; a bounded channel would
-    // block the audio thread on a full buffer and cause dropouts/underruns.
+    // The audio callback never sends here; it posts to the buffer's fixed
+    // mailbox, which the loop drains. Decoder threads and the loop itself do
+    // send (TrackTerminal, NextDecodeComplete), so keep it unbounded to never
+    // block them on a full queue.
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
     let worker_event_tx = event_tx.clone();
