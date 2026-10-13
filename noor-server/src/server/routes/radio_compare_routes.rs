@@ -1,6 +1,7 @@
 //! Blind radio comparison. For one seed it returns the first tracks each
-//! station design would play: today's station, Last.fm alone, and TIDAL's own
-//! track radio. Nothing is queued or played and no diagnostics row is written.
+//! station design would play: today's station, Last.fm alone, TIDAL's own
+//! track radio, and the hybrid prototype (`services::radio::hybrid`). Nothing
+//! is queued or played and no diagnostics row is written.
 //! Every list passes the same queue gate and the same TIDAL matching, so the
 //! lists differ only in where their picks come from. Ratings live in one
 //! `server_config` row so a session survives reloads.
@@ -133,10 +134,26 @@ pub(super) async fn radio_compare_seed(
         lastfm_station(lastfm.as_ref(), &lastfm_similar_cache, &seed),
         tidal_station(&state, &db, &seed),
     );
+    let hybrid = {
+        let note = (lastfm_only.0.is_empty() && tidal_radio.0.is_empty()).then(|| {
+            "Neither TIDAL nor Last.fm had picks, so only library tracks remain".to_string()
+        });
+        let picks = crate::services::radio::hybrid::hybrid_station(
+            &db,
+            seed.id,
+            tidal_radio.0.clone(),
+            lastfm_only.0.clone(),
+            blend,
+            COMPARE_MAX_CANDIDATES,
+        )
+        .await;
+        (picks, note)
+    };
     let lists = [
         ("current", current),
         ("lastfm", lastfm_only),
         ("tidal", tidal_radio),
+        ("hybrid", hybrid),
     ];
     let arms = futures::future::join_all(lists.into_iter().map(|(arm, (picks, note))| {
         let db = db.clone();
@@ -575,6 +592,10 @@ mod tests {
         assert_eq!(current, vec![2, 3], "learned neighbors, seed left out");
         assert_eq!(arm("lastfm")["note"], "Last.fm is not connected");
         assert_eq!(arm("tidal")["note"], "This seed is not on TIDAL");
+        assert_eq!(
+            arm("hybrid")["note"],
+            "Neither TIDAL nor Last.fm had picks, so only library tracks remain"
+        );
 
         let (queued, diagnostics): (i64, i64) = db
             .with_conn(|conn| {

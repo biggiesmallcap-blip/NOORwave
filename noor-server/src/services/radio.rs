@@ -22,6 +22,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub mod hybrid;
+
 mod rerank;
 pub(crate) use rerank::*;
 
