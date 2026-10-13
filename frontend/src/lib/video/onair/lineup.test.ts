@@ -37,6 +37,16 @@ describe('the dial', () => {
 		expect(byNumber(fixtureChannels.channels).map((channel) => channel.no)).toEqual([1, 6, 7, 12, 14, 21]);
 	});
 
+	test('coming-up scenes (no 0) follow the numbered channels in server order', () => {
+		const dial = [
+			{ id: 'scene:9', no: 0 },
+			{ id: 'scene:3', no: 12 },
+			{ id: 'your', no: 1 },
+			{ id: 'scene:4', no: 0 },
+		];
+		expect(byNumber(dial).map((channel) => channel.id)).toEqual(['your', 'scene:3', 'scene:9', 'scene:4']);
+	});
+
 	test('scene hue when there is one, a stable hue per fixed channel otherwise', () => {
 		const [bay, your] = fixtureChannels.channels;
 		expect(channelHue(bay)).toBe(32);
