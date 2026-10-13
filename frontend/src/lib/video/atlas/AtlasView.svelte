@@ -6,7 +6,7 @@
 	// card, the section search field to fly to an artist, Route mode to plot a
 	// path between two artists. Keys: arrows pan, +/- zoom, F fits, R toggles
 	// Route mode, Esc closes.
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api } from '$lib/api/client';
@@ -612,7 +612,37 @@
 	}
 
 	let resizeObserver: ResizeObserver | null = null;
+	let overlayObserver: ResizeObserver | null = null;
 	let unsubscribeMotion: (() => void) | null = null;
+
+	/** The toolbars, legend and open card cover parts of the map; names are
+	 *  placed around them instead of hiding underneath. */
+	function syncObstacles() {
+		if (!renderer || !stageEl || !canvasEl) return;
+		const base = canvasEl.getBoundingClientRect();
+		const boxes = [...stageEl.querySelectorAll<HTMLElement>('.hud, .legend, .panel')]
+			.map((el) => {
+				const r = el.getBoundingClientRect();
+				return { x: r.left - base.left - 6, y: r.top - base.top - 4, width: r.width + 12, height: r.height + 8 };
+			})
+			.filter((box) => box.width > 12 && box.height > 8);
+		renderer.setObstacles(boxes);
+	}
+
+	// Overlays come and go with the card, the legend and route mode.
+	$effect(() => {
+		void card;
+		void legendOpen;
+		void compact;
+		void routeMode;
+		if (!ready || !stageEl) return;
+		void tick().then(() => {
+			overlayObserver?.disconnect();
+			overlayObserver = new ResizeObserver(() => syncObstacles());
+			stageEl?.querySelectorAll('.hud, .legend, .panel').forEach((el) => overlayObserver?.observe(el));
+			syncObstacles();
+		});
+	});
 
 	onMount(() => {
 		if (!canvasEl || !stageEl) return;
@@ -639,6 +669,7 @@
 			const r = canvasEl.getBoundingClientRect();
 			compact = r.width < 640;
 			renderer.resize(r.width, r.height, window.devicePixelRatio || 1);
+			syncObstacles();
 		});
 		resizeObserver.observe(canvasEl);
 		canvasEl.addEventListener('wheel', onWheel, { passive: false });
@@ -661,6 +692,7 @@
 		renderer?.destroy();
 		renderer = null;
 		resizeObserver?.disconnect();
+		overlayObserver?.disconnect();
 		unsubscribeMotion?.();
 		if (dwellTimer) clearTimeout(dwellTimer);
 		if (typeof window !== 'undefined') {

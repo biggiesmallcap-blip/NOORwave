@@ -78,7 +78,19 @@ export interface LabelPlanInput {
 	compact: boolean;
 	artistLabelHeight: number;
 	maxArtistCandidates?: number;
+	/** Screen boxes covered by overlays (toolbars, legend, the open card).
+	 *  No label is placed under them. */
+	obstacles?: readonly ScreenBox[];
 }
+
+export interface ScreenBox {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+const OBSTACLE_PRIORITY = 1e9;
 
 const SCENE_ID_BASE = 10_000_000;
 
@@ -100,6 +112,17 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 
 	const rects: LabelRect[] = [];
 	const meta = new Map<number, PlannedLabel>();
+
+	// Overlays claim their space first; they are accepted by the placer but
+	// never drawn (they have no meta). Clamped so the placer accepts them.
+	(input.obstacles ?? []).forEach((box, n) => {
+		const x = Math.max(0, box.x);
+		const y = Math.max(0, box.y);
+		const width = Math.min(viewport.width, box.x + box.width) - x;
+		const height = Math.min(viewport.height, box.y + box.height) - y;
+		if (width <= 0 || height <= 0) return;
+		rects.push({ id: -(n + 1), x, y, width, height, priority: OBSTACLE_PRIORITY });
+	});
 
 	// Scenes.
 	const lift = sceneLift(k);

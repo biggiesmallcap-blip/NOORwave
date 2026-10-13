@@ -28,7 +28,7 @@ import {
 	type Viewport,
 } from './camera';
 import type { AtlasData } from './decode';
-import { planLabels, sceneFontSize, zoomLevel, type PlannedLabel } from './labels';
+import { planLabels, sceneFontSize, zoomLevel, type PlannedLabel, type ScreenBox } from './labels';
 import { SpatialGrid, sceneAt } from './spatial';
 import {
 	STAGE,
@@ -302,6 +302,8 @@ export class AtlasRenderer {
 	private labels: PlannedLabel[] = [];
 	private labelsAt = -Infinity;
 	private labelsStale = true;
+	/** Overlay boxes (CSS px, stage coordinates) labels must stay out of. */
+	private obstacles: ScreenBox[] = [];
 	/** The last plan used the reduced in-motion candidate set. */
 	private labelsPartial = false;
 
@@ -337,6 +339,20 @@ export class AtlasRenderer {
 	}
 
 	// ------------------------------------------------------------- setup
+
+	/** Tell the renderer which parts of the stage overlays cover. */
+	setObstacles(boxes: readonly ScreenBox[]): void {
+		const same =
+			boxes.length === this.obstacles.length &&
+			boxes.every((b, i) => {
+				const o = this.obstacles[i];
+				return Math.abs(b.x - o.x) < 1 && Math.abs(b.y - o.y) < 1 && Math.abs(b.width - o.width) < 1 && Math.abs(b.height - o.height) < 1;
+			});
+		if (same) return;
+		this.obstacles = boxes.map((b) => ({ x: b.x, y: b.y, width: b.width, height: b.height }));
+		this.labelsStale = true;
+		this.requestDraw();
+	}
 
 	resize(width: number, height: number, dpr: number): void {
 		const w = Math.max(1, Math.round(width));
@@ -965,6 +981,7 @@ export class AtlasRenderer {
 			compact: this.compact,
 			artistLabelHeight: ARTIST_FONT_PX + 3,
 			maxArtistCandidates: moving ? 160 : undefined,
+			obstacles: this.obstacles,
 		});
 	}
 

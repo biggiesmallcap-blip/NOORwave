@@ -98,6 +98,14 @@ describe('label level of detail', () => {
 		expect(artists).toEqual(['Beyonc\u00e9 Tribute', 'Carlos Rivera', 'Shakira']);
 	});
 
+	test('no label is placed under an overlay', () => {
+		const open = planLabels(input(1));
+		expect(open.length).toBeGreaterThan(0);
+		const base = input(1);
+		const cover = { x: 0, y: 0, width: base.viewport.width, height: base.viewport.height };
+		expect(planLabels({ ...base, obstacles: [cover] })).toEqual([]);
+	});
+
 	test('labels never overlap', () => {
 		const labels = planLabels(input(12, 850, 670));
 		for (const a of labels) {
