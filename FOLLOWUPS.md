@@ -933,6 +933,10 @@ is intermittent and was never reproduced. The suite has timing-sensitive areas
 (the in-memory DB helper exists because temp .db + WAL churn stalls under
 Defender), so a slow-IO flake is plausible. If it resurfaces, capture the name
 from the failure block before rerunning anything.
+Seen again 2026-10-13: `playback::decode::tests::resampled_http_wav_reaches_finished_pcm_buffer`
+(and once `exclusive_device_wait_preserves_total_timeout_for_non_signaling_device`)
+failed under full-suite load; the WAV fixture server's 2 s socket read timed
+out. Both pass in isolation and on rerun.
 Spawned by: home suggestions hidden-gem rewrite 2026-07-26
 
 ### db: reason_json duplicates a human label on every neighbour row
@@ -1084,3 +1088,55 @@ restored. No permanent media-key behavior change was made.
 Next check: reproduce with a separate shortcut-owning process, decide whether
 registration failure should warn and continue, and verify cleanup on setup
 failure without interrupting another application's audio or shortcut ownership.
+
+### playback: transport listeners still do SQLite under AppState guards
+
+Started, runtime exit, retry exhaustion and the dispatch intent read run
+SQLite while holding the AppState read or write guard. With one shared
+connection and a 5 s busy timeout, a slow write stalls every API reader and
+the listener behind it. The 1.0.6 handoffs flagged this repeatedly; it needs
+a scheduling change (read under the guard, write after releasing it, then
+revalidate ownership) rather than more guards.
+Spawned by: v1.0.6 audit (PR #355 review)
+
+### playback: hardware checks for the v1.0.6 audit fixes
+
+These fixes are covered by unit and transport tests but not yet heard on
+hardware: tearing after the PCM ring buffer change (shared and exclusive,
+96 kHz, 30+ min), unplug then Resume on a named DAC, switching the Windows
+default output while on "System default", an exclusive device fault while
+idle, scrubbing right after a crossfade, a transient CDN failure retrying once
+then pausing, and the DJ status page open across a track change.
+Spawned by: v1.0.6 audit
+
+### playback: DJ snapshots copy the whole deck under the PCM lock
+
+`decoded_deck_snapshot` and `active_deck_snapshot` clone every decoded sample
+of a deck while holding the buffer lock the render callback needs. At hi-res
+that is tens of MB at a transition. The callback now waits up to 100 us and
+then renders a silent period, so a DJ transition can still drop a period.
+Copy only the frames the program needs, or snapshot outside the lock.
+Spawned by: v1.0.6 audit
+
+### playback: the runtime actor polls every 5 ms while audio plays
+
+Callback notifications moved to a polled mailbox in 1.0.6 so the callback
+never sends on a channel, and the actor now wakes at 200 Hz during playback
+to drain it. A wake primitive the callback can signal without allocating
+would let it sleep until there is work.
+Spawned by: v1.0.6 audit
+
+### playlists: finish the TIDAL write path once PR #360 lands
+
+- "Add to playlist" on a TIDAL track imports it and sends only the canonical
+  local id, so an alias or a canonical row without `tidal_id` adds the wrong
+  copy or fails. The snapshot path already sends `tidal_track_ids`; the
+  dialog in `AddToPlaylistDialog.svelte` should do the same.
+- `TidalCollectionPopup.svelte` always passes `refresh=true`, so the server
+  cache for a playlist's tracks is never used on first open.
+- `notify_playlists_changed` clears every cached TIDAL playlist on any local
+  playlist change, including favourite toggles.
+- Confirm a snapshot save, an add and a refresh against a live TIDAL account;
+  the v2 create-playlist call and the add ETag have only fixture coverage.
+Spawned by: v1.0.6 audit (PR #357 review); files owned by open PR #360
+
