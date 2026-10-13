@@ -10,6 +10,36 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### tidal: confirm the playlist move toIndex convention live
+
+`move_playlist_item` sends TIDAL's `toIndex` measured after lifting the item
+out, the same convention the local move uses. TIDAL does not document it and
+it has never been checked against the real API. Next check: on a throwaway
+TIDAL playlist with a video in it, move an item down and up from NOORwave and
+compare the order in the TIDAL app; if TIDAL counts before the lift, adjust
+`tidal_move_target` in playlist_routes.rs (downward moves gain one).
+Spawned by: the playlist TIDAL write-safety branch (bsc/playlist-tidal-write-safety).
+
+### playlists: let the picker create a playlist directly
+
+The Add to playlist picker's empty state links to /playlists, which now has a
+New playlist button, but the user still loses their place. Open
+`NewPlaylistDialog` from the picker and add the pending tracks to the new
+playlist. Left out to avoid conflicting with the picker rewrite in PR #360.
+Spawned by: the playlist TIDAL write-safety branch (bsc/playlist-tidal-write-safety).
+
+### remote: browser reconnect timer loses its receiver
+
+Source: the Library loading browser regression, before its WebSocket fixture was
+connected, raised `TypeError: Illegal invocation` from `ReconnectScheduler.next`.
+Affected surfaces: `frontend/src/lib/remote/connection.ts` and
+`frontend/src/lib/api/ws.ts`. The scheduler invokes stored native `setTimeout`
+and `clearTimeout` functions as instance methods, which Edge rejects, preventing
+reconnect after a socket closes. This is outside the Library rendering change.
+Next check: reproduce a socket close in Edge, wrap the native timer defaults in
+receiver-safe closures, and verify reconnect and cancellation in a browser.
+Spawned by: Library blank-on-entry follow-up to PR #351.
+
 ### tidal: move stream.rs behind the session-bound transport
 
 Playback stream resolution (playbackinfo, manifests, video streams, downloads)

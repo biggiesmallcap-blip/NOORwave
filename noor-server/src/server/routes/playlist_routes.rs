@@ -216,6 +216,77 @@ async fn load_playlist(
         .map_err(playlist_error_response)
 }
 
+/// Where each local row of a TIDAL-mirrored playlist sits in the live TIDAL
+/// playlist: `map[local_position] = tidal_index`.
+///
+/// The local copy can differ from TIDAL's item list: sync reads tracks only, so
+/// videos are missing locally, and the playlist may have been edited in another
+/// TIDAL app since the last sync. `remote` is TIDAL's list with each track
+/// resolved to its local id (`None` for videos and unknown tracks). Each local
+/// row matches the next remote item with the same id, in order. A local row
+/// with no match means TIDAL no longer has it, so the edit is refused (`None`)
+/// rather than applied to whatever now sits at that index.
+pub(super) fn align_to_tidal(local: &[i64], remote: &[Option<i64>]) -> Option<Vec<usize>> {
+    let mut map = Vec::with_capacity(local.len());
+    let mut next = 0;
+    for id in local {
+        let offset = remote[next..].iter().position(|item| *item == Some(*id))?;
+        map.push(next + offset);
+        next += offset + 1;
+    }
+    Some(map)
+}
+
+/// TIDAL's `toIndex` for moving local row `from` to local index `to`, both
+/// measured after lifting the row out (the local and TIDAL move convention).
+/// The item lands just before the local row that will follow it, or just after
+/// the last local row, so videos and unknown items keep their neighbours.
+pub(super) fn tidal_move_target(map: &[usize], from: usize, to: usize) -> usize {
+    let tidal_from = map[from];
+    let lifted = |index: usize| if index > tidal_from { index - 1 } else { index };
+    let others: Vec<usize> = map
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| *position != from)
+        .map(|(_, index)| *index)
+        .collect();
+    match others.get(to) {
+        Some(&next) => lifted(next),
+        None => others.last().map_or(0, |&last| lifted(last) + 1),
+    }
+}
+
+/// Read the live TIDAL playlist and map this playlist's local rows onto it.
+async fn locate_on_tidal(
+    state: &SharedState,
+    client: &crate::services::tidal::client::TidalClient,
+    uuid: &str,
+    playlist_id: i64,
+) -> Result<(Vec<usize>, tidal_mutations::PlaylistItems), (StatusCode, Json<Value>)> {
+    let remote = tidal_mutations::get_playlist_items(client, uuid)
+        .await
+        .map_err(tidal_write_error)?;
+    let map = state
+        .read()
+        .await
+        .db
+        .with_conn(|conn| {
+            let local = queries::playlist_track_order(conn, playlist_id)?;
+            let resolved = remote
+                .items
+                .iter()
+                .map(|item| match item {
+                    Some(tidal_id) => crate::db::catalogue::track_id(conn, *tidal_id),
+                    None => Ok(None),
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(align_to_tidal(&local, &resolved))
+        })
+        .map_err(playlist_error_response)?
+        .ok_or_else(|| tidal_write_error(tidal_mutations::PlaylistConflict.into()))?;
+    Ok((map, remote))
+}
+
 /// Existing callers create local playlists. Snapshot saves opt into TIDAL.
 pub(super) async fn create_playlist_route(
     State(state): State<SharedState>,
@@ -504,7 +575,14 @@ pub(super) async fn remove_playlist_tracks_route(
                 Json(json!({ "message": "Connect TIDAL to edit a synced playlist" })),
             )
         })?;
-        tidal_mutations::remove_playlist_items(&client, uuid, &payload.positions)
+        let (map, remote) = locate_on_tidal(&state, &client, uuid, id).await?;
+        // Positions past the end are ignored, as the local removal ignores them.
+        let indices: Vec<usize> = payload
+            .positions
+            .iter()
+            .filter_map(|position| map.get(*position as usize).copied())
+            .collect();
+        tidal_mutations::remove_playlist_items(&client, uuid, &indices, &remote.etag)
             .await
             .map_err(tidal_write_error)?;
     }
@@ -552,7 +630,16 @@ pub(super) async fn move_playlist_track_route(
                 Json(json!({ "message": "Connect TIDAL to edit a synced playlist" })),
             )
         })?;
-        tidal_mutations::move_playlist_item(&client, uuid, payload.from, payload.to)
+        let (map, remote) = locate_on_tidal(&state, &client, uuid, id).await?;
+        let from = payload.from as usize;
+        if from >= map.len() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "message": "That position is not in the playlist" })),
+            ));
+        }
+        let to = tidal_move_target(&map, from, payload.to as usize);
+        tidal_mutations::move_playlist_item(&client, uuid, map[from], to, &remote.etag)
             .await
             .map_err(tidal_write_error)?;
     }
@@ -729,15 +816,30 @@ pub(super) async fn add_tracks_mirrored(
     }
     let local_ids: Vec<i64> = match playlist.tidal_uuid.as_deref() {
         Some(uuid) => {
-            let pairs: Vec<(i64, i64)> = state
+            // Only the tracks the local add will insert. A track already here can
+            // map to a different TIDAL release than the copy TIDAL holds, and
+            // TIDAL's own duplicate check would then add it remotely only.
+            let (new_count, pairs): (usize, Vec<(i64, i64)>) = state
                 .read()
                 .await
                 .db
-                .with_conn(|conn| queries::get_track_tidal_ids(conn, track_ids))
-                .map_err(playlist_error_response)?
-                .into_iter()
-                .filter(|(_, tidal_id)| *tidal_id > 0)
-                .collect();
+                .with_conn(|conn| {
+                    let new_ids = queries::new_playlist_track_ids(conn, playlist_id, track_ids)?;
+                    let pairs = queries::get_track_tidal_ids(conn, &new_ids)?
+                        .into_iter()
+                        .filter(|(_, tidal_id)| *tidal_id > 0)
+                        .collect();
+                    Ok((new_ids.len(), pairs))
+                })
+                .map_err(playlist_error_response)?;
+            if new_count == 0 {
+                // Everything is already here: nothing to send TIDAL.
+                return Ok(PlaylistAddOutcome {
+                    added: 0,
+                    resolved: 0,
+                    skipped_not_on_tidal: 0,
+                });
+            }
             if pairs.is_empty() {
                 return Err((
                     StatusCode::BAD_REQUEST,

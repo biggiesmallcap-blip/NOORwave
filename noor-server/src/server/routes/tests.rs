@@ -6301,31 +6301,71 @@ fn tidal_snapshot_persistence_is_linked_ordered_and_atomic() {
 async fn playlist_add_to_tidal_requires_connection_and_preserves_local_contents() {
     let db = fresh_migrated_db();
     let id = seed_local_playlist(&db, "Synced", 1);
+    let other = seed_local_playlist(&db, "Other", 1);
     db.with_conn(|conn| {
         conn.execute("UPDATE playlists SET tidal_uuid='remote' WHERE id=?1", [id])?;
-        conn.execute("UPDATE tracks SET tidal_id=42", [])?;
+        conn.execute("UPDATE tracks SET tidal_id = 41 + id", [])?;
         Ok(())
     })
     .unwrap();
-    let track_id = db
-        .with_conn(|conn| Ok(queries::get_playlist_tracks(conn, id)?[0].id))
-        .unwrap();
+    let first_track = |playlist| {
+        db.with_conn(|conn| Ok(queries::get_playlist_tracks(conn, playlist)?[0].id))
+            .unwrap()
+    };
+    let (existing, new_track) = (first_track(id), first_track(other));
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
     ))));
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/playlists/{id}/tracks"))
-                .header("content-type", "application/json")
-                .body(Body::from(json!({"track_ids": [track_id]}).to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let add = |track_id: i64| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/playlists/{id}/tracks"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"track_ids": [track_id]}).to_string()))
+            .unwrap()
+    };
+
+    // Already in the playlist: nothing is sent to TIDAL, so TIDAL can never
+    // gain a copy the local playlist does not.
+    let response = app.clone().oneshot(add(existing)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_json(response).await["added"], 0);
+
+    // A new track must reach TIDAL first.
+    let response = app.oneshot(add(new_track)).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(playlist_titles(&db, id), ["Track 0"]);
+}
+
+#[test]
+fn tidal_edits_map_local_rows_onto_the_live_item_list() {
+    use playlist_routes::{align_to_tidal, tidal_move_target};
+    // TIDAL holds A, a video, B, A, C; the local copy has no video.
+    let remote = [Some(1), None, Some(2), Some(1), Some(3)];
+    assert_eq!(
+        align_to_tidal(&[1, 2, 1, 3], &remote),
+        Some(vec![0, 2, 3, 4])
+    );
+    // B was removed in another TIDAL app: refuse instead of editing whatever
+    // now sits at B's old index.
+    assert_eq!(align_to_tidal(&[1, 2, 3], &[Some(1), Some(3)]), None);
+    // A track added elsewhere does not shift the local rows' targets.
+    assert_eq!(
+        align_to_tidal(&[1, 3], &[Some(1), Some(9), Some(3)]),
+        Some(vec![0, 2])
+    );
+
+    // Without gaps the TIDAL target is the local one.
+    let identity = [0, 1, 2, 3];
+    assert_eq!(tidal_move_target(&identity, 0, 2), 2);
+    assert_eq!(tidal_move_target(&identity, 3, 0), 0);
+    assert_eq!(tidal_move_target(&identity, 0, 3), 3);
+    // Local A, B, C at TIDAL 0, 2, 3 (video at 1).
+    let with_video = [0, 2, 3];
+    assert_eq!(tidal_move_target(&with_video, 2, 0), 0); // C before A
+    assert_eq!(tidal_move_target(&with_video, 1, 0), 0); // B before A
+    assert_eq!(tidal_move_target(&with_video, 0, 2), 3); // A after C
+    assert_eq!(tidal_move_target(&with_video, 0, 1), 2); // A between B and C
 }
 
 #[tokio::test]
@@ -6334,14 +6374,17 @@ async fn batch_playlist_add_shares_the_tidal_path_and_explains_failures() {
     // explained errors as the single-playlist route, not a bare status.
     let db = fresh_migrated_db();
     let id = seed_local_playlist(&db, "Synced", 1);
+    // A track not yet in the playlist: one already there is a no-op that never
+    // reaches TIDAL.
+    let other = seed_local_playlist(&db, "Other", 1);
     db.with_conn(|conn| {
         conn.execute("UPDATE playlists SET tidal_uuid='remote' WHERE id=?1", [id])?;
-        conn.execute("UPDATE tracks SET tidal_id=42", [])?;
+        conn.execute("UPDATE tracks SET tidal_id = 41 + id", [])?;
         Ok(())
     })
     .unwrap();
     let track_id = db
-        .with_conn(|conn| Ok(queries::get_playlist_tracks(conn, id)?[0].id))
+        .with_conn(|conn| Ok(queries::get_playlist_tracks(conn, other)?[0].id))
         .unwrap();
     let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
         db.clone(),
@@ -6562,6 +6605,57 @@ async fn move_playlist_track_rejects_an_out_of_range_source() {
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     // The playlist is untouched.
     assert_eq!(playlist_titles(&db, playlist_id), ["Track 0", "Track 1"]);
+}
+
+#[tokio::test]
+async fn batch_add_to_a_tidal_playlist_explains_itself_and_never_adds_remote_only() {
+    let db = fresh_migrated_db();
+    let playlist_id = seed_local_playlist(&db, "Synced", 1);
+    let (present, local_only) = db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE playlists SET tidal_uuid='remote' WHERE id=?1",
+                [playlist_id],
+            )?;
+            conn.execute("UPDATE tracks SET tidal_id=42", [])?;
+            let present = queries::get_playlist_tracks(conn, playlist_id)?[0].id;
+            conn.execute(
+                "INSERT INTO tracks (title, artist_id, source, is_library)
+                 VALUES ('Local file', 1, 'local', 1)",
+                [],
+            )?;
+            Ok((present, conn.last_insert_rowid()))
+        })
+        .unwrap();
+    let app = api_routes(Arc::new(tokio::sync::RwLock::new(fresh_test_state(
+        db.clone(),
+    ))));
+    let add = |track_id: i64| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/library/batch/add-to-playlist")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"playlist_id":{playlist_id},"track_ids":[{track_id}]}}"#
+            )))
+            .unwrap()
+    };
+
+    // Already present: a no-op that never reaches TIDAL (none is connected).
+    let response = app.clone().oneshot(add(present)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_json(response).await["added"], 0);
+
+    // A local-only file cannot go in a TIDAL playlist, and the picker can say why.
+    let response = app.oneshot(add(local_only)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        response_json(response).await["message"]
+            .as_str()
+            .unwrap()
+            .contains("available on TIDAL")
+    );
+    assert_eq!(playlist_titles(&db, playlist_id), ["Track 0"]);
 }
 
 #[tokio::test]

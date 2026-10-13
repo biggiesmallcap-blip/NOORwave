@@ -6,7 +6,7 @@ The reference surfaces are `/videos/stations` and `/videos/liked`. When in doubt
 
 ## Adoption status
 
-This file describes the target system from the October 2026 design audit, and the app now follows it. Foundations: layout, label and motion tokens, the `.t-*` role classes, the solid focus ring, the contrast floor, buttons without a hover lift, and an in-app Reduce motion setting. Components (`$lib/components/ui/`): `CommandHeader` and `ScopeTabs` (Videos, Library, artist discography), `Segmented`, `FilterChip`, `Dropdown`, `ActionBar` (every detail hero: album, TIDAL album, artist, playlist, Spotify, and the album quick view), a borderless `DetailHero` whose title steps down for long names, `ErrorState` (plain language, Retry, raw error behind Details) and a `Skeleton` that appears after 150ms. Routes: every title-header page starts at the workspace edge with one 32px title and no eyebrow; Settings is a form on the ground; `/mix` replaces Automix and DJ and is the reference for live-control pages; Search puts the top result beside five songs; album pages group long works; windows 680-899px wide get an icon-rail sidebar. `pnpm lint` warns about raw transition and animation durations (`scripts/lint-motion.mjs --verbose` lists them). Open product calls are tracked in `FOLLOWUPS.md` ("Design system adoption").
+This file describes the target system from the October 2026 design audit, and the app now follows it. Foundations: layout, label and motion tokens, the `.t-*` role classes, the solid focus ring, the contrast floor, buttons without a hover lift, and an in-app Reduce motion setting. Components (`$lib/components/ui/`): `CommandHeader` and `ScopeTabs` (Videos, Library, artist discography, Playlists), `Segmented`, `FilterChip`, `Dropdown`, `ActionBar` (every detail hero: album, TIDAL album, artist, playlist, Spotify, and the album quick view), a borderless `DetailHero` whose title steps down for long names, `ErrorState` (plain language, Retry, raw error behind Details) and a `Skeleton` that appears after 150ms. Routes: every title-header page starts at the workspace edge with one 32px title and no eyebrow; Settings is a form on the ground; `/mix` replaces Automix and DJ and is the reference for live-control pages; Search puts the top result beside five songs; album pages group long works; windows 680-899px wide get an icon-rail sidebar. `pnpm lint` warns about raw transition and animation durations (`scripts/lint-motion.mjs --verbose` lists them). Open product calls are tracked in `FOLLOWUPS.md` ("Design system adoption").
 
 ## Principles
 
@@ -158,6 +158,7 @@ Never: a bordered row, a bordered stat tile, a card inside a card, a page wrappe
 | Selected | `--accent-soft` fill, `--text-primary`. |
 | Playing | Title in `--accent-strong`, an animated level glyph in the lead column, and `box-shadow: inset 3px 0 0 var(--accent)` on the row. |
 | Overlay | `--bg-elevated` at 96 percent, `--blur-modal`, `--border-subtle`, `--panel-shadow`, `--radius-md`. |
+| Dialog | A native `<dialog>` opened with `showModal()`, portalled, in the overlay treatment over a `rgba(0, 0, 0, 0.55)` backdrop with `--blur-modal`. The global reset drops the browser's centring, so give it `position: fixed; inset: 0; margin: auto`. Escape goes through the native cancel event; a backdrop click is a click whose target is the dialog itself. Every way out calls `dialog.close()`, so the browser restores focus. Title in `section-title`, fields sunken. |
 | Text over artwork | Always white with a dark gradient scrim, in every theme. Never use theme text tokens on top of an image. |
 
 Contrast:
@@ -207,6 +208,13 @@ One track row anatomy, used by every list of tracks:
 
 `.row-btn` remains the borderless icon action inside a browse row.
 
+Editable lists (a playlist's tracks):
+
+- Select by position, not id: the same track can appear twice. Click selects, Ctrl/Cmd-click toggles, Shift-click extends in the order shown.
+- Keys: Delete removes the selection, Escape clears it, Ctrl/Cmd+A selects every row shown, Alt+Up/Down moves the focused row. Ignore them while a field has focus, a dialog is open, or another handler (the context menu) took the key.
+- A view sort or filter changes only what is shown and persists like any sort. Dragging and Move to top/bottom only work in the stored order with no filter; say so in the toolbar instead of failing silently.
+- Reorder optimistically and snap back if the write fails.
+
 ## Cards, grids and rails
 
 Card grids reflow with `repeat(auto-fill, minmax(min(var(--card-min), 100%), 1fr))`. `--card-min` is 168px for albums and playlists, 140px for artists and 240px for videos. Track-row layouts and structural splits keep explicit columns.
@@ -244,6 +252,7 @@ Every rendered image that may receive a TIDAL URL needs an error fallback. Prefe
 | Empty | `EmptyState` where the content would be, left-aligned in the content column, no box: a `section-title`, one sentence, and the next useful action ("Search TIDAL for ..."). Distinguish nothing-yet, filtered-empty (offer Clear filters) and search-empty (offer a wider scope). |
 | Error | `ErrorState`, same layout as empty, plain language, a Retry action, and technical detail behind a disclosure. Never show raw `ApiError` text. |
 | Success | Toggles confirm in place (the heart fills). Background work and reversible destructive actions use the toast with Undo. |
+| Undo | Hide the rows at once and send the write only when the Undo toast expires (6 s), so Undo never has to rebuild anything on the server or TIDAL. Leaving the page applies the pending write; so does any edit that would shift positions (reorder, refresh). If the data changes underneath first, drop the pending write and say so. |
 | Validation | Show a field error after the field is left or the form is submitted, never on open. |
 
 ## Motion

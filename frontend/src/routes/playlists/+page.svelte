@@ -18,7 +18,8 @@
 	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
 	import { wsMessages } from '$lib/api/ws';
 	import { get } from 'svelte/store';
-	import { goto } from '$app/navigation';
+	import { goto, replaceState } from '$app/navigation';
+	import { page } from '$app/state';
 	import { createPersistedStore, oneOf } from '$lib/stores/persisted';
 	import { buildPlaylistMenu } from '$lib/player/playlist_menu';
 	import { downloadPlaylist } from '$lib/stores/downloads';
@@ -28,6 +29,13 @@
 		startPlaylistRadio,
 	} from '$lib/stores/player';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
+	import PlaylistDetailsDialog from '$lib/components/playlist/PlaylistDetailsDialog.svelte';
+	import ScopeTabs from '$lib/components/ui/ScopeTabs.svelte';
+	import Dropdown from '$lib/components/ui/Dropdown.svelte';
+	import Segmented from '$lib/components/ui/Segmented.svelte';
+	import Skeleton from '$lib/components/ui/Skeleton.svelte';
+	import ErrorState from '$lib/components/ui/ErrorState.svelte';
+	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
@@ -72,10 +80,30 @@
 		sample_source: SampleDataSource | '';
 	};
 
-	type PlaylistFilter = 'all' | 'favorites' | 'smart' | 'regular';
+	type PlaylistFilter = 'all' | 'favorites' | 'tidal' | 'local' | 'smart';
+	type PlaylistView = 'grid' | 'list';
 	type PlaylistSort = 'default' | 'name' | 'tracks' | 'type' | 'recent_update' | 'recent_create';
 
-	const PLAYLIST_FILTERS = ['all', 'favorites', 'smart', 'regular'] as const;
+	const PLAYLIST_FILTERS = ['all', 'favorites', 'tidal', 'local', 'smart'] as const;
+	const FILTER_LABELS: Record<PlaylistFilter, string> = {
+		all: 'All',
+		favorites: 'Favorites',
+		tidal: 'TIDAL',
+		local: 'Local',
+		smart: 'Smart',
+	};
+	const SORT_OPTIONS: readonly { value: PlaylistSort; label: string }[] = [
+		{ value: 'recent_update', label: 'Recently updated' },
+		{ value: 'recent_create', label: 'Recently created' },
+		{ value: 'default', label: 'Favorites, then name' },
+		{ value: 'name', label: 'Name' },
+		{ value: 'tracks', label: 'Track count' },
+		{ value: 'type', label: 'Type' },
+	];
+	const VIEW_OPTIONS: readonly { value: PlaylistView; label: string }[] = [
+		{ value: 'grid', label: 'Grid' },
+		{ value: 'list', label: 'List' },
+	];
 	const PLAYLIST_SORTS = [
 		'default',
 		'name',
@@ -90,6 +118,9 @@
 	});
 	const persistedSort = createPersistedStore<PlaylistSort>('playlists.sort', 'recent_update', {
 		parse: oneOf(PLAYLIST_SORTS),
+	});
+	const playlistView = createPersistedStore<PlaylistView>('playlists.view', 'grid', {
+		parse: oneOf(['grid', 'list'] as const),
 	});
 
 	let _draftIdCounter = 0;
@@ -204,6 +235,7 @@
 	// ─── Page state ───────────────────────────────────────────────────────────
 	let playlists = $state<Playlist[]>([]);
 	let playlistTracksById = $state<Record<number, Track[]>>({});
+	let newPlaylistOpen = $state(false);
 	let isLoading = $state(true);
 	let loadError = $state('');
 	let playlistQuery = $state('');
@@ -341,7 +373,7 @@
 
 	onMount(() => {
 		mosaicById = { ...mosaicById, ...mapMosaicsFromCache(snapshotCache()) };
-		void loadPlaylists();
+		void loadPlaylists().then(openEditorFromUrl);
 		// A playlist can be created while this page is already open - saving the
 		// queue from the layout's queue panel is the common case. Cache
 		// invalidation alone would not repaint, because loadPlaylists() only runs
@@ -395,6 +427,15 @@
 		} finally {
 			if (isCurrentPlaylistLoad(seq)) isLoading = false;
 		}
+	}
+
+	/** The detail page's "Edit rules" opens /playlists?edit=<id>. */
+	function openEditorFromUrl() {
+		const id = Number(page.url.searchParams.get('edit'));
+		if (!id) return;
+		replaceState('/playlists', {});
+		const target = playlists.find((playlist) => playlist.id === id && playlist.is_smart);
+		if (target) openEdit(target);
 	}
 
 	function isCurrentPlaylistLoad(seq: number): boolean {
@@ -953,7 +994,6 @@
 
 	// ─── Derived display helpers ──────────────────────────────────────────────
 	function smartCount() { return playlists.filter((p) => p.is_smart).length; }
-	function regularCount() { return playlists.length - smartCount(); }
 
 	function parseSmartDef(raw: string | null | undefined) {
 		if (!raw) return null;
@@ -1067,22 +1107,14 @@
 	};
 
 	let otherPlaylists = $derived(playlists.filter((p) => !p.is_smart));
-	let activeFilterLabel = $derived(
-		playlistFilter === 'all'
-			? 'All'
-			: playlistFilter === 'favorites'
-				? 'Favorites'
-				: playlistFilter === 'smart'
-					? 'Smart'
-					: 'Regular',
-	);
 	let filteredPlaylists = $derived.by(() => {
 		const q = playlistQuery.trim().toLowerCase();
 		return [...playlists]
 			.filter((playlist) => {
 				if (playlistFilter === 'favorites' && !playlist.is_favorite) return false;
 				if (playlistFilter === 'smart' && !playlist.is_smart) return false;
-				if (playlistFilter === 'regular' && playlist.is_smart) return false;
+				if (playlistFilter === 'tidal' && (playlist.is_smart || !playlist.tidal_uuid)) return false;
+				if (playlistFilter === 'local' && (playlist.is_smart || playlist.tidal_uuid)) return false;
 				if (!q) return true;
 				return playlistSearchText(playlist).includes(q);
 			})
@@ -1116,7 +1148,8 @@
 	function filterCount(filter: PlaylistFilter): number {
 		if (filter === 'favorites') return playlists.filter((p) => p.is_favorite).length;
 		if (filter === 'smart') return smartCount();
-		if (filter === 'regular') return regularCount();
+		if (filter === 'tidal') return playlists.filter((p) => !p.is_smart && p.tidal_uuid).length;
+		if (filter === 'local') return playlists.filter((p) => !p.is_smart && !p.tidal_uuid).length;
 		return playlists.length;
 	}
 
@@ -1186,11 +1219,11 @@
 <div class="page-shell playlists-page animate-in">
 	<PageHeader
 		title="Playlists"
-		subtitle="Synced lists and rules-based smart sets."
+		subtitle="Your playlists, synced TIDAL playlists, and rules-based smart sets."
 	>
 		{#snippet actions()}
-			<button class="btn btn-glass" onclick={loadPlaylists}>Refresh</button>
-			<button class="btn btn-primary" onclick={openNew}>New smart playlist</button>
+			<button class="btn btn-secondary" onclick={openNew}>New smart playlist</button>
+			<button class="btn btn-primary" onclick={() => (newPlaylistOpen = true)}>New playlist</button>
 		{/snippet}
 	</PageHeader>
 
@@ -1211,34 +1244,16 @@
 		</div>
 
 		<div class="playlist-toolbar">
-			<div class="filter-pills" aria-label="Playlist filters">
-				{#each [
-					{ value: 'all', label: 'All' },
-					{ value: 'favorites', label: 'Favorites' },
-					{ value: 'smart', label: 'Smart' },
-					{ value: 'regular', label: 'Regular' },
-				] as filter}
-					<button
-						class="filter-pill"
-						class:active={playlistFilter === filter.value}
-						onclick={() => (playlistFilter = filter.value as PlaylistFilter)}
-					>
-						{filter.label}
-						<span>{filterCount(filter.value as PlaylistFilter)}</span>
-					</button>
-				{/each}
-			</div>
-
-			<div class="playlist-sort">
-				<label class="field-label" for="playlist-sort">Sort</label>
-				<select id="playlist-sort" bind:value={playlistSort}>
-					<option value="default">Favorites, then name</option>
-					<option value="recent_update">Recently updated</option>
-					<option value="recent_create">Recently created</option>
-					<option value="name">Name</option>
-					<option value="tracks">Track count</option>
-					<option value="type">Type</option>
-				</select>
+			<ScopeTabs
+				label="Playlist filters"
+				align="start"
+				current={playlistFilter}
+				tabs={PLAYLIST_FILTERS.map((filter) => ({ id: filter, label: FILTER_LABELS[filter], count: filterCount(filter) }))}
+				onselect={(id) => (playlistFilter = id as PlaylistFilter)}
+			/>
+			<div class="playlist-view-tools">
+				<Dropdown label="Sort" options={SORT_OPTIONS} value={playlistSort} onchange={(value) => (playlistSort = value)} />
+				<Segmented label="Layout" options={VIEW_OPTIONS} value={$playlistView} onchange={(value) => playlistView.set(value)} />
 			</div>
 		</div>
 
@@ -1255,16 +1270,90 @@
 		<div class="feedback-bar error">{deleteError}</div>
 	{/if}
 
+	{#snippet cover(playlist: Playlist, mosaic: string[])}
+		<div
+			class="playlist-cover"
+			class:has-mosaic={mosaic.length >= 4}
+			style:background={mosaic.length === 0 ? nameToGradient(playlist.name) : undefined}
+		>
+			{#if mosaic.length >= 4}
+				{#each mosaic.slice(0, 4) as url (url)}
+					<ArtworkImage className="playlist-cover-art" src={url} size={320} fallbackText="PL" decorative={true} />
+				{/each}
+			{:else if mosaic.length > 0}
+				<ArtworkImage className="playlist-cover-art" src={mosaic[0]} size={320} fallbackText="PL" decorative={true} />
+			{:else}
+				<span class="playlist-initial">{playlist.name.trim().slice(0, 1).toUpperCase() || 'P'}</span>
+			{/if}
+		</div>
+	{/snippet}
+
+	{#snippet meta(playlist: Playlist)}
+		<span>{playlistSourceLabel(playlist)}</span>
+		<span aria-hidden="true">&middot;</span>
+		<span>{playlist.track_count.toLocaleString()} {playlist.track_count === 1 ? 'track' : 'tracks'}</span>
+		{#if playlist.is_smart}
+			{@const summary = smartRuleSummary(playlist)}
+			{#if summary}
+				<span aria-hidden="true">&middot;</span>
+				<span title={smartSummaryLines(playlist).join('\n')}>{summary}</span>
+			{/if}
+		{/if}
+	{/snippet}
+
+	{#snippet deleteConfirm(playlist: Playlist)}
+		<div class="confirm-strip" role="alertdialog" aria-label="Confirm delete">
+			<span class="confirm-copy">Delete "{playlist.name}"{playlist.tidal_uuid ? ' from TIDAL too' : ''}?</span>
+			<button class="btn btn-glass btn-sm" onclick={cancelDelete}>Cancel</button>
+			<button
+				class="btn btn-sm danger-solid"
+				disabled={deletingId === playlist.id}
+				onclick={() => void confirmDelete(playlist.id)}
+			>{deletingId === playlist.id ? 'Deleting...' : 'Delete'}</button>
+		</div>
+	{/snippet}
+
 	{#if loadError}
-		<EmptyState title="Playlists could not load" copy={loadError} />
+		<ErrorState title="Playlists could not load" error={loadError} onretry={() => void loadPlaylists()} />
 	{:else if isLoading && playlists.length === 0}
-		<EmptyState title="Loading playlists" copy="Pulling synced and smart playlists." />
+		<Skeleton rows={6} label="Loading playlists" />
 	{:else if playlists.length > 0 && filteredPlaylists.length === 0}
-		<EmptyState title="No playlists match" copy="Try a different search, filter, or sort mode.">
+		<EmptyState title="No playlists match" copy="Try a different search or filter.">
 			{#snippet actions()}
 				<button class="btn btn-glass" onclick={clearPlaylistSearch}>Reset filters</button>
 			{/snippet}
 		</EmptyState>
+	{:else if playlists.length > 0 && $playlistView === 'grid'}
+		<div class="playlist-grid">
+			{#each filteredPlaylists as playlist (playlist.id)}
+				{@const mosaic = mosaicById[playlist.id] ?? []}
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div
+					class="playlist-card"
+					use:registerCard={playlist.id}
+					oncontextmenu={(e) => openPlaylistContextMenu(playlist, e)}
+				>
+					<div class="card-art">
+						<a class="card-cover" href={`/playlists/${playlist.id}`} tabindex="-1" aria-hidden="true">
+							{@render cover(playlist, mosaic)}
+						</a>
+						<PlayOverlay
+							position="corner"
+							size="sm"
+							label={`Play ${playlist.name}`}
+							onclick={(event) => void playPlaylistQuick(playlist, event)}
+						/>
+					</div>
+					<a class="card-title t-row-title" href={`/playlists/${playlist.id}`} title={playlist.name}>
+						{#if playlist.is_favorite}<span class="card-favorite" aria-label="Favourite">&#9829;</span>{/if}{playlist.name}
+					</a>
+					<p class="card-meta t-meta">{@render meta(playlist)}</p>
+					{#if pendingDeleteId === playlist.id}
+						{@render deleteConfirm(playlist)}
+					{/if}
+				</div>
+			{/each}
+		</div>
 	{:else if playlists.length > 0}
 		<div class="playlist-list">
 			{#each filteredPlaylists as playlist (playlist.id)}
@@ -1275,48 +1364,15 @@
 						href={`/playlists/${playlist.id}`}
 						oncontextmenu={(e) => openPlaylistContextMenu(playlist, e)}
 					>
-						<div
-							class="playlist-cover"
-							class:has-mosaic={mosaic.length >= 4}
-							style:background={mosaic.length === 0 ? nameToGradient(playlist.name) : undefined}
-						>
-							{#if mosaic.length >= 4}
-								{#each mosaic.slice(0, 4) as url}
-									<ArtworkImage className="playlist-cover-art" src={url} size={320} fallbackText="PL" decorative={true} />
-								{/each}
-							{:else if mosaic.length > 0}
-								<ArtworkImage className="playlist-cover-art" src={mosaic[0]} size={320} fallbackText="PL" decorative={true} />
-							{:else}
-								<span class="playlist-initial">{playlist.name.trim().slice(0, 1).toUpperCase() || 'P'}</span>
-							{/if}
-						</div>
+						{@render cover(playlist, mosaic)}
 						<div class="playlist-meta">
 							<h3>{playlist.name}</h3>
-							<p class="playlist-copy">
-								<span>{playlistSourceLabel(playlist)}</span>
-								<span aria-hidden="true">&middot;</span>
-								<span>{playlist.track_count.toLocaleString()} {playlist.track_count === 1 ? 'track' : 'tracks'}</span>
-								{#if playlist.is_smart}
-									{@const summary = smartRuleSummary(playlist)}
-									{#if summary}
-										<span aria-hidden="true">&middot;</span>
-										<span title={smartSummaryLines(playlist).join('\n')}>{summary}</span>
-									{/if}
-								{/if}
-							</p>
+							<p class="playlist-copy">{@render meta(playlist)}</p>
 						</div>
 					</a>
 
 					{#if pendingDeleteId === playlist.id}
-						<div class="confirm-strip" role="alertdialog" aria-label="Confirm delete">
-							<span class="confirm-copy">Delete "{playlist.name}"?</span>
-							<button class="btn btn-glass btn-sm" onclick={cancelDelete}>Cancel</button>
-							<button
-								class="btn btn-sm danger-solid"
-								disabled={deletingId === playlist.id}
-								onclick={() => void confirmDelete(playlist.id)}
-							>{deletingId === playlist.id ? 'Deleting...' : 'Delete'}</button>
-						</div>
+						{@render deleteConfirm(playlist)}
 					{:else}
 						<div class="playlist-actions">
 							<button class="row-btn" onclick={(e) => void playPlaylistQuick(playlist, e)} aria-label="Play {playlist.name}" title="Play">&#9654;</button>
@@ -1352,9 +1408,17 @@
 			{/each}
 		</div>
 	{:else}
-		<EmptyState title="No playlists yet" copy="Connect TIDAL and sync to pull playlists, or create a smart playlist above." />
+		<EmptyState title="No playlists yet" copy="Create one and add tracks to it, build a smart playlist from rules, or sync your TIDAL playlists.">
+			{#snippet actions()}
+				<button class="btn btn-primary" onclick={() => (newPlaylistOpen = true)}>New playlist</button>
+			{/snippet}
+		</EmptyState>
 	{/if}
 </div>
+
+{#if newPlaylistOpen}
+	<PlaylistDetailsDialog onClose={() => (newPlaylistOpen = false)} />
+{/if}
 
 <!-- ─── Rule Editor Drawer ──────────────────────────────────────────────────── -->
 {#if editorOpen}
@@ -1730,56 +1794,10 @@
 		flex-wrap: wrap;
 	}
 
-	.filter-pills {
+	.playlist-view-tools {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		flex-wrap: wrap;
-	}
-
-	.filter-pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 7px;
-		height: var(--control-h);
-		padding: 0 14px;
-		border-radius: 999px;
-		border: 1px solid var(--border-subtle);
-		background: transparent;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
-	}
-
-	.filter-pill span {
-		color: var(--text-tertiary);
-		font-variant-numeric: tabular-nums;
-	}
-
-	.filter-pill:hover {
-		border-color: var(--accent-line);
-		color: var(--text-primary);
-	}
-
-	.filter-pill.active {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--text-on-accent);
-	}
-
-	.filter-pill.active span { color: color-mix(in srgb, var(--text-on-accent) 78%, transparent); }
-
-	.playlist-sort {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-width: 240px;
-	}
-
-	.playlist-sort select {
-		height: var(--control-h);
-		padding: 0 10px;
-		border-radius: 999px;
+		gap: var(--space-2);
 	}
 
 	.playlist-result-copy {
@@ -1893,6 +1911,85 @@
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 		line-height: var(--line-height-snug);
+	}
+
+	/* Cards (STYLING.md "Cards, grids and rails"): artwork, then row-title, then
+	   meta; no card box. Hover scales the art and reveals the shared play button. */
+	.playlist-grid {
+		--card-min: 168px;
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(min(var(--card-min), 100%), 1fr));
+		column-gap: var(--gap);
+		row-gap: var(--gap-lg);
+	}
+
+	.playlist-card {
+		display: grid;
+		align-content: start;
+		gap: var(--space-1);
+		min-width: 0;
+	}
+
+	.card-art {
+		position: relative;
+		margin-bottom: var(--space-1);
+		overflow: hidden;
+		border-radius: var(--radius-sm);
+	}
+
+	.card-cover {
+		display: block;
+	}
+
+	.card-art .playlist-cover {
+		width: 100%;
+		box-shadow: none;
+		transition: transform var(--motion-base);
+	}
+
+	.playlist-card:hover .card-art .playlist-cover {
+		transform: scale(1.03);
+	}
+
+	.playlist-card:hover :global(.play-overlay),
+	.playlist-card:focus-within :global(.play-overlay) {
+		opacity: 1;
+		transform: none;
+	}
+
+	.card-art .playlist-initial {
+		font-size: var(--font-size-3xl);
+	}
+
+	.card-title {
+		overflow: hidden;
+		color: var(--text-primary);
+		text-decoration: none;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.card-title:hover {
+		text-decoration: underline;
+	}
+
+	.card-title:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
+		border-radius: var(--radius-xs);
+	}
+
+	.card-favorite {
+		margin-right: var(--space-1);
+		color: var(--state-favorite);
+	}
+
+	.card-meta {
+		margin: 0;
+	}
+
+	.card-meta span + span {
+		margin-left: var(--space-1);
 	}
 
 	.playlist-actions {
@@ -2258,15 +2355,6 @@
 			align-items: flex-start;
 		}
 
-		.filter-pills,
-		.playlist-sort {
-			width: 100%;
-		}
-
-		.filter-pill {
-			flex: 1;
-			justify-content: center;
-		}
 
 		.editor-drawer {
 			width: 100vw;

@@ -316,6 +316,7 @@ mod tests {
                 is_favorite: false,
                 created_at: "2025-01-01 00:00:00".into(),
                 updated_at: "2025-01-01 00:00:00".into(),
+                tidal_last_updated: None,
             },
             Playlist {
                 id: 2,
@@ -329,6 +330,7 @@ mod tests {
                 is_favorite: false,
                 created_at: "2025-01-01 00:00:00".into(),
                 updated_at: "2025-01-01 00:00:00".into(),
+                tidal_last_updated: None,
             },
         ];
         let context = AnalyticsContext::new()
