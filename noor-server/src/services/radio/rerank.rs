@@ -8,82 +8,54 @@ pub(super) fn blend_interleave(
     limit: usize,
 ) -> Vec<RadioCandidate> {
     let (lib_w, lfm_w, eng_w) = blend.weights();
-    let mut by_source: std::collections::HashMap<RadioSource, Vec<RadioCandidate>> =
-        std::collections::HashMap::new();
+    let weights = [lib_w, lfm_w, eng_w];
+    // TIDAL mix picks ride the Last.fm lane (both are outside recommenders);
+    // without a lane of their own they used to be dropped here.
+    let lane_of = |source: RadioSource| match source {
+        RadioSource::Library => 0,
+        RadioSource::Lastfm | RadioSource::Tidal => 1,
+        RadioSource::Engine => 2,
+    };
+    let mut lanes: [Vec<RadioCandidate>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     for c in candidates {
-        by_source.entry(c.source).or_default().push(c);
+        lanes[lane_of(c.source)].push(c);
     }
-    for v in by_source.values_mut() {
-        v.sort_by(|a, b| {
+    for lane in &mut lanes {
+        lane.sort_by(|a, b| {
             b.similarity_score
                 .partial_cmp(&a.similarity_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 
-    let lib_avail = by_source.get(&RadioSource::Library).map_or(0, |v| v.len());
-    let lfm_avail = by_source.get(&RadioSource::Lastfm).map_or(0, |v| v.len());
-    let eng_avail = by_source.get(&RadioSource::Engine).map_or(0, |v| v.len());
-    let lib_take = ((limit as f64 * lib_w).round() as usize).min(lib_avail);
-    let lfm_take = ((limit as f64 * lfm_w).round() as usize).min(lfm_avail);
-    let eng_take = ((limit as f64 * eng_w).round() as usize).min(eng_avail);
-
-    let mut lib_iter = by_source
-        .remove(&RadioSource::Library)
-        .unwrap_or_default()
-        .into_iter()
-        .take(lib_take);
-    let mut lfm_iter = by_source
-        .remove(&RadioSource::Lastfm)
-        .unwrap_or_default()
-        .into_iter()
-        .take(lfm_take);
-    let mut eng_iter = by_source
-        .remove(&RadioSource::Engine)
-        .unwrap_or_default()
-        .into_iter()
-        .take(eng_take);
-
+    // Each lane's share of the limit, capped by what it has.
+    let takes: [usize; 3] =
+        std::array::from_fn(|i| ((limit as f64 * weights[i]).round() as usize).min(lanes[i].len()));
+    let mut lanes = lanes.map(|lane| lane.into_iter());
+    let mut done = [0usize; 3];
     let mut out = Vec::with_capacity(limit);
-    let mut lib_done = 0usize;
-    let mut lfm_done = 0usize;
-    let mut eng_done = 0usize;
-
     while out.len() < limit {
-        let lib_behind = (lib_take as f64 - lib_done as f64) / lib_w.max(0.01);
-        let lfm_behind = (lfm_take as f64 - lfm_done as f64) / lfm_w.max(0.01);
-        let eng_behind = (eng_take as f64 - eng_done as f64) / eng_w.max(0.01);
-
-        let pick = if lib_behind >= lfm_behind && lib_behind >= eng_behind {
-            lib_iter.next().inspect(|_| {
-                lib_done += 1;
+        // The lane furthest behind its share goes next (ties: library, then
+        // Last.fm, then engine).
+        let behind = |i: usize| (takes[i] as f64 - done[i] as f64) / weights[i].max(0.01);
+        let lane = (0..3)
+            .filter(|&i| done[i] < takes[i])
+            .fold(None, |best: Option<usize>, i| match best {
+                Some(b) if behind(b) >= behind(i) => Some(b),
+                _ => Some(i),
             })
-        } else if lfm_behind >= eng_behind {
-            lfm_iter.next().inspect(|_| {
-                lfm_done += 1;
-            })
-        } else {
-            eng_iter.next().inspect(|_| {
-                eng_done += 1;
-            })
+            // Every lane has its share: fill the rest from whatever remains
+            // instead of stopping short.
+            .or_else(|| (0..3).find(|&i| lanes[i].len() > 0));
+        let Some(lane) = lane else {
+            break;
         };
-
-        match pick {
-            Some(c) => out.push(c),
-            None => {
-                if let Some(c) = lib_iter.next() {
-                    lib_done += 1;
-                    out.push(c);
-                } else if let Some(c) = lfm_iter.next() {
-                    lfm_done += 1;
-                    out.push(c);
-                } else if let Some(c) = eng_iter.next() {
-                    eng_done += 1;
-                    out.push(c);
-                } else {
-                    break;
-                }
+        match lanes[lane].next() {
+            Some(c) => {
+                done[lane] += 1;
+                out.push(c);
             }
+            None => break,
         }
     }
     out

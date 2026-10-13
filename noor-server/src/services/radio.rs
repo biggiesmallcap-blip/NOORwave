@@ -288,12 +288,9 @@ pub async fn orchestrate_song(
     limit: usize,
     exclude_track_ids: &[i64],
 ) -> Result<RadioQueue> {
-    // Load Tier 2 feature flags. The kill-switch short-circuits to a path
-    // *equivalent* to the legacy pipeline; in this validation-gate stage there
-    // are no behavior changes after it yet, so the kill-switch is currently a
-    // no-op semantically. It exists so steps 7-9 can flip behaviors on without
-    // touching the entry-point logic, and so an operator can revert to legacy
-    // by flipping a single config row.
+    // Load Tier 2 feature flags. With `radio_use_legacy_pipeline` set they all
+    // read as off (see `load_radio_flags`), so one config row reverts radio to
+    // the legacy path.
     let flags = db
         .with_conn(|conn| Ok(crate::services::radio_config::load_radio_flags(conn)))
         .unwrap_or(crate::services::radio_config::RadioFlags::all_off());
@@ -744,8 +741,7 @@ pub async fn orchestrate_album(
             all_candidates.extend(q.tracks);
         }
     }
-    let combined = combine_with_dedup(all_candidates, Vec::new(), Vec::new());
-    let ordered = blend_interleave(combined, blend, limit);
+    let ordered = select_across_seeds(db, all_candidates, blend, limit);
 
     Ok(RadioQueue {
         session_id: new_session_id(),
@@ -807,8 +803,7 @@ pub async fn orchestrate_artist(
             all_candidates.extend(q.tracks);
         }
     }
-    let combined = combine_with_dedup(all_candidates, Vec::new(), Vec::new());
-    let ordered = blend_interleave(combined, blend, limit);
+    let ordered = select_across_seeds(db, all_candidates, blend, limit);
 
     Ok(RadioQueue {
         session_id: new_session_id(),
@@ -828,6 +823,23 @@ pub async fn orchestrate_artist(
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
+
+/// Album and artist radio: one final selection over every seed's picks. Each
+/// seed's radio was spaced on its own, but their union could still put one
+/// artist several times in a row, so the artist cap runs again on the blend.
+/// The blend reaches past `limit` so the cap has substitutes.
+fn select_across_seeds(
+    db: &Database,
+    candidates: Vec<RadioCandidate>,
+    blend: RadioBlend,
+    limit: usize,
+) -> Vec<RadioCandidate> {
+    let combined = combine_with_dedup(candidates, Vec::new(), Vec::new());
+    let interim_limit = limit.saturating_mul(2).max(limit.saturating_add(8));
+    let blended = blend_interleave(combined, blend, interim_limit);
+    let recent_artists = recent_played_artist_names(db, ARTIST_HISTORY_MEMORY);
+    enforce_artist_diversity(blended, &recent_artists, limit)
+}
 
 /// Build per-request taste signals + artist resolver.
 ///
@@ -909,6 +921,7 @@ fn engine_results_from_track_similarity(
 
     let candidates: Vec<RadioCandidate> = rows
         .into_iter()
+        .filter(engine_row_is_evidence)
         .map(|ts| RadioCandidate {
             track_id: ts.track_id,
             tidal_track_id: None,
@@ -938,6 +951,22 @@ fn engine_results_from_track_similarity(
         .collect();
 
     Ok(candidates)
+}
+
+/// Shared-genre strength (rarity of the genres both tracks hold, 1.0 for the
+/// library's strongest pair) an Engine row needs when nothing else ties it to
+/// the seed.
+const ENGINE_GENRE_ONLY_MIN: f64 = 0.5;
+
+/// An Engine row with no album, artist or listening tie is a guess from genre,
+/// era and song length. Only a strong shared-genre match carries it: Too Shy
+/// reached a Ram Dass station on genre 0.048 and a similar length. Source
+/// normalization would otherwise lift the best of such guesses to a high score.
+fn engine_row_is_evidence(row: &crate::db::queries::TrackSimilarityResult) -> bool {
+    row.co_album_score > 0.0
+        || row.co_artist_score > 0.0
+        || row.co_listen_score > 0.0
+        || row.genre_proximity >= ENGINE_GENRE_ONLY_MIN
 }
 
 /// Cold-start fallback: returns tracks by the same artist as the seed, randomly ordered.
