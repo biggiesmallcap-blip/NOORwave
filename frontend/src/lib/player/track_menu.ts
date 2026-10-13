@@ -62,6 +62,9 @@ export interface BuildTrackMenuOptions {
 	 * twice.
 	 */
 	onRemoveFromPlaylist?: () => void;
+	/** Playlist rows in playlist order: jump the row to the top or bottom. */
+	onMoveToTop?: () => void;
+	onMoveToBottom?: () => void;
 	/** Submenu of playlists to add this track to. See `playlist_menu.ts`. */
 	addToPlaylistSubmenu?: MenuItem[];
 }
@@ -112,11 +115,11 @@ export function downloadMenuItem(
 ): MenuItem {
 	return {
 		label,
-		icon: '⤓',
+		icon: '\u2913',
 		submenu: [
-			{ label: 'FLAC (lossless)', icon: '⤓', onSelect: () => trigger('flac') },
-			{ label: 'AAC (M4A, 320)', icon: '⤓', onSelect: () => trigger('aac') },
-			{ label: 'MP3 (320)', icon: '⤓', onSelect: () => trigger('mp3') }
+			{ label: 'FLAC (lossless)', icon: '\u2913', onSelect: () => trigger('flac') },
+			{ label: 'AAC (M4A, 320)', icon: '\u2913', onSelect: () => trigger('aac') },
+			{ label: 'MP3 (320)', icon: '\u2913', onSelect: () => trigger('mp3') }
 		]
 	};
 }
@@ -241,6 +244,13 @@ export function buildTrackMenu(track: MenuTrack, options: BuildTrackMenuOptions 
 			})
 		);
 		items.push(removeFromQueueMenuItem(options.queueItemId, options.onRemoved));
+	}
+
+	if (options.onMoveToTop) {
+		items.push({ label: 'Move to top', icon: '\u2912', onSelect: options.onMoveToTop });
+	}
+	if (options.onMoveToBottom) {
+		items.push({ label: 'Move to bottom', icon: '\u2913', onSelect: options.onMoveToBottom });
 	}
 
 	if (options.onRemoveFromPlaylist) {

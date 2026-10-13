@@ -20,7 +20,7 @@ pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
     let mut stmt = conn.prepare(
         "SELECT id, tidal_uuid, name, description, is_smart,
                 smart_rules, is_synced, track_count, is_favorite,
-                created_at, updated_at
+                created_at, updated_at, tidal_last_updated
          FROM playlists
          ORDER BY is_favorite DESC, name ASC",
     )?;
@@ -39,6 +39,7 @@ pub fn get_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
                 is_favorite: row.get::<_, i32>(8)? != 0,
                 created_at: row.get(9)?,
                 updated_at: row.get(10)?,
+                tidal_last_updated: row.get(11)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -50,7 +51,7 @@ pub fn get_playlist(conn: &Connection, playlist_id: i64) -> Result<Option<Playli
     let mut stmt = conn.prepare(
         "SELECT id, tidal_uuid, name, description, is_smart,
                 smart_rules, is_synced, track_count, is_favorite,
-                created_at, updated_at
+                created_at, updated_at, tidal_last_updated
          FROM playlists
          WHERE id = ?1",
     )?;
@@ -69,6 +70,7 @@ pub fn get_playlist(conn: &Connection, playlist_id: i64) -> Result<Option<Playli
             is_favorite: row.get::<_, i32>(8)? != 0,
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
+            tidal_last_updated: row.get(11)?,
         }))
     } else {
         Ok(None)

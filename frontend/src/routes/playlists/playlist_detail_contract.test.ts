@@ -54,7 +54,8 @@ describe('playlist detail page contracts', () => {
 	test('smart playlists are read-only here', () => {
 		// Their contents come from rules; the server rejects edits too.
 		expect(detail).toContain('let editable = $derived(playlist !== null && !isSmart);');
-		expect(detail).toContain('canDrag: () => editable');
+		expect(detail).toContain('let canReorder = $derived(editable && inPlaylistOrder);');
+		expect(detail).toContain('canDrag: () => canReorder && !busy');
 	});
 
 	test('menus come from the shared playlist builder', () => {
@@ -74,14 +75,15 @@ describe('playlist detail page contracts', () => {
 	});
 
 	test('selection is by position, so one copy of a repeated track is one row', () => {
-		expect(detail).toContain('selected={$selectedPositions.has(index)}');
-		expect(detail).toContain('selection.select([index], additive)');
-		expect(detail).not.toContain('has(track.id)');
+		expect(detail).toContain('selected={$selectedPositions.has(entry.position)}');
+		expect(detail).toContain('selection.select([position], additive)');
+		expect(detail).not.toContain('$selectedPositions.has(track.id)');
 	});
 
 	test('a failed or overlapping reorder never leaves an order the server lacks', () => {
-		expect(detail).toContain('canDrag: () => editable && !busy');
 		expect(detail).toContain('if (!ok) tracks = previous;');
+		// Mutations run one at a time, so none is dropped for overlapping another.
+		expect(detail).toContain('const run = queue.then(');
 	});
 
 	test('failures show the server sentence, not ApiError text', () => {
@@ -91,10 +93,28 @@ describe('playlist detail page contracts', () => {
 
 	test('a regular playlist can be created from /playlists', () => {
 		const list = readFileSync(join(here, '+page.svelte'), 'utf8');
-		const dialog = read('lib/components/playlist/NewPlaylistDialog.svelte');
-		expect(list).toContain('<NewPlaylistDialog');
+		const dialog = read('lib/components/playlist/PlaylistDetailsDialog.svelte');
+		expect(list).toContain('<PlaylistDetailsDialog');
 		expect(list).toContain('>New playlist</button>');
-		expect(dialog).toContain('api.createPlaylist(trimmed)');
-		expect(dialog).toContain('goto(`/playlists/${playlist.id}`)');
+		expect(dialog).toContain('api.createPlaylist(trimmed, details)');
+		expect(dialog).toContain('api.updatePlaylist(initial.id, trimmed, details)');
+		expect(dialog).toContain('goto(`/playlists/${result.playlist.id}`)');
+	});
+
+	test('removal waits behind Undo and lands even when the page is left', () => {
+		expect(detail).toContain("{ label: 'Undo', onClick: cancelRemoval }");
+		expect(detail).toContain('onDestroy(() => void commitRemoval());');
+		expect(detail).toContain("window.addEventListener('pagehide', flush);");
+	});
+
+	test('a filtered or sorted view never drags, and reorders flush hidden rows first', () => {
+		expect(detail).toContain("let inPlaylistOrder = $derived($viewSort === 'playlist' && !viewQuery.trim());");
+		expect(detail).toContain('if (pendingRemoval.size && !(await commitRemoval())) return;');
+	});
+
+	test('smart playlists link to their rule editor', () => {
+		const list = readFileSync(join(here, '+page.svelte'), 'utf8');
+		expect(detail).toContain('href={`/playlists?edit=${playlistId}`}');
+		expect(list).toContain("page.url.searchParams.get('edit')");
 	});
 });

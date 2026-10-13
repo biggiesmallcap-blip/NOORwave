@@ -15,7 +15,10 @@ export interface BuildPlaylistMenuOptions {
 	onRadio?: () => void;
 	onToggleFavorite?: () => void;
 	onOpen?: () => void;
-	onRename?: () => void;
+	/** Name and description. */
+	onEditDetails?: () => void;
+	/** Shown only when the playlist holds a track more than once. */
+	onRemoveDuplicates?: () => void;
 	onEditRules?: () => void;
 	onDuplicate?: () => void;
 	onRefreshFromTidal?: () => void;
@@ -57,7 +60,12 @@ export function buildPlaylistMenu(
 	}
 
 	const edits: MenuItem[] = [];
-	if (options.onRename) edits.push({ label: 'Rename', icon: '✎', onSelect: options.onRename });
+	if (options.onEditDetails) {
+		edits.push({ label: 'Edit details', icon: '\u270e', onSelect: options.onEditDetails });
+	}
+	if (options.onRemoveDuplicates) {
+		edits.push({ label: 'Remove duplicates', icon: '\u29c9', onSelect: options.onRemoveDuplicates });
+	}
 	if (options.onEditRules) {
 		edits.push({ label: 'Edit rules', icon: '⚙', onSelect: options.onEditRules });
 	}

@@ -713,6 +713,8 @@ export interface Playlist {
 	is_favorite: boolean;
 	created_at: string;
 	updated_at: string;
+	/** TIDAL playlists: TIDAL's last-modified time of the revision last pulled. */
+	tidal_last_updated?: string | null;
 }
 
 // ─── Smart Playlist Rule Types ───────────────────────────────────────────────

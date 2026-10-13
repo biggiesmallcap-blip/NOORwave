@@ -1,16 +1,25 @@
 <script lang="ts">
-	// Create a regular playlist, the kind you fill by hand (as opposed to a
-	// smart playlist built from rules). Opens the new playlist on success.
-	import { onMount } from 'svelte';
+	// Name and description of a regular playlist, for creating one (no
+	// `playlist`) or editing one. Creating opens the new playlist; editing calls
+	// `onSaved`. A TIDAL playlist is renamed on TIDAL first by the server.
+	import { onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { api, ApiError } from '$lib/api/client';
+	import { api, ApiError, type Playlist } from '$lib/api/client';
 	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
 	import { portal } from '$lib/actions/portal';
 
-	let { onClose }: { onClose: () => void } = $props();
+	let { playlist = null, onClose, onSaved }: {
+		playlist?: Playlist | null;
+		onClose: () => void;
+		onSaved?: (playlist: Playlist) => void;
+	} = $props();
 
+	// The dialog edits a snapshot: it opens on one playlist and closes after.
+	const initial = untrack(() => playlist);
+	const editing = initial !== null;
 	let dialog: HTMLDialogElement;
-	let name = $state('');
+	let name = $state(initial?.name ?? '');
+	let description = $state(initial?.description ?? '');
 	let saving = $state(false);
 	let error = $state<string | null>(null);
 
@@ -20,23 +29,31 @@
 		dialog.close();
 	}
 
-	async function create(event: SubmitEvent) {
+	async function submit(event: SubmitEvent) {
 		event.preventDefault();
 		const trimmed = name.trim();
 		if (!trimmed || saving) return;
 		saving = true;
 		error = null;
 		try {
-			const { playlist } = await api.createPlaylist(trimmed);
-			invalidatePlaylistCaches();
-			close();
-			await goto(`/playlists/${playlist.id}`);
+			const details = description.trim() || null;
+			if (initial) {
+				const result = await api.updatePlaylist(initial.id, trimmed, details);
+				invalidatePlaylistCaches();
+				onSaved?.(result.playlist);
+				close();
+			} else {
+				const result = await api.createPlaylist(trimmed, details);
+				invalidatePlaylistCaches();
+				close();
+				await goto(`/playlists/${result.playlist.id}`);
+			}
 		} catch (reason) {
 			// The API's 4xx messages are written for people; anything else is not.
 			error =
-				reason instanceof ApiError && reason.status < 500
+				reason instanceof ApiError && reason.status !== 500 && !/^API error/i.test(reason.message)
 					? reason.message
-					: "Couldn't create the playlist. Try again.";
+					: `Couldn't ${editing ? 'save' : 'create'} the playlist. Try again.`;
 		} finally {
 			saving = false;
 		}
@@ -48,22 +65,26 @@
 <dialog
 	bind:this={dialog}
 	use:portal
-	aria-labelledby="new-playlist-title"
+	aria-labelledby="playlist-details-title"
 	onclose={onClose}
 	onclick={(event) => { if (event.target === dialog) close(); }}
 >
-	<form onsubmit={create}>
-		<h2 id="new-playlist-title" class="t-section">New playlist</h2>
+	<form onsubmit={submit}>
+		<h2 id="playlist-details-title" class="t-section">{editing ? 'Edit details' : 'New playlist'}</h2>
 		<label class="field">
 			<span class="t-meta">Name</span>
 			<!-- svelte-ignore a11y_autofocus -->
 			<input bind:value={name} maxlength="200" autocomplete="off" autofocus required />
 		</label>
+		<label class="field">
+			<span class="t-meta">Description (optional)</span>
+			<textarea bind:value={description} maxlength="1000" rows="3"></textarea>
+		</label>
 		{#if error}<p class="error t-body" role="alert">{error}</p>{/if}
 		<div class="actions">
 			<button type="button" class="btn btn-ghost" onclick={close}>Cancel</button>
 			<button type="submit" class="btn btn-primary" disabled={saving || !name.trim()}>
-				{saving ? 'Creating...' : 'Create'}
+				{#if editing}{saving ? 'Saving...' : 'Save'}{:else}{saving ? 'Creating...' : 'Create'}{/if}
 			</button>
 		</div>
 	</form>
@@ -72,7 +93,7 @@
 <style>
 	/* STYLING.md overlay treatment. The global reset drops the UA centring. */
 	dialog {
-		--dialog-width: 400px;
+		--dialog-width: 440px;
 		position: fixed;
 		inset: 0;
 		margin: auto;
@@ -109,10 +130,10 @@
 		gap: var(--space-2);
 	}
 
-	/* Sunken field (STYLING.md "Surfaces"). */
-	input {
-		height: var(--control-h);
-		padding: 0 var(--space-3);
+	/* Sunken fields (STYLING.md "Surfaces"). */
+	input,
+	textarea {
+		padding: var(--space-2) var(--space-3);
 		border: 0;
 		border-radius: var(--radius-sm);
 		background: var(--bg-surface);
@@ -120,7 +141,16 @@
 		font: inherit;
 	}
 
-	input:focus-visible {
+	input {
+		height: var(--control-h);
+	}
+
+	textarea {
+		resize: vertical;
+	}
+
+	input:focus-visible,
+	textarea:focus-visible {
 		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}

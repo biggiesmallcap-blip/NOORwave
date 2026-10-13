@@ -77,6 +77,10 @@ pub struct Playlist {
     pub is_favorite: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// For a TIDAL-mirrored playlist, TIDAL's last-modified time of the
+    /// revision NOORwave last pulled. `None` for local and smart playlists.
+    #[serde(default)]
+    pub tidal_last_updated: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
