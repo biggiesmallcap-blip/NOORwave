@@ -61,7 +61,7 @@ pub(crate) async fn pause(state: &SharedState) -> Result<player::PlaybackSnapsho
         && let Err(error) = runtime_handle.pause()
     {
         let message = format!("Failed to pause host audio playback: {error}");
-        report_playback_failure(state, &message);
+        report_playback_failure(state, &message).await;
         return Err(ToggleError::Internal);
     }
 
@@ -185,14 +185,14 @@ pub(crate) async fn resume(state: &SharedState) -> Result<player::PlaybackSnapsh
         if let Err(error) = ensure_for_track(state).await {
             let message = runtime_unavailable_message(&error);
             pause_after_failed_resume(state).await;
-            report_playback_failure(state, &message);
+            report_playback_failure(state, &message).await;
             return Err(ToggleError::Runtime(error));
         }
         let generation = generation::current(&*state.read().await);
         if let Err(error) = switch_runtime_to_snapshot_current(state, &snapshot, generation).await {
             let message = format!("Playback runtime could not recover on resume: {error}");
             pause_after_failed_resume(state).await;
-            report_playback_failure(state, &message);
+            report_playback_failure(state, &message).await;
             return Err(ToggleError::RecoveryFailed);
         }
         tracing::info!(

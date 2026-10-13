@@ -183,7 +183,11 @@ async fn apply_exclusive_recovery(
     result: ExclusiveRecoveryResult,
 ) {
     let retry = match result {
-        Ok(result) => result.ok().flatten(),
+        Ok(Ok(retry)) => retry,
+        Ok(Err(error)) => {
+            warn!("Exclusive recovery could not read audio settings: {error}");
+            None
+        }
         Err(error) => {
             warn!("Exclusive recovery settings task failed: {error}");
             None
@@ -329,7 +333,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     {
                         let message =
                             format!("Failed to advance playback after track end: {error}");
-                        report_playback_failure(&state, &message);
+                        report_playback_failure(&state, &message).await;
                         error!("{message}");
                     }
                 }
@@ -426,7 +430,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     {
                         let message =
                             format!("Failed to advance playback after track error: {error}");
-                        report_playback_failure(&state, &message);
+                        report_playback_failure(&state, &message).await;
                         error!("{message}");
                     }
                 }
@@ -2074,7 +2078,7 @@ pub(crate) async fn handle_runtime_track_error(
         error = %message,
         "runtime track error; advancing queue"
     );
-    report_playback_failure(&state, message);
+    report_playback_failure(&state, message).await;
     handle_runtime_finished_with_retry_for_owner(
         state,
         failed_track_id,
@@ -2165,7 +2169,7 @@ pub(crate) async fn handle_prepared_runtime_track_error_for_runtime(
         spawn_tidal_id_reresolve(state, track_id);
         refresh_dj_after_queue_change(state.clone(), "skip_unavailable_prepared_next").await;
     }
-    report_playback_failure(state, message);
+    report_playback_failure(state, message).await;
 }
 
 pub(crate) async fn handle_output_fault(
@@ -2435,12 +2439,11 @@ pub(crate) async fn emit_track_skipped(
     });
 }
 
-pub(crate) fn report_playback_failure(state: &SharedState, message: &str) {
-    let state = state.clone();
-    let message = message.to_string();
-    tokio::spawn(async move {
-        let state = state.read().await;
-        let _ = state.event_tx.send(AppEvent::PlaybackFailed { message });
+/// Publish in order with the caller's other events. A detached task could
+/// deliver the toast after newer state changes from the same flow.
+pub(crate) async fn report_playback_failure(state: &SharedState, message: &str) {
+    let _ = state.read().await.event_tx.send(AppEvent::PlaybackFailed {
+        message: message.to_string(),
     });
 }
 

@@ -117,8 +117,12 @@ pub(crate) async fn sync_session_after_snapshot_for_owner(
                     is_playing = playing;
                 }
                 Err(error) => {
-                    error!("failed to validate terminal listen-session anchor: {error}");
-                    return false;
+                    // The queue already advanced. Declining here would leave
+                    // the new row undispatched and the player silent, so keep
+                    // the snapshot's intent; ownership was validated above.
+                    error!(
+                        "failed to re-read terminal listen-session anchor; using the snapshot: {error}"
+                    );
                 }
             }
         }
