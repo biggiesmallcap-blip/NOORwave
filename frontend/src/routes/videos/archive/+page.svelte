@@ -71,6 +71,17 @@
 	/** Earlier pages load only once the listener scrolls up after a jump,
 	 *  not the moment the jumped-to row lands at the top. */
 	let earlierArmed = $state(false);
+	// The lens row docks to the top once scrolled past: it slides away
+	// while you scroll down and comes back as soon as you scroll up, so the
+	// lenses, sort and a way back to the top are always one flick away, even
+	// deep in a jumped list whose real top is pages of loading away.
+	let dockSentinel = $state<HTMLDivElement | null>(null);
+	let dockHeight = $state(0);
+	let docked = $state(false);
+	let dockHidden = $state(false);
+	/** Set while the page moves the scroll itself (holding the place across
+	 *  a prepend), so that move is not read as the listener scrolling down. */
+	let ownScroll = false;
 	let pollTimer: ReturnType<typeof setTimeout> | null = null;
 	let polls = 0;
 
@@ -114,8 +125,10 @@
 		earlierArmed = false;
 		const index = await feed.jumpTo(offset);
 		if (index === null) return;
+		dockHidden = false;
 		await tick();
 		const tile = gridEl?.children[index] as HTMLElement | undefined;
+		ownScroll = true;
 		tile?.scrollIntoView({ block: 'start', behavior: 'auto' });
 		updateSection();
 	}
@@ -151,8 +164,15 @@
 		let last = el.scrollTop;
 		let frame = 0;
 		const onScroll = () => {
-			if (el.scrollTop < last - 4) earlierArmed = true;
+			const delta = el.scrollTop - last;
 			last = el.scrollTop;
+			if (ownScroll) {
+				ownScroll = false;
+			} else {
+				if (delta < -4) earlierArmed = true;
+				if (delta > 6) dockHidden = true;
+				else if (delta < -6) dockHidden = false;
+			}
 			if (frame) return;
 			frame = requestAnimationFrame(() => {
 				frame = 0;
@@ -172,6 +192,36 @@
 		void items.length;
 		queueMicrotask(updateSection);
 	});
+
+	// Docked once the row's own place has scrolled out of view.
+	$effect(() => {
+		const sentinel = dockSentinel;
+		const el = scroller() ?? sentinel?.closest<HTMLElement>('main.workspace') ?? null;
+		if (!sentinel || !el) return;
+		const observer = new IntersectionObserver(
+			(entries) => {
+				const entry = entries[entries.length - 1];
+				docked = !entry.isIntersecting && entry.boundingClientRect.top < (entry.rootBounds?.top ?? 0);
+				if (!docked) dockHidden = false;
+			},
+			{ root: el, threshold: 0 }
+		);
+		observer.observe(sentinel);
+		return () => observer.disconnect();
+	});
+
+	/** Back to the first song: from the loaded window when it starts there,
+	 *  else a jump to 0, then the page top. */
+	async function toTop() {
+		const el = scroller();
+		if (feedState.base > 0) {
+			earlierArmed = false;
+			await feed.jumpTo(0);
+			await tick();
+		}
+		el?.scrollTo({ top: 0, behavior: feedState.base > 0 ? 'auto' : 'smooth' });
+		dockHidden = false;
+	}
 
 	// Earlier pages come in above without moving what is on screen. The
 	// browser's own scroll anchoring does not hold at scroll offset 0 (the
@@ -205,7 +255,11 @@
 		if (!anchor || !el || feedState.loadingEarlier) return;
 		earlierAnchor = null;
 		const tile = gridEl?.querySelector<HTMLElement>(`[data-key="${CSS.escape(anchor.key)}"]`);
-		if (tile) el.scrollTop += tile.getBoundingClientRect().top - anchor.top;
+		const shift = tile ? tile.getBoundingClientRect().top - anchor.top : 0;
+		if (Math.abs(shift) >= 1) {
+			ownScroll = true;
+			el.scrollTop += shift;
+		}
 	});
 
 	// Scrolling up past the first loaded row brings the page before it in.
@@ -246,16 +300,32 @@
 	<title>Archive - NOOR</title>
 </svelte:head>
 
-<div class="archive">
+<div
+	class="archive"
+	style:--dock-h={`${dockHeight}px`}
+	style:--dock-offset={docked && !dockHidden ? `${dockHeight}px` : '0px'}
+>
 	<!-- Lenses over nothing are noise: while the catalog is being built the
 	     page is just the honest note below. -->
 	{#if !building}
-		<LensBar
-			{lenses}
-			{facets}
-			total={firstLoad && !facets ? null : feedState.total}
-			onchange={setLenses}
-		/>
+		<div class="dock-sentinel" bind:this={dockSentinel} aria-hidden="true"></div>
+		<div class="lens-dock" class:docked class:hidden={docked && dockHidden} bind:clientHeight={dockHeight}>
+			{#if docked}
+				<button type="button" class="to-top" onclick={() => void toTop()} aria-label="Back to the top" title="Back to the top">
+					<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+						<path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+					</svg>
+				</button>
+			{/if}
+			<div class="dock-lenses">
+				<LensBar
+					{lenses}
+					{facets}
+					total={firstLoad && !facets ? null : feedState.total}
+					onchange={setLenses}
+				/>
+			</div>
+		</div>
 	{/if}
 
 	{#if lenses.q}
@@ -367,6 +437,78 @@
 		min-width: 0;
 	}
 
+	/* Where the lens row sits when not docked; it takes no room. */
+	.dock-sentinel {
+		height: 0;
+		margin-bottom: calc(var(--space-4) * -1);
+	}
+
+	/* The lens row, docked to the top of the scroll once scrolled past: a
+	   floating bar on the page's own ground that slides away on the way
+	   down and back on the way up. */
+	.lens-dock {
+		position: sticky;
+		top: 0;
+		z-index: var(--z-raised);
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		margin: 0 -12px;
+		padding: 6px 12px;
+		border-radius: var(--radius-md);
+		transition:
+			transform var(--motion-base),
+			opacity var(--motion-base),
+			background var(--motion-fast),
+			box-shadow var(--motion-fast);
+	}
+
+	/* Solid: the tiles' titles must not read through it. */
+	.lens-dock.docked {
+		background: var(--bg-surface-strong);
+		box-shadow: var(--panel-shadow);
+	}
+
+	.lens-dock.hidden {
+		transform: translateY(calc(-100% - 12px));
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	.dock-lenses {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.to-top {
+		display: grid;
+		place-items: center;
+		flex: none;
+		width: var(--control-h);
+		height: var(--control-h);
+		border: 1px solid var(--border-subtle);
+		border-radius: 50%;
+		background: none;
+		color: var(--text-secondary);
+		cursor: pointer;
+	}
+
+	.to-top:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.to-top:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.lens-dock {
+			transition: none;
+		}
+	}
+
 	/* The results and, for the A-Z and year sorts, the jump rail beside
 	   them. */
 	.results {
@@ -389,7 +531,7 @@
 
 	/* Rows land under the sticky video header's height, not under it. */
 	.grid > :global(*) {
-		scroll-margin-top: var(--space-4);
+		scroll-margin-top: calc(var(--dock-h, 0px) + var(--space-4));
 	}
 
 	.earlier {

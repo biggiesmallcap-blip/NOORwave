@@ -118,9 +118,12 @@
 <style>
 	/* A slim rail on the ground at the right edge of the results; it stays
 	   in view while the grid scrolls. */
+	/* Below the docked lens row while it shows (--dock-offset, set by the
+	   page), at the top of the scroll while it is away. */
 	.scrubber {
 		position: sticky;
-		top: var(--space-4);
+		top: calc(var(--dock-offset, 0px) + var(--space-4));
+		transition: top var(--motion-base);
 		align-self: start;
 		height: min(640px, calc(100dvh - var(--bottom-player-height, 0px) - 160px));
 		min-height: 200px;
