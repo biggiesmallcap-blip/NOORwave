@@ -1,7 +1,7 @@
 //! The census: every coverage number the design's "done when" checks, in
 //! one read. Served at GET /api/videos/census.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -17,6 +17,22 @@ pub struct StageRun {
     pub finished_at: Option<String>,
     pub rows: Option<i64>,
     pub error: Option<String>,
+}
+
+/// One scene's coverage for the Logbook's "seen N of M" bars, so it needs
+/// no atlas payload.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SceneRow {
+    pub id: i64,
+    pub name: String,
+    pub hue: f64,
+    pub videos: i64,
+    pub artists: i64,
+    /// Distinct watched videos by the scene's artists.
+    pub seen_videos: i64,
+    /// Scene artists the listener watched or saved (light 3).
+    pub lit_artists: i64,
+    pub channel_no: Option<i64>,
 }
 
 /// `VideoCensus` on the wire.
@@ -45,6 +61,8 @@ pub struct Census {
     pub watched_videos: i64,
     pub lit_artists: i64,
     pub stages: Vec<StageRun>,
+    /// Per-scene coverage, biggest scene first; empty before scenes exist.
+    pub scene_rows: Vec<SceneRow>,
 }
 
 /// The last finished build's timestamp, if any.
@@ -126,6 +144,7 @@ pub fn read(conn: &Connection, running: bool) -> Result<Census> {
         .collect::<Result<_, _>>()?
     };
     let lights = Lights::load(conn)?;
+    let scene_rows = scene_rows(conn, &lights)?;
     Ok(Census {
         building: running || built_at.is_none(),
         built_at,
@@ -146,7 +165,59 @@ pub fn read(conn: &Connection, running: bool) -> Result<Census> {
         watched_videos: one("SELECT COUNT(DISTINCT tidal_video_id) FROM video_history")?,
         lit_artists: lights.lit.len() as i64,
         stages,
+        scene_rows,
     })
+}
+
+/// Every scene with what the listener has seen and lit in it.
+pub fn scene_rows(conn: &Connection, lights: &Lights) -> Result<Vec<SceneRow>> {
+    let mut seen: HashMap<i64, i64> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT a.scene_id, COUNT(DISTINCT h.tidal_video_id)
+               FROM video_history h
+               LEFT JOIN video_facets f ON f.tidal_video_id = h.tidal_video_id
+               JOIN video_artist_facets a
+                 ON a.artist_tidal_id = COALESCE(f.artist_tidal_id, h.artist_tidal_id)
+              WHERE a.scene_id IS NOT NULL
+              GROUP BY a.scene_id",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            seen.insert(row.get(0)?, row.get(1)?);
+        }
+    }
+    let mut lit: HashMap<i64, i64> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT artist_tidal_id, scene_id FROM video_artist_facets
+              WHERE scene_id IS NOT NULL",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            if lights.lit.contains(&row.get::<_, i64>(0)?) {
+                *lit.entry(row.get(1)?).or_default() += 1;
+            }
+        }
+    }
+    let mut stmt = conn.prepare(
+        "SELECT scene_id, name, hue, video_count, artist_count, channel_no
+           FROM video_scenes ORDER BY video_count DESC, scene_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let id: i64 = row.get(0)?;
+        Ok(SceneRow {
+            id,
+            name: row.get(1)?,
+            hue: row.get(2)?,
+            videos: row.get(3)?,
+            artists: row.get(4)?,
+            seen_videos: seen.get(&id).copied().unwrap_or(0),
+            lit_artists: lit.get(&id).copied().unwrap_or(0),
+            channel_no: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 #[cfg(test)]
@@ -164,6 +235,7 @@ mod tests {
         assert_eq!(census.songs, 0);
         assert_eq!(census.cuts.len(), 11);
         assert_eq!(census.era_coverage, 0.0);
+        assert!(census.scene_rows.is_empty());
     }
 
     #[test]
@@ -199,5 +271,50 @@ mod tests {
                 .any(|s| s.stage == "cuts" && s.rows == Some(3))
         );
         assert!(read(&conn, true).unwrap().building);
+    }
+
+    #[test]
+    fn scene_rows_count_what_was_seen_and_lit() {
+        let conn = conn();
+        add(&conn, 1, 7, "One", 200, None, None);
+        add(&conn, 2, 7, "Two", 200, None, None);
+        add(&conn, 3, 8, "Three", 200, None, None);
+        conn.execute_batch(
+            "INSERT INTO video_scenes (scene_id, name, hue, video_count, artist_count, channel_no)
+                 VALUES (1, 'Seven and Eight', 120, 3, 2, 10), (2, 'Empty', 40, 0, 0, NULL);
+             INSERT INTO video_artist_facets (artist_tidal_id, scene_id) VALUES (7, 1), (8, 1);
+             INSERT INTO video_history (tidal_video_id, artist_tidal_id)
+                 VALUES (1, 7), (1, 7), (2, NULL);",
+        )
+        .unwrap();
+        // Facets give video 2 its artist; the scene rows are set by hand, so
+        // the scene stage does not run here.
+        crate::services::video_intel::cuts::build(&conn).unwrap();
+        let rows = read(&conn, false).unwrap().scene_rows;
+        assert_eq!(
+            rows,
+            vec![
+                SceneRow {
+                    id: 1,
+                    name: "Seven and Eight".into(),
+                    hue: 120.0,
+                    videos: 3,
+                    artists: 2,
+                    seen_videos: 2,
+                    lit_artists: 1,
+                    channel_no: Some(10),
+                },
+                SceneRow {
+                    id: 2,
+                    name: "Empty".into(),
+                    hue: 40.0,
+                    videos: 0,
+                    artists: 0,
+                    seen_videos: 0,
+                    lit_artists: 0,
+                    channel_no: None,
+                },
+            ]
+        );
     }
 }

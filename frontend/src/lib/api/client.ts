@@ -2471,6 +2471,12 @@ export const api = {
 		return fetchApi<VideoConcert>(`/api/videos/concerts/${id}`);
 	},
 
+	/** The versions of the song a video belongs to (404 until the catalog
+	 *  build has seen the video). */
+	getVideoSongByVideo(videoId: number): Promise<SongVersionsResponse> {
+		return fetchApi<SongVersionsResponse>(`/api/videos/videos/${videoId}/song`);
+	},
+
 	getVideoAtlas(): Promise<AtlasResponse> {
 		return fetchApi<AtlasResponse>('/api/videos/atlas');
 	},

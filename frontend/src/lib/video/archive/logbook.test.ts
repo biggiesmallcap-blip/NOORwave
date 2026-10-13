@@ -22,6 +22,7 @@ const census: VideoCensus = {
 	watched_videos: 1204,
 	lit_artists: 312,
 	stages: [],
+	scene_rows: [],
 };
 
 function scene(id: number, videos: number, seen: number): AtlasScene {

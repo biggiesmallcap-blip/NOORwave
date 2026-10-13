@@ -80,6 +80,19 @@ pub(super) async fn get_video_song_versions(
     .await
 }
 
+/// GET /api/videos/videos/{id}/song: the versions of the song a video
+/// belongs to, so a page holding only a video id needs no client-side key.
+pub(super) async fn get_video_song_by_video(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> Response {
+    let db = { state.read().await.db.clone() };
+    read(db, "song", move |db| {
+        db.with_conn(|conn| songs::versions_for_video(conn, id))
+    })
+    .await
+}
+
 /// GET /api/videos/concerts/{id}
 pub(super) async fn get_video_concert(
     State(state): State<SharedState>,
@@ -175,10 +188,19 @@ mod tests {
         let (status, archive) = get(&db, "/api/videos/archive?cut=live&sort=year").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(archive["total"], 3);
+        assert_eq!(archive["building"], false);
+        let (_, scoped) = get(&db, "/api/videos/archive?artist=8").await;
+        assert_eq!(scoped["total"], 0);
         assert_eq!(archive["items"][0]["best"]["type"], "Music Video");
         assert!(archive["facets"]["cut"].is_array());
 
         let (status, versions) = get(&db, "/api/videos/songs/id%3A7%3Asong%20a/versions").await;
+        let (by_video_status, by_video) = get(&db, "/api/videos/videos/100/song").await;
+        assert_eq!(by_video_status, StatusCode::OK);
+        assert_eq!(by_video, versions);
+        let (status_unknown, body) = get(&db, "/api/videos/videos/5/song").await;
+        assert_eq!(status_unknown, StatusCode::NOT_FOUND);
+        assert!(body["error"].is_string());
         assert_eq!(status, StatusCode::OK);
         assert_eq!(versions["versions"].as_array().unwrap().len(), 2);
         assert_eq!(versions["versions"][1]["concert"]["id"], 100);

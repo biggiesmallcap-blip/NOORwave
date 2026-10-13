@@ -166,6 +166,7 @@ describe('stage rows', () => {
 			getVideoArchive: async (query) => {
 				queries.push(query);
 				return {
+					building: false,
 					total: 1,
 					items: [{ song_key: 'server-key', title: 'Swear It Again', artist_id: 5, artist_name: 'Westlife', best: current, cut_count: 2, cuts: ['live'], song_year: null, scene_id: null, light: 2 }],
 					facets: { scene: [], cut: [], decade: [], depth: [], length: [] },

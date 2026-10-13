@@ -133,6 +133,20 @@ export interface AtlasRouteResponse {
 
 // ---------------------------------------------------------------- Catalog
 
+/** One scene's coverage for the Logbook: "seen N of M" without the atlas. */
+export interface CensusScene {
+	id: number;
+	name: string;
+	hue: number;
+	videos: number;
+	artists: number;
+	/** Distinct watched videos by the scene's artists. */
+	seen_videos: number;
+	/** Scene artists the listener watched or saved. */
+	lit_artists: number;
+	channel_no: number | null;
+}
+
 export interface VideoCensus {
 	building: boolean;
 	built_at: string | null;
@@ -149,10 +163,14 @@ export interface VideoCensus {
 	concerts: number;
 	cuts: Record<VideoCut, number>;
 	genre_coverage: number; // 0..1 of charted artists
-	era_coverage: number; // 0..1 of songs with song_year
+	/** 0..1 of songs whose year has era confidence >= 0.5 (library, tag, or
+	 *  a cut year the artist's range backs); a bare upload year does not count. */
+	era_coverage: number;
 	watched_videos: number;
 	lit_artists: number;
 	stages: { stage: string; finished_at: string | null; rows: number | null; error: string | null }[];
+	/** Per-scene coverage, biggest first; empty before scenes exist. */
+	scene_rows: CensusScene[];
 }
 
 export type ArchiveSort = 'relevance' | 'newest' | 'year' | 'popular' | 'versions';
@@ -162,6 +180,8 @@ export type ArchiveSource = 'catalog' | 'liked' | 'saved';
 
 export interface ArchiveQuery {
 	scene?: number;
+	/** Only this artist's songs (TIDAL id). Scopes every facet count. */
+	artist?: number;
 	cut?: VideoCut;
 	era_from?: number;
 	era_to?: number;
@@ -188,6 +208,8 @@ export interface ArchiveSong {
 }
 
 export interface ArchiveResponse {
+	/** True until the first catalog build has finished. */
+	building: boolean;
 	total: number;
 	items: ArchiveSong[];
 	/** Live counts for every lens under the other active lenses. */

@@ -117,6 +117,8 @@ pub enum Sort {
 #[derive(Debug, Clone, Default)]
 pub struct Query {
     pub scene: Option<i64>,
+    /// Only this artist's songs (TIDAL id). Not a facet: it scopes every count.
+    pub artist: Option<i64>,
     pub cut: Option<Cut>,
     pub era_from: Option<i64>,
     pub era_to: Option<i64>,
@@ -135,6 +137,7 @@ impl Query {
         let int = |key: &str| get(key).and_then(|v| v.parse::<i64>().ok());
         Query {
             scene: int("scene"),
+            artist: int("artist").filter(|id| *id > 0),
             cut: get("cut").and_then(Cut::parse),
             era_from: int("era_from"),
             era_to: int("era_to"),
@@ -388,6 +391,8 @@ pub struct Facets {
 /// `ArchiveResponse` on the wire.
 #[derive(Debug, Clone, Serialize)]
 pub struct Response {
+    /// True until the first catalog build has finished.
+    pub building: bool,
     pub total: usize,
     pub items: Vec<ArchiveSong>,
     pub facets: Facets,
@@ -473,6 +478,9 @@ pub fn select(
     let mut length_counts: HashMap<Length, usize> = HashMap::new();
     for row in &index.rows {
         if allowed.is_some_and(|ids| !ids.contains(&row.rowid)) {
+            continue;
+        }
+        if query.artist.is_some_and(|artist| row.artist != artist) {
             continue;
         }
         if let Some(needle) = &needle
@@ -722,6 +730,7 @@ pub fn query(conn: &Connection, index: &Index, query: &Query, lights: &Lights) -
         })
         .collect();
     Ok(Response {
+        building: super::census::built_at(conn)?.is_none(),
         total,
         items,
         facets,
@@ -906,6 +915,29 @@ mod tests {
             titles(&run(&conn, &[("source", "saved")])),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn artist_scope_and_building_flag() {
+        let conn = seeded();
+        let seven = run(&conn, &[("artist", "7")]);
+        assert_eq!(titles(&seven), vec!["Alpha", "Beta"]);
+        let count = |cut: Cut| {
+            seven
+                .facets
+                .cut
+                .iter()
+                .find(|f| f.cut == cut)
+                .map_or(0, |f| f.count)
+        };
+        assert_eq!(
+            (count(Cut::Official), count(Cut::Live), count(Cut::Lyric)),
+            (1, 1, 1)
+        );
+        assert_eq!(count(Cut::Trailer), 0, "artist 8's trailer is out of scope");
+        assert!(seven.building, "stages ran by hand: no finished build");
+        crate::services::video_intel::build::build_all(&conn).unwrap();
+        assert!(!run(&conn, &[]).building);
     }
 
     #[test]

@@ -759,6 +759,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(video_intel_routes::get_video_song_versions),
         )
         .route(
+            "/api/videos/videos/{id}/song",
+            get(video_intel_routes::get_video_song_by_video),
+        )
+        .route(
             "/api/videos/concerts/{id}",
             get(video_intel_routes::get_video_concert),
         )

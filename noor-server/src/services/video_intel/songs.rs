@@ -293,6 +293,22 @@ fn disambiguate(labels: &mut [String], durations: &[Option<i64>]) {
     }
 }
 
+/// The versions of the song a video belongs to. None when the build has
+/// not seen the video.
+pub fn versions_for_video(conn: &Connection, video_id: i64) -> Result<Option<SongVersions>> {
+    let key: Option<String> = conn
+        .query_row(
+            "SELECT song_key FROM video_facets WHERE tidal_video_id = ?1",
+            [video_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match key {
+        Some(key) => versions(conn, &key),
+        None => Ok(None),
+    }
+}
+
 /// Every version of one song, best first. None when the song is unknown.
 pub fn versions(conn: &Connection, song_key: &str) -> Result<Option<SongVersions>> {
     let Some((title, artist_id, artist_name, song_year, best_id)) = conn
@@ -603,6 +619,32 @@ pub(crate) mod tests {
             ]
         );
         assert!(versions(&conn, "id:7:nothing").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_video_finds_its_song() {
+        let conn = conn();
+        add(&conn, 10, 7, "Swear It Again", 250, Some(30), Some(1999));
+        add(
+            &conn,
+            12,
+            7,
+            "Swear It Again (Live At Croke Park Stadium)",
+            270,
+            None,
+            Some(2008),
+        );
+        assert!(
+            versions_for_video(&conn, 12).unwrap().is_none(),
+            "not built yet"
+        );
+        cuts::build(&conn).unwrap();
+        build(&conn).unwrap();
+        let song = versions_for_video(&conn, 12).unwrap().unwrap();
+        assert_eq!(song.song_key, "id:7:swear it again");
+        assert_eq!(song.versions.len(), 2);
+        assert!(song.versions[0].best);
+        assert!(versions_for_video(&conn, 99).unwrap().is_none());
     }
 
     #[test]

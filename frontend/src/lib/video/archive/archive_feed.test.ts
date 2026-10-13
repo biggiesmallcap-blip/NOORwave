@@ -31,6 +31,7 @@ function song(n: number): ArchiveSong {
 
 function response(items: ArchiveSong[], total = items.length): ArchiveResponse {
 	return {
+		building: false,
 		total,
 		items,
 		facets: { scene: [], cut: [], decade: [{ decade: 1990, count: total }], depth: [], length: [] },
