@@ -24,6 +24,7 @@ const COMPARE_STATION_LIMIT: usize = 60;
 pub(super) const COMPARE_SESSION_KEY: &str = "radio_compare_session";
 const COMPARE_SESSION_MAX_BYTES: usize = 2 * 1024 * 1024;
 const COMPARE_SUGGESTED_SEEDS: usize = 20;
+const COMPARE_HARD_SEEDS: usize = 10;
 
 /// One playable row, in the frontend's `TidalPlayable` shape.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -37,6 +38,9 @@ pub(super) struct CompareTrack {
     artist_tidal_id: Option<i64>,
     album_tidal_id: Option<i64>,
     local_id: Option<i64>,
+    /// Why a suggested seed is a hard case; only on hard seed suggestions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_reason: Option<String>,
 }
 
 impl CompareTrack {
@@ -51,6 +55,7 @@ impl CompareTrack {
             artist_tidal_id: track.artist_tidal_id,
             album_tidal_id: track.album_tidal_id,
             local_id: Some(track.id),
+            seed_reason: None,
         }
     }
 
@@ -65,6 +70,7 @@ impl CompareTrack {
             artist_tidal_id: track.artist_id,
             album_tidal_id: track.album_id,
             local_id: None,
+            seed_reason: None,
         }
     }
 }
@@ -343,6 +349,7 @@ async fn playable_list(
                 artist_tidal_id: None,
                 album_tidal_id: None,
                 local_id: None,
+                seed_reason: None,
             })
         } else {
             Slot::Pending {
@@ -394,17 +401,153 @@ async fn resolve_slot(tidal: Option<&TidalClient>, slot: Slot) -> Option<Compare
     }
 }
 
-/// Seeds worth comparing: the most played TIDAL-backed library tracks, one per
-/// top-level genre first and never two by one artist, then the most played of
-/// the rest.
+#[derive(Debug, Deserialize)]
+pub(super) struct CompareSeedsQuery {
+    /// `hard` for seeds where station designs should differ most.
+    #[serde(default)]
+    set: Option<String>,
+}
+
+/// Seeds worth comparing. The default set is the most played TIDAL-backed
+/// library tracks, one per top-level genre first and never two by one artist,
+/// then the most played of the rest. `?set=hard` returns the hard cases.
 pub(super) async fn radio_compare_seeds(
     State(state): State<SharedState>,
+    Query(query): Query<CompareSeedsQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let db = state.read().await.db.clone();
+    let hard = query.set.as_deref() == Some("hard");
     let seeds = db
-        .with_conn(|conn| suggested_compare_seeds(conn, COMPARE_SUGGESTED_SEEDS))
+        .with_conn(move |conn| {
+            if hard {
+                hard_compare_seeds(conn, COMPARE_HARD_SEEDS)
+            } else {
+                suggested_compare_seeds(conn, COMPARE_SUGGESTED_SEEDS)
+            }
+        })
         .map_err(internal)?;
     Ok(Json(json!({ "seeds": seeds })))
+}
+
+fn track_ids(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Vec<i64>> {
+    conn.prepare(sql)?
+        .query_map(params, |row| row.get(0))?
+        .collect()
+}
+
+/// Hard cases for a station, where the designs should differ most, taken in
+/// turn from each source and never two by one artist:
+/// - stations you started that had nothing learned to go on (no library lane),
+/// - played tracks your listening model does not know yet,
+/// - the most played track of each rare genre held with confidence,
+/// - tracks added recently and not played yet.
+fn hard_compare_seeds(
+    conn: &rusqlite::Connection,
+    count: usize,
+) -> anyhow::Result<Vec<CompareTrack>> {
+    let tagged = |list: Vec<i64>, reason: &str| -> std::collections::VecDeque<(i64, String)> {
+        list.into_iter()
+            .map(|id| (id, reason.to_string()))
+            .collect()
+    };
+
+    let cold = track_ids(
+        conn,
+        "SELECT d.seed_track_id FROM radio_diagnostics d
+         JOIN tracks t ON t.id = d.seed_track_id
+         WHERE d.actual_library_count = 0 AND t.tidal_id > 0
+         GROUP BY d.seed_track_id
+         ORDER BY MAX(d.id) DESC
+         LIMIT 20",
+        [],
+    )?;
+    let unknown = match queries::get_selected_discovery_embedding_model(conn)? {
+        Some(model) => track_ids(
+            conn,
+            "SELECT t.id FROM tracks t
+             WHERE t.play_count > 0 AND t.tidal_id > 0
+               AND NOT EXISTS (SELECT 1 FROM track_neighbors n
+                               WHERE n.model_id = ?1 AND n.track_id = t.id)
+             ORDER BY t.last_played_at DESC, t.id DESC
+             LIMIT 20",
+            [model.id],
+        )?,
+        None => Vec::new(),
+    };
+    let rare: std::collections::VecDeque<(i64, String)> = conn
+        .prepare(
+            "SELECT g.name,
+                    (SELECT t2.id FROM track_genres tg2 JOIN tracks t2 ON t2.id = tg2.track_id
+                     WHERE tg2.genre_id = g.id AND tg2.confidence >= 0.5 AND t2.tidal_id > 0
+                     ORDER BY t2.play_count DESC, t2.id ASC LIMIT 1) AS pick
+             FROM track_genres tg
+             JOIN genres g ON g.id = tg.genre_id
+             JOIN tracks t ON t.id = tg.track_id
+             WHERE t.tidal_id > 0 AND tg.confidence >= 0.5
+             GROUP BY g.id
+             HAVING COUNT(DISTINCT tg.track_id) BETWEEN 3 AND 40
+             ORDER BY COUNT(DISTINCT tg.track_id) ASC, g.name ASC
+             LIMIT 30",
+        )?
+        .query_map([], |row| {
+            Ok((row.get::<_, Option<i64>>(1)?, row.get::<_, String>(0)?))
+        })?
+        .filter_map(|row| row.ok())
+        .filter_map(|(id, genre)| id.map(|id| (id, format!("Rare genre: {genre}"))))
+        .collect();
+    let fresh = track_ids(
+        conn,
+        "SELECT id FROM tracks
+         WHERE play_count = 0 AND is_library = 1 AND tidal_id > 0
+         ORDER BY date_added DESC, id DESC
+         LIMIT 20",
+        [],
+    )?;
+
+    let mut sources = [
+        tagged(cold, "A station you started had nothing learned to go on"),
+        tagged(unknown, "Your listening model doesn't know it yet"),
+        rare,
+        tagged(fresh, "Added recently, not played yet"),
+    ];
+    let all_ids: Vec<i64> = sources
+        .iter()
+        .flat_map(|source| source.iter().map(|(id, _)| *id))
+        .collect();
+    let tracks: HashMap<i64, Track> = crate::playback::queue::get_tracks_by_ids(conn, &all_ids)?
+        .into_iter()
+        .map(|track| (track.id, track))
+        .collect();
+
+    let mut picked: Vec<CompareTrack> = Vec::new();
+    let mut picked_ids = HashSet::new();
+    let mut artists = HashSet::new();
+    while picked.len() < count && sources.iter().any(|source| !source.is_empty()) {
+        for source in sources.iter_mut() {
+            if picked.len() >= count {
+                break;
+            }
+            while let Some((id, reason)) = source.pop_front() {
+                let Some(track) = tracks.get(&id) else {
+                    continue;
+                };
+                if picked_ids.contains(&id) || artists.contains(&track.artist_id) {
+                    continue;
+                }
+                picked_ids.insert(id);
+                artists.insert(track.artist_id);
+                let mut seed = CompareTrack::from_track(track);
+                seed.seed_reason = Some(reason);
+                picked.push(seed);
+                break;
+            }
+        }
+    }
+    Ok(picked)
 }
 
 fn suggested_compare_seeds(
@@ -631,6 +774,72 @@ mod tests {
             // Electronic (House 1), then Jazz by a new artist (Jazz 2), then
             // the most played remaining artist (House 2). Never the local file.
             assert_eq!(picked, vec![1, 4, 2]);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn hard_seeds_cover_cold_stations_unknown_tracks_rare_genres_and_new_additions() {
+        let db = fresh_migrated_db();
+        db.seed_genres_from_taxonomy().unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO artists (id, name) VALUES
+                     (1, 'Ram Dass'), (2, 'B'), (3, 'C'), (4, 'D'), (5, 'E'), (7, 'F'), (8, 'G');
+                 INSERT INTO tracks (id, title, artist_id, play_count, tidal_id, is_library) VALUES
+                     (1, 'The Water Poem', 1, 2, 101, 1),
+                     (2, 'Unknown To Model', 2, 3, 102, 1),
+                     (3, 'Dub One', 3, 5, 103, 1),
+                     (4, 'New Addition', 4, 0, 104, 1),
+                     (5, 'Popular', 5, 50, 105, 1),
+                     (7, 'Dub Two', 7, 1, 107, 1),
+                     (8, 'Dub Three', 8, 1, 108, 1);
+                 INSERT INTO track_genres (track_id, genre_id, source, confidence)
+                     SELECT t.id, g.id, 'musicbrainz', 0.8 FROM tracks t, genres g
+                     WHERE t.title LIKE 'Dub%' AND g.name = 'Dub Techno';",
+            )?;
+            let model = queries::create_embedding_model(
+                conn,
+                "discovery-fusion-v2:hard",
+                queries::DISCOVERY_ENGINE_V2_FAMILY,
+                8,
+                "ready",
+                None,
+            )?;
+            queries::activate_embedding_model(conn, model.id)?;
+            conn.execute(
+                "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score)
+                 VALUES (5, 3, ?1, 1, 0.9)",
+                [model.id],
+            )?;
+            crate::services::radio_config::log_radio_diagnostics(
+                conn,
+                &crate::services::radio_config::RadioDiagnosticsRow {
+                    seed_track_id: Some(1),
+                    profile_name: "mixed".into(),
+                    ..Default::default()
+                },
+            )?;
+            let seeds = hard_compare_seeds(conn, 10)?;
+            let picked: Vec<i64> = seeds.iter().map(|s| s.local_id.unwrap()).collect();
+            for id in [1, 2, 3, 4] {
+                assert!(picked.contains(&id), "{id} missing from {picked:?}");
+            }
+            assert!(!picked.contains(&5), "a well-known favourite is not hard");
+            let reason = |id: i64| {
+                seeds
+                    .iter()
+                    .find(|s| s.local_id == Some(id))
+                    .and_then(|s| s.seed_reason.clone())
+                    .unwrap()
+            };
+            assert_eq!(
+                reason(1),
+                "A station you started had nothing learned to go on"
+            );
+            assert_eq!(reason(3), "Rare genre: Dub Techno");
+            assert_eq!(reason(4), "Added recently, not played yet");
             Ok(())
         })
         .unwrap();

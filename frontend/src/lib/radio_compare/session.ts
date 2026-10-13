@@ -20,6 +20,8 @@ export interface CompareSeedEntry {
 	misfits: Record<string, string[]>;
 	/** The arm picked as best; a seed counts in the results once this is set. */
 	best: string | null;
+	/** The arm picked as worst, if any. Never the same as `best`. */
+	worst: string | null;
 }
 
 export interface CompareSession {
@@ -36,6 +38,8 @@ export interface ArmSummary {
 	/** Share of shown tracks not marked; `null` when it showed none. */
 	fit: number | null;
 	wins: number;
+	/** Judged seeds where this design was picked as worst. */
+	losses: number;
 	/** Judged seeds where this design had nothing to play. */
 	empty: number;
 }
@@ -96,7 +100,14 @@ export function addSeed(session: CompareSession, seed: RadioCompareTrack): Compa
 	if (seed.local_id == null || session.entries.some((entry) => seedId(entry) === seed.local_id)) {
 		return session;
 	}
-	const entry: CompareSeedEntry = { seed, arms: null, order: [], misfits: {}, best: null };
+	const entry: CompareSeedEntry = {
+		seed,
+		arms: null,
+		order: [],
+		misfits: {},
+		best: null,
+		worst: null,
+	};
 	return { ...session, entries: [...session.entries, entry] };
 }
 
@@ -124,7 +135,8 @@ export function withArms(
 			Object.entries(entry.misfits).filter(([arm]) => ids.includes(arm))
 		);
 		const best = entry.best && ids.includes(entry.best) ? entry.best : null;
-		return { ...entry, arms, order, misfits, best };
+		const worst = entry.worst && ids.includes(entry.worst) ? entry.worst : null;
+		return { ...entry, arms, order, misfits, best, worst };
 	});
 }
 
@@ -143,10 +155,18 @@ export function toggleMisfit(
 
 /** Pick the best station; picking it again clears the pick. */
 export function setBest(session: CompareSession, localId: number, arm: string | null): CompareSession {
-	return updateEntry(session, localId, (entry) => ({
-		...entry,
-		best: entry.best === arm ? null : arm,
-	}));
+	return updateEntry(session, localId, (entry) => {
+		const best = entry.best === arm ? null : arm;
+		return { ...entry, best, worst: best !== null && entry.worst === best ? null : entry.worst };
+	});
+}
+
+/** Pick the worst station; picking it again clears the pick. */
+export function setWorst(session: CompareSession, localId: number, arm: string | null): CompareSession {
+	return updateEntry(session, localId, (entry) => {
+		const worst = entry.worst === arm ? null : arm;
+		return { ...entry, worst, best: worst !== null && entry.best === worst ? null : entry.best };
+	});
 }
 
 export function summarize(session: CompareSession): ArmSummary[] {
@@ -161,6 +181,7 @@ export function summarize(session: CompareSession): ArmSummary[] {
 				misfits: 0,
 				fit: null,
 				wins: 0,
+				losses: 0,
 				empty: 0,
 			};
 			const keys = new Set(list.tracks.map(trackKey));
@@ -169,6 +190,7 @@ export function summarize(session: CompareSession): ArmSummary[] {
 			summary.misfits += (entry.misfits[list.arm] ?? []).filter((k) => keys.has(k)).length;
 			if (list.tracks.length === 0) summary.empty += 1;
 			if (entry.best === list.arm) summary.wins += 1;
+			if (entry.worst === list.arm) summary.losses += 1;
 			byArm.set(list.arm, summary);
 		}
 	}
@@ -193,7 +215,8 @@ function isEntry(value: unknown): value is CompareSeedEntry {
 		Array.isArray(entry.order) &&
 		typeof entry.misfits === 'object' &&
 		entry.misfits !== null &&
-		(entry.best === null || typeof entry.best === 'string')
+		(entry.best === null || typeof entry.best === 'string') &&
+		(entry.worst === undefined || entry.worst === null || typeof entry.worst === 'string')
 	);
 }
 
@@ -205,5 +228,12 @@ export function parseSession(raw: unknown): CompareSession {
 		return emptySession();
 	}
 	if (!session.entries.every(isEntry)) return emptySession();
-	return session as unknown as CompareSession;
+	return {
+		version: COMPARE_SESSION_VERSION,
+		// Sessions saved before worst picks existed have no `worst`.
+		entries: (session.entries as CompareSeedEntry[]).map((entry) => ({
+			...entry,
+			worst: entry.worst ?? null,
+		})),
+	};
 }

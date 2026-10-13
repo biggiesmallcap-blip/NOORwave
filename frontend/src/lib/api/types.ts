@@ -1663,6 +1663,8 @@ export type RadioBlend = 'familiar' | 'mixed' | 'adventurous';
  * when the pick is a library track (`tidal_id` is 0 for a local-only file). */
 export interface RadioCompareTrack extends TidalPlayable {
 	local_id: number | null;
+	/** Why a hard seed suggestion is a hard case. */
+	seed_reason?: string;
 }
 
 /** One station design's first tracks for a seed. `arm` is hidden until reveal. */

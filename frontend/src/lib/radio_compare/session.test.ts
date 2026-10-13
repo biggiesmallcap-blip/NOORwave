@@ -7,6 +7,7 @@ import {
 	parseSession,
 	removeSeed,
 	setBest,
+	setWorst,
 	shuffled,
 	stationLabel,
 	summarize,
@@ -89,6 +90,34 @@ describe('radio blind comparison session', () => {
 		expect(setBest(session, 7, 'current').entries[0].best).toBeNull();
 	});
 
+	it('picks one worst station, never the same as the best', () => {
+		let session = withArms(addSeed(emptySession(), seed), 7, [arm('current', [1]), arm('tidal', [2])]);
+		session = setBest(session, 7, 'current');
+		session = setWorst(session, 7, 'tidal');
+		expect(session.entries[0]).toMatchObject({ best: 'current', worst: 'tidal' });
+		session = setWorst(session, 7, 'current');
+		expect(session.entries[0]).toMatchObject({ best: null, worst: 'current' });
+		session = setBest(session, 7, 'current');
+		expect(session.entries[0]).toMatchObject({ best: 'current', worst: null });
+		expect(setWorst(setWorst(session, 7, 'tidal'), 7, 'tidal').entries[0].worst).toBeNull();
+	});
+
+	it('counts worst picks per design', () => {
+		let session = withArms(addSeed(emptySession(), seed), 7, [arm('current', [1]), arm('tidal', [2])]);
+		session = setWorst(setBest(session, 7, 'current'), 7, 'tidal');
+		const byArm = Object.fromEntries(summarize(session).map((s) => [s.arm, s]));
+		expect(byArm.tidal.losses).toBe(1);
+		expect(byArm.current.losses).toBe(0);
+	});
+
+	it('loads a session saved before worst picks existed', () => {
+		const saved = JSON.parse(
+			JSON.stringify(setBest(withArms(addSeed(emptySession(), seed), 7, [arm('current', [1])]), 7, 'current'))
+		);
+		delete saved.entries[0].worst;
+		expect(parseSession(saved).entries[0].worst).toBeNull();
+	});
+
 	it('scores only judged seeds: fit is the share of tracks not marked', () => {
 		let session = emptySession();
 		session = addSeed(session, seed);
@@ -103,7 +132,7 @@ describe('radio blind comparison session', () => {
 		session = toggleMisfit(session, 8, 'current', 't7');
 
 		const summary = Object.fromEntries(summarize(session).map((s) => [s.arm, s]));
-		expect(summary.current).toMatchObject({ seeds: 1, tracks: 4, misfits: 1, wins: 1, empty: 0 });
+		expect(summary.current).toMatchObject({ seeds: 1, tracks: 4, misfits: 1, wins: 1, losses: 0, empty: 0 });
 		expect(summary.current.fit).toBeCloseTo(0.75);
 		expect(summary.tidal).toMatchObject({ seeds: 1, tracks: 2, misfits: 2, wins: 0 });
 		expect(summary.tidal.fit).toBe(0);

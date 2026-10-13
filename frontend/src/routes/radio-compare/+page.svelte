@@ -22,6 +22,7 @@
 		parseSession,
 		removeSeed,
 		setBest,
+		setWorst,
 		stationLabel,
 		summarize,
 		toggleMisfit,
@@ -38,7 +39,7 @@
 	let loadingId = $state<number | null>(null);
 	let loadError = $state<unknown>(null);
 	let revealed = $state(false);
-	let suggesting = $state(false);
+	let suggesting = $state<'popular' | 'hard' | null>(null);
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const active = $derived(session.entries.find((entry) => entry.seed.local_id === activeId) ?? null);
@@ -98,15 +99,17 @@
 		if (entry && !entry.arms && loadingId !== localId) void load(localId);
 	}
 
-	async function addSuggested() {
-		suggesting = true;
+	async function addSuggested(set: 'popular' | 'hard' = 'popular') {
+		suggesting = set;
 		try {
-			const { seeds } = await api.radioCompareSeeds();
+			const { seeds } = await api.radioCompareSeeds(set === 'hard' ? 'hard' : undefined);
 			const before = session.entries.length;
 			commit(seeds.reduce(addSeed, session));
 			const added = session.entries.length - before;
 			showToast(
-				added > 0 ? `Added ${added} seeds` : 'Every suggested seed is already here',
+				added > 0
+					? `Added ${added} ${set === 'hard' ? 'hard ' : ''}seeds`
+					: 'Every suggested seed is already here',
 				added > 0 ? 'success' : 'info'
 			);
 			if (activeId == null && session.entries[0]?.seed.local_id != null) {
@@ -115,7 +118,7 @@
 		} catch {
 			showToast("Couldn't load suggested seeds", 'error');
 		} finally {
-			suggesting = false;
+			suggesting = null;
 		}
 	}
 
@@ -167,8 +170,22 @@
 		subtitle="Each seed gets its stations in a random order. Play them, mark tracks that don't fit the seed, and pick the best station. Reveal shows which station is which."
 	>
 		{#snippet actions()}
-			<button type="button" class="btn btn-secondary" onclick={addSuggested} disabled={suggesting}>
-				{suggesting ? 'Adding...' : 'Add suggested seeds'}
+			<button
+				type="button"
+				class="btn btn-secondary"
+				onclick={() => addSuggested('popular')}
+				disabled={suggesting !== null}
+			>
+				{suggesting === 'popular' ? 'Adding...' : 'Add suggested seeds'}
+			</button>
+			<button
+				type="button"
+				class="btn btn-secondary"
+				onclick={() => addSuggested('hard')}
+				disabled={suggesting !== null}
+				title="Seeds where the stations should differ most: cold stations, tracks your model doesn't know, rare genres, new additions"
+			>
+				{suggesting === 'hard' ? 'Adding...' : 'Add hard seeds'}
 			</button>
 			<button type="button" class="btn btn-secondary" onclick={addPlaying}>Add playing track</button>
 			<button
@@ -191,7 +208,12 @@
 			copy="Add suggested seeds from your most played tracks across genres, or play a track and add it."
 		>
 			{#snippet actions()}
-				<button type="button" class="btn btn-primary" onclick={addSuggested} disabled={suggesting}>
+				<button
+					type="button"
+					class="btn btn-primary"
+					onclick={() => addSuggested('popular')}
+					disabled={suggesting !== null}
+				>
 					Add suggested seeds
 				</button>
 			{/snippet}
@@ -227,6 +249,9 @@
 						<p class="t-label">Seed</p>
 						<h2 class="t-section">{active.seed.title}</h2>
 						<p class="t-meta">{active.seed.artist_name ?? ''}</p>
+						{#if active.seed.seed_reason}
+							<p class="t-micro seed-reason">Hard seed: {active.seed.seed_reason}</p>
+						{/if}
 					</div>
 					<div class="seed-actions">
 						<button
@@ -262,7 +287,8 @@
 							{@const label = stationLabel(i)}
 							{@const marked = active.misfits[armId] ?? []}
 							{@const isBest = active.best === armId}
-							<div class="station" class:best={isBest}>
+							{@const isWorst = active.worst === armId}
+							<div class="station" class:best={isBest} class:worst={isWorst}>
 								<div class="station-head">
 									<div class="station-name">
 										<span class="t-label">Station {label}</span>
@@ -288,6 +314,14 @@
 										onclick={() => active.seed.local_id != null && commit(setBest(session, active.seed.local_id, armId))}
 									>
 										{isBest ? 'Best' : 'Pick best'}
+									</button>
+									<button
+										type="button"
+										class="btn btn-ghost worst-btn"
+										aria-pressed={isWorst}
+										onclick={() => active.seed.local_id != null && commit(setWorst(session, active.seed.local_id, armId))}
+									>
+										{isWorst ? 'Worst' : 'Pick worst'}
 									</button>
 								</div>
 								{#if list.note}
@@ -340,6 +374,7 @@
 								<th scope="col">Design</th>
 								<th scope="col">Fit</th>
 								<th scope="col">Best picks</th>
+								<th scope="col">Worst picks</th>
 								<th scope="col">Tracks</th>
 								<th scope="col">Empty lists</th>
 							</tr>
@@ -350,6 +385,7 @@
 									<th scope="row">{armName(row.arm)}</th>
 									<td>{percent(row.fit)}</td>
 									<td>{row.wins} of {row.seeds}</td>
+									<td>{row.losses} of {row.seeds}</td>
 									<td>{row.tracks}</td>
 									<td>{row.empty}</td>
 								</tr>
@@ -444,15 +480,28 @@
 		border-top-color: var(--accent);
 	}
 
+	.station.worst {
+		border-top-color: var(--state-error);
+	}
+
+	.worst-btn[aria-pressed='true'] {
+		color: var(--state-error);
+	}
+
+	.seed-reason {
+		margin-top: 2px;
+	}
+
 	.station-head {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto auto auto;
+		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: var(--space-2);
 	}
 
 	.station-name {
 		display: flex;
+		flex: 1 1 auto;
 		flex-direction: column;
 		gap: 2px;
 		min-width: 0;
@@ -489,6 +538,11 @@
 
 	.row.misfit .row-track {
 		opacity: 0.45;
+	}
+
+	/* Always visible but quiet: the mark is the main way to score a station. */
+	.misfit-btn {
+		opacity: 0.4;
 	}
 
 	.row:hover .misfit-btn,

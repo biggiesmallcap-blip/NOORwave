@@ -1616,8 +1616,12 @@ export const api = {
 		});
 	},
 
-	radioCompareSeeds() {
-		return fetchApi<{ seeds: RadioCompareTrack[] }>('/api/radio/compare/seeds');
+	/** Seed suggestions: most played across genres, or `hard` cases where
+	 * station designs should differ most. */
+	radioCompareSeeds(set?: 'hard') {
+		return fetchApi<{ seeds: RadioCompareTrack[] }>(
+			set ? `/api/radio/compare/seeds?set=${set}` : '/api/radio/compare/seeds'
+		);
 	},
 
 	getRadioCompareSession() {
