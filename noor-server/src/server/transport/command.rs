@@ -8,7 +8,9 @@ use rusqlite::OptionalExtension;
 
 use super::events::{report_playback_failure, switch_runtime_to_snapshot_current};
 use super::generation;
-use super::listen::{record_transition_if_changed, sync_session_after_snapshot};
+use super::listen::{
+    open_listen_completed, record_transition_if_changed, sync_session_after_snapshot,
+};
 use super::pending::{resolve_or_skip_pending_current, resolve_or_skip_pending_current_previous};
 use super::runtime::current as current_runtime;
 use super::settings::{current_crossfade_ms, effective_crossfade_ms};
@@ -113,7 +115,11 @@ pub(crate) async fn next(state: &SharedState) -> Result<Outcome, CommandError> {
         return Ok(Outcome::Current);
     }
 
-    record_transition_if_changed(state, previous_track_id, &snapshot, "queue", true).await;
+    // Read before the session below is flushed: an early Next is a skip, not
+    // a completed listen.
+    let completed_prev = open_listen_completed(state, previous_track_id).await;
+    record_transition_if_changed(state, previous_track_id, &snapshot, "queue", completed_prev)
+        .await;
 
     let end_reason = if snapshot.state.current_track.is_some() {
         Some(player::ListenSessionEndReason::Replaced)
@@ -191,6 +197,8 @@ async fn start_current_queue_item(
     } else {
         Some(player::ListenSessionEndReason::QueueEnded)
     };
+    // The outgoing listen's outcome, read before the sync below flushes it.
+    let completed_prev = open_listen_completed(state, previous_track_id).await;
     sync_session_after_snapshot(state, &snapshot, end_reason).await;
 
     if let Some(track) = snapshot.state.current_track.as_ref() {
@@ -240,8 +248,14 @@ async fn start_current_queue_item(
         let _ = runtime_handle.stop();
     }
 
-    record_transition_if_changed(state, previous_track_id, &snapshot, transition_source, true)
-        .await;
+    record_transition_if_changed(
+        state,
+        previous_track_id,
+        &snapshot,
+        transition_source,
+        completed_prev,
+    )
+    .await;
     emit_track_and_queue_events(
         &*state.read().await,
         snapshot.state.current_track.as_ref().map(|t| t.id),
