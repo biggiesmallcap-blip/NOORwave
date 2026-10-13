@@ -81,6 +81,7 @@ mod library_batch_routes;
 pub(crate) mod maintenance_routes;
 mod playlist_routes;
 mod queue_routes;
+mod radio_compare_routes;
 mod radio_routes;
 mod resolve_routes;
 mod search_routes;
@@ -500,6 +501,19 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/radio/album", post(radio_album))
         .route("/api/radio/artist", post(radio_artist))
         .route("/api/radio/start", post(radio_start))
+        .route(
+            "/api/radio/compare",
+            post(radio_compare_routes::radio_compare_seed),
+        )
+        .route(
+            "/api/radio/compare/seeds",
+            get(radio_compare_routes::radio_compare_seeds),
+        )
+        .route(
+            "/api/radio/compare/session",
+            get(radio_compare_routes::get_radio_compare_session)
+                .put(radio_compare_routes::put_radio_compare_session),
+        )
         .route(
             "/api/discovery/space/meta",
             get(discovery_space_routes::get_discovery_space_meta),

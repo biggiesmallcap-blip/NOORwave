@@ -279,6 +279,46 @@ where
     Ok(tracks)
 }
 
+/// Last.fm's similar tracks for a seed (artist fallback when the track has
+/// none), as unresolved Last.fm-lane candidates in Last.fm's order. A failed
+/// lookup is logged and yields nothing.
+pub async fn lastfm_similar_candidates(
+    client: &LastFmClient,
+    cache: Option<&LastFmSimilarCache>,
+    artist: &str,
+    title: &str,
+    fetch_limit: usize,
+) -> Vec<RadioCandidate> {
+    let hits = lastfm_similar_with_cache(cache, artist, title, fetch_limit, || {
+        client.track_get_similar_with_artist_fallback(artist, title, fetch_limit)
+    })
+    .await;
+    if let Err(ref e) = hits {
+        tracing::warn!(artist, title, error = %e, "radio: Last.fm track_get_similar failed");
+    }
+    hits.unwrap_or_default()
+        .into_iter()
+        .map(|hit| RadioCandidate {
+            track_id: 0,
+            tidal_track_id: None,
+            title: hit.title,
+            artist_name: hit.artist,
+            album_title: None,
+            artwork_url: None,
+            duration_ms: None,
+            isrc: None,
+            is_in_library: false,
+            source: RadioSource::Lastfm,
+            reason: format!("Last.fm match {:.2}", hit.match_score),
+            similarity_score: hit.match_score.clamp(0.0, 1.0),
+            confidence: None,
+            candidate_in_degree_percentile: None,
+            support_count: None,
+            primary_reason: None,
+        })
+        .collect()
+}
+
 // ─── Public orchestrators ────────────────────────────────────────────────────
 
 /// Build a Song Radio queue seeded from a single library track.
@@ -290,6 +330,39 @@ pub async fn orchestrate_song(
     blend: RadioBlend,
     limit: usize,
     exclude_track_ids: &[i64],
+) -> Result<RadioQueue> {
+    orchestrate_song_with(
+        db,
+        lastfm,
+        lastfm_similar_cache,
+        seed_track_id,
+        blend,
+        limit,
+        exclude_track_ids,
+        Diagnostics::Log,
+    )
+    .await
+}
+
+/// Whether a radio build writes its `radio_diagnostics` row. Previews that
+/// play nothing (the blind comparison) skip it so they are not counted as
+/// stations someone started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Diagnostics {
+    Log,
+    Skip,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn orchestrate_song_with(
+    db: &Database,
+    lastfm: Option<&LastFmClient>,
+    lastfm_similar_cache: Option<&LastFmSimilarCache>,
+    seed_track_id: i64,
+    blend: RadioBlend,
+    limit: usize,
+    exclude_track_ids: &[i64],
+    diagnostics: Diagnostics,
 ) -> Result<RadioQueue> {
     // Load Tier 2 feature flags. With `radio_use_legacy_pipeline` set they all
     // read as off (see `load_radio_flags`), so one config row reverts radio to
@@ -398,46 +471,22 @@ pub async fn orchestrate_song(
             "orchestrate_song: seed has no artist_name; Last.fm source skipped"
         );
     }
-    let mut lastfm_results: Vec<RadioCandidate> = if let (Some(client), Some(artist)) =
-        (lastfm, seed_meta.artist_name.as_deref())
-    {
-        let fetch_limit = lfm_target.max(20);
-        let lfm = lastfm_similar_with_cache(
-            lastfm_similar_cache,
-            artist,
-            &seed_meta.title,
-            fetch_limit,
-            || client.track_get_similar_with_artist_fallback(artist, &seed_meta.title, fetch_limit),
-        )
-        .await;
-        if let Err(ref e) = lfm {
-            tracing::warn!(seed_track_id, artist, title = %seed_meta.title, error = %e, "orchestrate_song: Last.fm track_get_similar failed");
-        }
-        lfm.unwrap_or_default()
+    let mut lastfm_results: Vec<RadioCandidate> =
+        if let (Some(client), Some(artist)) = (lastfm, seed_meta.artist_name.as_deref()) {
+            lastfm_similar_candidates(
+                client,
+                lastfm_similar_cache,
+                artist,
+                &seed_meta.title,
+                lfm_target.max(20),
+            )
+            .await
             .into_iter()
             .take(lfm_target * 2)
-            .map(|hit| RadioCandidate {
-                track_id: 0,
-                tidal_track_id: None,
-                title: hit.title,
-                artist_name: hit.artist,
-                album_title: None,
-                artwork_url: None,
-                duration_ms: None,
-                isrc: None,
-                is_in_library: false,
-                source: RadioSource::Lastfm,
-                reason: format!("Last.fm match {:.2}", hit.match_score),
-                similarity_score: hit.match_score.clamp(0.0, 1.0),
-                confidence: None,
-                candidate_in_degree_percentile: None,
-                support_count: None,
-                primary_reason: None,
-            })
             .collect()
-    } else {
-        Vec::new()
-    };
+        } else {
+            Vec::new()
+        };
 
     // Adventurous reaches one Last.fm hop further: stored Last.fm links of the
     // seed's learned neighbors, discounted. Familiar and Mixed stay with the
@@ -598,7 +647,7 @@ pub async fn orchestrate_song(
     // the plan's "kill-switch produces no row" contract. avg_confidence and
     // avg_candidate_in_degree_pct sample only library candidates that carry
     // those fields; non-library lanes contribute nothing to the average.
-    if !flags.use_legacy_pipeline {
+    if !flags.use_legacy_pipeline && diagnostics == Diagnostics::Log {
         let profile = crate::services::radio_config::RadioProfile::from_blend(blend);
         let mut diag = crate::services::radio_config::RadioDiagnosticsRow {
             seed_track_id: Some(seed_track_id),
