@@ -631,13 +631,19 @@ pub fn select(
 
 /// No artist twice within this many consecutive results.
 pub const SPACING_WINDOW: usize = 6;
+/// The first screens are a tour, not one artist's catalog: one song per
+/// artist in the first 20 results, at most two in the first 60.
+pub const ONCE_WITHIN: usize = 20;
+pub const TWICE_WITHIN: usize = 60;
 
 /// The first `end` rows of a ranked list with artists spaced out: each slot
-/// takes the best-ranked remaining row whose artist is not among the last
-/// `SPACING_WINDOW - 1` taken. Later rows by a repeated artist move down,
-/// never out; when only blocked artists remain the best-ranked row goes
-/// anyway. Deterministic and prefix-stable, so every page is a slice of one
-/// spaced order.
+/// takes the best-ranked remaining row whose artist is allowed there, i.e.
+/// not among the last `SPACING_WINDOW - 1` placed, not placed before within
+/// the first `ONCE_WITHIN` slots, and not placed twice within the first
+/// `TWICE_WITHIN`. Deferred rows keep their order and slot in as soon as
+/// their artist is allowed again; when only blocked artists remain the
+/// best-ranked row goes anyway, so nothing is dropped. Deterministic and
+/// prefix-stable, so every page is a slice of one spaced order.
 fn space_artists<'a>(ranked: &[&'a Row], end: usize) -> Vec<&'a Row> {
     // Songs without an artist count as their own artist.
     let artist = |row: &Row| {
@@ -649,13 +655,20 @@ fn space_artists<'a>(ranked: &[&'a Row], end: usize) -> Vec<&'a Row> {
     };
     let mut out: Vec<&Row> = Vec::with_capacity(end);
     let mut recent: VecDeque<i64> = VecDeque::with_capacity(SPACING_WINDOW);
+    let mut placed: HashMap<i64, usize> = HashMap::new();
     // Deferred rows per artist (in rank order) and each artist's first
     // deferred rank, so the best allowed deferred row is found in a few steps.
     let mut waiting: HashMap<i64, VecDeque<usize>> = HashMap::new();
     let mut heads: BTreeSet<(usize, i64)> = BTreeSet::new();
     let mut next = 0usize;
     while out.len() < end {
-        let blocked = |id: i64| recent.contains(&id);
+        let slot = out.len();
+        let blocked = |id: i64| {
+            let times = placed.get(&id).copied().unwrap_or(0);
+            recent.contains(&id)
+                || (slot < ONCE_WITHIN && times >= 1)
+                || (slot < TWICE_WITHIN && times >= 2)
+        };
         let mut pick = heads
             .iter()
             .find(|(_, id)| !blocked(*id))
@@ -691,6 +704,7 @@ fn space_artists<'a>(ranked: &[&'a Row], end: usize) -> Vec<&'a Row> {
             }
         }
         out.push(ranked[rank]);
+        *placed.entry(id).or_default() += 1;
         if recent.len() == SPACING_WINDOW - 1 {
             recent.pop_front();
         }
@@ -1055,7 +1069,7 @@ mod tests {
         assert_eq!(spaced.len(), rows.len(), "nothing is dropped");
         assert_eq!(
             artists_of(&spaced),
-            vec![1, 7, 8, 9, 10, 11, 1, 12, 1, 1, 1, 1, 1],
+            vec![1, 7, 8, 9, 10, 11, 12, 1, 1, 1, 1, 1, 1],
             "spaced while others remain, then the rest in rank order"
         );
         for window in spaced[..8].windows(SPACING_WINDOW) {
@@ -1071,6 +1085,47 @@ mod tests {
             .map(|r| r.rowid)
             .collect();
         assert_eq!(ones, (0..7).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn first_screens_cap_an_artist_at_once_in_20_and_twice_in_60() {
+        // Five songs by artist 1 lead the ranking, then 75 other artists.
+        let rows: Vec<Row> = (0..5)
+            .map(|i| row(i, 1))
+            .chain((5..80).map(|i| row(i, 1000 + i)))
+            .collect();
+        let ranked: Vec<&Row> = rows.iter().collect();
+        let spaced = space_artists(&ranked, rows.len());
+        let slots: Vec<usize> = spaced
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.artist == 1)
+            .map(|(slot, _)| slot)
+            .collect();
+        assert_eq!(
+            slots,
+            vec![
+                0,
+                ONCE_WITHIN,
+                TWICE_WITHIN,
+                TWICE_WITHIN + 6,
+                TWICE_WITHIN + 12
+            ],
+            "each deferred song slots in as soon as the cap allows"
+        );
+        let ones: Vec<i64> = spaced
+            .iter()
+            .filter(|r| r.artist == 1)
+            .map(|r| r.rowid)
+            .collect();
+        assert_eq!(ones, (0..5).collect::<Vec<_>>(), "in their own order");
+        // The others keep rank order around them.
+        let others: Vec<i64> = spaced
+            .iter()
+            .filter(|r| r.artist != 1)
+            .map(|r| r.rowid)
+            .collect();
+        assert_eq!(others, (5..80).collect::<Vec<_>>());
     }
 
     #[test]
