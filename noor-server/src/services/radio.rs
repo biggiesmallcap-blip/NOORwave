@@ -320,6 +320,11 @@ pub async fn orchestrate_song(
     // not fatal — it just means no affinity nudges this call.
     let (taste, resolver) = build_taste_inputs(db, seed_track_id);
 
+    // A new release of a recording the model already knows (same ISRC) has no
+    // learned or Engine rows yet; it borrows the trained row's. The listener's
+    // row stays the seed for taste, Last.fm, genres and the queue.
+    let recall_seed_id = crate::services::learning::recall_seed_for(db, seed_track_id);
+
     let (lib_w, lfm_w, eng_w) = blend.weights();
     let target_per_source = |w: f64| ((limit as f64 * w * 1.5).ceil() as usize).max(1);
     let lib_target = target_per_source(lib_w);
@@ -329,11 +334,11 @@ pub async fn orchestrate_song(
     // ── Library source ────────────────────────────────────────────────────────
     let library_results: Vec<RadioCandidate> = {
         let mut excl: Vec<i64> = exclude_set.iter().copied().collect();
-        excl.push(seed_track_id);
+        excl.extend([seed_track_id, recall_seed_id]);
         let creativity = blend.creativity();
         let lib = crate::services::learning::radio_from_neighbors(
             db,
-            seed_track_id,
+            recall_seed_id,
             &excl,
             lib_target as i64,
             creativity,
@@ -438,7 +443,7 @@ pub async fn orchestrate_song(
     // seed's learned neighbors, discounted. Familiar and Mixed stay with the
     // seed's own Last.fm matches.
     if blend == RadioBlend::Adventurous {
-        lastfm_results.extend(lastfm_two_hop_candidates(db, seed_track_id, lfm_target));
+        lastfm_results.extend(lastfm_two_hop_candidates(db, recall_seed_id, lfm_target));
     }
 
     // ── Engine source ─────────────────────────────────────────────────────────
@@ -449,8 +454,8 @@ pub async fn orchestrate_song(
     // list so we don't surface tracks the user already has queued.
     let engine_results: Vec<RadioCandidate> = {
         let mut excl: Vec<i64> = exclude_set.iter().copied().collect();
-        excl.push(seed_track_id);
-        engine_results_from_track_similarity(db, seed_track_id, eng_target, &excl)
+        excl.extend([seed_track_id, recall_seed_id]);
+        engine_results_from_track_similarity(db, recall_seed_id, eng_target, &excl)
             .unwrap_or_default()
     };
 
@@ -659,7 +664,7 @@ pub async fn orchestrate_song(
     // Cold-start fallback: when embedding neighbors, Last.fm, and track_similarity
     // all return empty (e.g. newly-synced tracks not yet in the learning model),
     // surface other library tracks by the same artist so radio doesn't fail silently.
-    let ordered = if ordered.is_empty() {
+    let mut ordered = if ordered.is_empty() {
         let fallback = fallback_same_artist_tracks(db, seed_track_id, limit, exclude_track_ids);
         if fallback.is_empty() {
             tracing::warn!(
@@ -677,6 +682,8 @@ pub async fn orchestrate_song(
     } else {
         ordered
     };
+
+    fill_library_isrcs(db, &mut ordered);
 
     Ok(RadioQueue {
         session_id: new_session_id(),
@@ -1012,6 +1019,39 @@ fn fallback_same_artist_tracks(
             primary_reason: None,
         })
         .collect()
+}
+
+/// Library picks carry their ISRC, so the queue gate can drop a second
+/// release of a recording that is already queued or is the seed.
+fn fill_library_isrcs(db: &Database, candidates: &mut [RadioCandidate]) {
+    let ids: Vec<i64> = candidates
+        .iter()
+        .filter(|c| c.track_id > 0 && c.isrc.is_none())
+        .map(|c| c.track_id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let isrcs: HashMap<i64, String> = db
+        .with_conn(|conn| {
+            let placeholders = vec!["?"; ids.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, isrc FROM tracks
+                 WHERE id IN ({placeholders}) AND isrc IS NOT NULL AND isrc != ''"
+            ))?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+            Ok(rows)
+        })
+        .unwrap_or_default();
+    for candidate in candidates.iter_mut() {
+        if candidate.isrc.is_none() {
+            candidate.isrc = isrcs.get(&candidate.track_id).cloned();
+        }
+    }
 }
 
 /// Generate a session id like "rad_2a4f...".
