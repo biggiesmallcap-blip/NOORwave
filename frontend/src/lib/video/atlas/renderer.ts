@@ -232,17 +232,15 @@ function buildNebula(data: AtlasData, look: AtlasLook): NebulaTexture {
 
 	const out = makeCanvas(size, size);
 	const octx = out.getContext('2d')!;
-	if ('filter' in octx) {
-		octx.filter = 'blur(7px)';
-		octx.drawImage(raw, 0, 0);
-		octx.filter = 'none';
-		// Keep a little of the unblurred structure for texture.
-		octx.globalAlpha = 0.35;
-		octx.drawImage(raw, 0, 0);
-		octx.globalAlpha = 1;
-	} else {
-		octx.drawImage(raw, 0, 0);
-	}
+	// Where canvas filters are unsupported the blur is a no-op and the soft
+	// stamps alone carry the look.
+	octx.filter = 'blur(7px)';
+	octx.drawImage(raw, 0, 0);
+	octx.filter = 'none';
+	// Keep a little of the unblurred structure for texture.
+	octx.globalAlpha = 0.35;
+	octx.drawImage(raw, 0, 0);
+	octx.globalAlpha = 1;
 	const texture = { canvas: out, x0, y0, span };
 	perLook.set(look, texture);
 	return texture;
@@ -645,22 +643,22 @@ export class AtlasRenderer {
 	}
 
 	/** Fly so artist i sits in view at zoom k (relative to fit), leaving room for a card. */
-	flyToArtist(i: number, k = 9, offsetX = 0): void {
+	flyToArtist(i: number, k = 9, offsetX = 0, offsetY = 0): void {
 		if (!this.data || i < 0 || i >= this.data.count) return;
 		const scale = clamp(this.fitScale * Math.max(k, this.zoomLevel()), this.minScale, this.maxScale);
-		this.flyTo({ cx: this.data.x[i] + offsetX / scale, cy: this.data.y[i], scale });
+		this.flyTo({ cx: this.data.x[i] + offsetX / scale, cy: this.data.y[i] + offsetY / scale, scale });
 	}
 
-	flyToScene(s: number, offsetX = 0): void {
+	flyToScene(s: number, offsetX = 0, offsetY = 0): void {
 		if (!this.data || s < 0 || s >= this.data.scenes.length) return;
 		const scene = this.data.scenes[s];
-		const side = Math.min(this.viewport.width - Math.abs(offsetX) * 2, this.viewport.height);
+		const side = Math.min(this.viewport.width - Math.abs(offsetX) * 2, this.viewport.height - Math.abs(offsetY) * 2);
 		const scale = clamp((Math.max(160, side) * 0.42) / Math.max(scene.r, 8), this.minScale, this.maxScale);
-		this.flyTo({ cx: scene.x + offsetX / scale, cy: scene.y, scale });
+		this.flyTo({ cx: scene.x + offsetX / scale, cy: scene.y + offsetY / scale, scale });
 	}
 
 	/** Frame a set of artists (a route, a trail). */
-	flyToIndices(indices: ArrayLike<number>, offsetX = 0): void {
+	flyToIndices(indices: ArrayLike<number>, offsetX = 0, offsetY = 0): void {
 		if (!this.data || indices.length === 0) return;
 		let minX = Infinity;
 		let minY = Infinity;
@@ -677,12 +675,13 @@ export class AtlasRenderer {
 		if (!Number.isFinite(minX)) return;
 		const pad = 80;
 		const vw = Math.max(120, this.viewport.width - Math.abs(offsetX) * 2);
+		const vh = Math.max(120, this.viewport.height - Math.abs(offsetY) * 2);
 		const scale = clamp(
-			Math.min((vw - pad * 2) / Math.max(20, maxX - minX), (this.viewport.height - pad * 2) / Math.max(20, maxY - minY)),
+			Math.min((vw - pad * 2) / Math.max(20, maxX - minX), (vh - pad * 2) / Math.max(20, maxY - minY)),
 			this.minScale,
 			this.fitScale * 14
 		);
-		this.flyTo({ cx: (minX + maxX) / 2 + offsetX / scale, cy: (minY + maxY) / 2, scale });
+		this.flyTo({ cx: (minX + maxX) / 2 + offsetX / scale, cy: (minY + maxY) / 2 + offsetY / scale, scale });
 	}
 
 	/** Snap without animation (mini map, deep links under reduced motion). */

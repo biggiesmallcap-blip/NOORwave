@@ -4,6 +4,9 @@
 // the watch page's mini map sends.
 
 export const ATLAS_PATH = '/videos/atlas';
+
+/** The section search field's label on the Atlas tab (it finds artists on the map). */
+export const ATLAS_SEARCH_LABEL = 'Find an artist on the map';
 const MAX_TRAIL = 12;
 
 export interface AtlasLinkParams {

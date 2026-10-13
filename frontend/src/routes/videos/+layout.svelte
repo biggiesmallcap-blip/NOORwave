@@ -11,6 +11,7 @@
 	import { captureScroll, restoreScroll, scrollWorkspaceTop } from '$lib/navigation/scroll';
 	import { videoStageReveal } from '$lib/stores/video_session';
 	import { VIDEO_TABS, WATCH_PATH, videoSectionQuery, videoTabFor } from '$lib/video/section';
+	import { ATLAS_SEARCH_LABEL } from '$lib/video/atlas/links';
 
 	// One frame for the whole video section, so every tab has the same top:
 	// the shared command header puts Back and the search field on the first
@@ -22,10 +23,12 @@
 	let tab = $derived(videoTabFor(page.url.pathname));
 	let onWatchPage = $derived(page.url.pathname === WATCH_PATH);
 	let onLiked = $derived(page.url.pathname === '/videos/liked');
+	// The Atlas reads the field as "find an artist on the map".
+	let onAtlas = $derived(tab === 'atlas');
 	let query = $derived($videoSectionQuery.trim());
 	// Liked filters its own wall with the field; everywhere else the field
 	// searches TIDAL and the results take the page while it has text.
-	let searchingTidal = $derived(query.length > 0 && !onLiked);
+	let searchingTidal = $derived(query.length > 0 && !onLiked && !onAtlas);
 
 	// A new page starts with an empty field, except when the Liked tab hands
 	// its filter over to a full TIDAL search.
@@ -70,8 +73,8 @@
 			<SearchField
 				bind:value={$videoSectionQuery}
 				variant="page"
-				placeholder={onLiked ? 'Search your liked videos' : 'Search TIDAL videos'}
-				ariaLabel={onLiked ? 'Search your liked videos' : 'Search TIDAL videos'}
+				placeholder={onLiked ? 'Search your liked videos' : onAtlas ? ATLAS_SEARCH_LABEL : 'Search TIDAL videos'}
+				ariaLabel={onLiked ? 'Search your liked videos' : onAtlas ? ATLAS_SEARCH_LABEL : 'Search TIDAL videos'}
 				suppressSuggestions
 			/>
 		{/snippet}

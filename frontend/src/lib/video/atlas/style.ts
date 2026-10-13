@@ -109,3 +109,11 @@ export function formatHours(hours: number): string {
 	if (hours >= 10) return `${hours.toFixed(0)} h`;
 	return `${hours.toFixed(1)} h`;
 }
+
+/** Swatch for a light state in cards and the legend. */
+export function lightSwatch(light: Light, hue: number | null): string {
+	if (light === 0 || hue === null) return 'hsl(222, 10%, 58%)';
+	if (light === 3) return 'hsl(40, 100%, 92%)';
+	if (light === 2) return hsla(hue, 86, 64, 1);
+	return hsla(hue, 18, 52, 1);
+}
