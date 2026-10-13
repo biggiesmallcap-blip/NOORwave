@@ -77,12 +77,11 @@ describe('TIDAL discover artwork rendering contract', () => {
 		// The artist name inside the popup is a link. A TIDAL-only album has no
 		// local artist id, so the href has to be passed in.
 		expect(detailPopup).toContain('artistHref');
-		expect(detailPopup).toContain('popup-artist-link');
-		expect(detailPopup).toContain('function openArtistPage()');
-		// Close first, then navigate: a popup left mounted over the page it opened
-		// swallows the next click through its window-level outside-click handler.
-		expect(detailPopup).toContain('requestClose();');
-		expect(detailPopup).toContain('void goto(href);');
+		// A real link, so the router and middle-click both work. It closes as it
+		// navigates: a popup left mounted over the page it opened would swallow
+		// the next click through its window-level outside-click handler.
+		expect(detailPopup).toContain('href={resolvedArtistHref}');
+		expect(detailPopup).toContain('onclick={requestClose} oncontextmenu={openAlbumArtistContextMenu}');
 		expect(popup).toContain('/tidal/artists/${artistTidalId}');
 	});
 });

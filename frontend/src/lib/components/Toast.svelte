@@ -9,7 +9,7 @@
 	}
 </script>
 
-<div class="toast-stack" aria-live="polite" aria-atomic="false">
+<div class="toast-stack" data-floating-layer aria-live="polite" aria-atomic="false">
 	{#each $toasts as toast (toast.id)}
 		<div
 			class="toast toast--{toast.kind}"
