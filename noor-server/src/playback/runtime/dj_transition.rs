@@ -558,7 +558,7 @@ pub(super) fn snapshot_decoded_buffer(
         return Err(reason);
     }
     Ok(RuntimeDeckSnapshot {
-        samples: buffer.samples.clone(),
+        samples: buffer.samples.iter().copied().collect(),
         start_frame,
         // The caller holds the buffer lock, so the decoder cannot move the
         // offset between capturing the PCM and its absolute render origin.
@@ -1239,7 +1239,7 @@ pub(super) fn install_prepared_handoff_mixer_buffer_once(
         .handoff_source_prefix
         .lock()
         .map_err(|_| DjRuntimeRendererReason::BufferLockFailed)?;
-    *original_prefix = Some(guard.samples[..remainder_start].to_vec());
+    *original_prefix = Some(guard.samples.range(..remainder_start).copied().collect());
     next.shared
         .handoff_timeline
         .install(timeline::HandoffTimeline {
@@ -1249,9 +1249,9 @@ pub(super) fn install_prepared_handoff_mixer_buffer_once(
             output_frames: prepared.program.resolve_at,
             source_frames: deck_b_consumed_frames,
         });
-    let remainder = guard.samples[remainder_start..].to_vec();
+    let remainder: Vec<f32> = guard.samples.range(remainder_start..).copied().collect();
     rendered.extend_from_slice(&remainder);
-    guard.samples = rendered;
+    guard.samples = rendered.into();
     guard.read_pos = skip_samples.min(guard.samples.len());
     guard.started = false;
     guard.clear_rt_notifications();
@@ -1384,7 +1384,7 @@ pub(super) fn install_prepared_overlay_mixer_buffer(
         Ok(guard) => guard,
         Err(_) => return Err(DjRuntimeRendererReason::BufferLockFailed),
     };
-    guard.samples = rendered;
+    guard.samples = rendered.into();
     guard.read_pos = 0;
     guard.started = false;
     guard.clear_rt_notifications();
@@ -1487,7 +1487,7 @@ pub(super) fn install_prepared_drop_preview_mixer_buffer(
         Ok(guard) => guard,
         Err(_) => return Err(DjRuntimeRendererReason::BufferLockFailed),
     };
-    guard.samples = rendered;
+    guard.samples = rendered.into();
     guard.read_pos = skip_samples.min(guard.samples.len());
     guard.started = false;
     guard.clear_rt_notifications();

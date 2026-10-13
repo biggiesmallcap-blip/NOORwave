@@ -329,7 +329,6 @@ export function buildTidalTrackMenu(track: TidalPlayable, options: BuildTidalTra
 		icon: isFavorite ? '♥' : '♡',
 		onSelect: () => void toggleTidalTrackFavorite(track, isFavorite),
 	});
-	items.push(SEPARATOR);
 
 	// Download to disk works for any TIDAL track, library or not: the server imports it
 	// on demand to mint a local id. Desktop-only, same as the library menu.

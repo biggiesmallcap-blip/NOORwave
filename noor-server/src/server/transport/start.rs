@@ -144,27 +144,15 @@ async fn start_track_inner(
     {
         return Err(StartError::Superseded);
     }
-    let is_playing = state_guard
-        .db
-        .with_conn(|conn| {
-            conn.query_row(
-                "SELECT is_playing FROM playback_state WHERE id=1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(Into::into)
-        })
-        .map(|value| value != 0)
-        .unwrap_or(true);
+    let is_playing = super::settings::transport_intent_is_playing(&state_guard);
     let source_guard =
         expected_runtime.map(|(expected, _)| expected.lock_playback_source_identity());
-    if let Some((_, expected_source)) = expected_runtime {
-        if source_guard
+    if let Some((_, expected_source)) = expected_runtime
+        && source_guard
             .as_ref()
             .is_none_or(|current| !std::sync::Arc::ptr_eq(current, expected_source))
-        {
-            return Err(StartError::Superseded);
-        }
+    {
+        return Err(StartError::Superseded);
     }
     let job =
         player::build_playback_preparation(track, Some(&stream_info), crossfade_ms, user_quality)
@@ -184,7 +172,7 @@ async fn start_track_inner(
     if expected_runtime.is_some() {
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.active_track_id = Some(track.id);
-            info.last_error = None;
+            super::events::clear_error_after_owned_dispatch(info);
         }
         let _ = state_guard
             .event_tx

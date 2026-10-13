@@ -73,8 +73,11 @@ export function formatPlayerStreamDetail({
 export function formatPlayerStreamTooltip(stream: PlayerStreamDisplay, detail: string): string {
 	const sampleRate = stream?.sample_rate;
 	if (!sampleRate || !Number.isFinite(sampleRate) || sampleRate <= 0) return detail;
+	const sourceRate = formatSampleRate(sampleRate);
+	// The label already names the source unless it shows a different output rate.
+	if (detail.includes(sourceRate) && !detail.includes(`${sourceRate} output`)) return detail;
 	const bitDepth = stream?.bit_depth ?? inferStreamBitDepth(stream?.audio_quality, sampleRate);
-	const sourceResolution = [formatSampleRate(sampleRate), bitDepth ? `${bitDepth}-bit` : null]
+	const sourceResolution = [sourceRate, bitDepth ? `${bitDepth}-bit` : null]
 		.filter(Boolean).join(' / ');
 	return [detail, `${sourceResolution} source`].filter(Boolean).join(PART_SEPARATOR);
 }

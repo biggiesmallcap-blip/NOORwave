@@ -15,17 +15,16 @@ pub(super) fn poll_exclusive_output_fault(
         return;
     };
     let output_live = stream.output_live();
-    let Some(engine) = state
-        .engine
-        .as_ref()
-        .or(state.next_engine.as_ref())
-        .or(state.fading_out_engine.as_ref())
-        .or(state.drop_preview_engine.as_ref())
-    else {
-        return;
+    // The render thread suppresses its release event for faults, so a fault
+    // while no deck is loaded must still be reported or the UI keeps showing
+    // exclusive mode engaged on a dead device.
+    let (generation, decoder_stop) = match state.live_engines().next() {
+        Some(engine) => (engine.generation, engine.shared.stop_flag()),
+        None => match state.requested_generation {
+            Some(generation) => (generation, Arc::new(AtomicBool::new(false))),
+            None => return,
+        },
     };
-    let generation = engine.generation;
-    let decoder_stop = engine.shared.stop_flag();
     hard_pause_for_output_fault(
         state,
         event_tx,
@@ -36,31 +35,13 @@ pub(super) fn poll_exclusive_output_fault(
     );
 }
 
-fn live_engines_mut(
-    state: &mut PlaybackRuntimeLoopState,
-) -> impl Iterator<Item = &mut PlaybackEngine> {
-    [
-        state.engine.as_mut(),
-        state.next_engine.as_mut(),
-        state.fading_out_engine.as_mut(),
-        state.drop_preview_engine.as_mut(),
-    ]
-    .into_iter()
-    .flatten()
-}
-
-fn retarget_exclusive_engines<'a>(
-    engines: impl Iterator<Item = &'a mut PlaybackEngine>,
+/// Buffered PCM cannot change rate in place: every live deck must already be
+/// decoded at the exclusive stream's rate before the device is reopened.
+fn require_engines_decoded_at<'a>(
+    mut engines: impl Iterator<Item = &'a PlaybackEngine>,
     sample_rate: u32,
 ) -> Result<()> {
-    for engine in engines {
-        engine::require_decoded_output_rate(&engine.shared, sample_rate)?;
-        engine
-            .shared
-            .target_sample_rate
-            .store(sample_rate, Ordering::Relaxed);
-    }
-    Ok(())
+    engines.try_for_each(|engine| engine::require_decoded_output_rate(&engine.shared, sample_rate))
 }
 
 fn rebuild_shared_engine_outputs<'a>(
@@ -96,25 +77,19 @@ pub(super) fn install_shared_fallback(
     output_config: &mut StreamConfig,
     output_sample_format: SampleFormat,
     desired_sample_rate: Option<u32>,
-    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<()> {
     state.exclusive_sink.clear_after_failed_start();
     // The preference remains in settings and an explicit retry requests it
     // again. Newly prepared decks must use the backend actually rendering.
     state.current_exclusive = false;
-    let grace_secs = state.current_exclusive_release_grace_secs;
     let mut selected_rate = desired_sample_rate;
-    let actual_rate = rebuild_shared_engine_outputs(live_engines_mut(state), |engine| {
+    let actual_rate = rebuild_shared_engine_outputs(state.live_engines_mut(), |engine| {
         let rate = engine.swap_stream(
             device,
             output_config,
             output_sample_format,
-            command_tx.clone(),
-            event_tx.clone(),
             false,
             selected_rate,
-            grace_secs,
         )?;
         selected_rate = Some(rate);
         Ok(rate)
@@ -124,6 +99,133 @@ pub(super) fn install_shared_fallback(
         state.device_sample_rate = actual_rate;
     }
     Ok(())
+}
+
+pub(super) fn exclusive_render_sources(
+    active: Option<&PlaybackEngine>,
+    prepared: Option<&PlaybackEngine>,
+    fading: Option<&PlaybackEngine>,
+    drop_preview: Option<&PlaybackEngine>,
+) -> Vec<ExclusiveRenderSource> {
+    let mut sources = Vec::new();
+    if let Some(engine) = active {
+        sources.push(ExclusiveRenderSource {
+            role: ExclusiveRenderRole::Active,
+            shared: Arc::clone(&engine.shared),
+        });
+    }
+    if let Some(engine) = prepared {
+        sources.push(ExclusiveRenderSource {
+            role: ExclusiveRenderRole::Prepared,
+            shared: Arc::clone(&engine.shared),
+        });
+    }
+    if let Some(engine) = fading {
+        sources.push(ExclusiveRenderSource {
+            role: ExclusiveRenderRole::Fading,
+            shared: Arc::clone(&engine.shared),
+        });
+    }
+    if let Some(engine) = drop_preview {
+        sources.push(ExclusiveRenderSource {
+            role: ExclusiveRenderRole::Prepared,
+            shared: Arc::clone(&engine.shared),
+        });
+    }
+    sources
+}
+
+pub(super) fn refresh_exclusive_sources(state: &PlaybackRuntimeLoopState) {
+    state
+        .exclusive_sink
+        .source_bank
+        .set_sources(exclusive_render_sources(
+            state.engine.as_ref(),
+            state.next_engine.as_ref(),
+            state.fading_out_engine.as_ref(),
+            state.drop_preview_engine.as_ref(),
+        ));
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn ensure_exclusive_sink_started(
+    state: &mut PlaybackRuntimeLoopState,
+    device: &cpal::Device,
+    output_config: &StreamConfig,
+    desired_sample_rate: Option<u32>,
+    exclusive_release_grace_secs: u32,
+    exclusive_latency_mode: ExclusiveLatencyMode,
+    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
+) -> Result<u32> {
+    let exclusive_plan =
+        swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Exclusive);
+    if let Some(stream) = state
+        .exclusive_sink
+        .stream
+        .as_ref()
+        .filter(|stream| !stream.is_released())
+    {
+        return Ok(stream.effective_sample_rate);
+    }
+    let output_identity = state.exclusive_sink.retire_stream();
+    require_engines_decoded_at(
+        state.live_engines(),
+        exclusive_plan.stream_config.sample_rate,
+    )?;
+
+    // Shared fallback streams must relinquish the endpoint before this process
+    // attempts exclusive acquisition. Hold transport intent until startup ends.
+    let pause_guards: Vec<_> = state
+        .live_engines_mut()
+        .map(|engine| {
+            let guard = engine::SwapPauseGuard::new(Arc::clone(&engine.shared));
+            engine.drop_stream();
+            guard
+        })
+        .collect();
+
+    let device_label = device_display_name(device);
+    let device_id = device
+        .id()
+        .context("failed to identify exclusive output endpoint")?
+        .id()
+        .to_owned();
+    match build_exclusive_stream(
+        Some(device_id.as_str()),
+        device_label.clone(),
+        exclusive_plan.stream_config.sample_rate,
+        exclusive_plan.stream_config.channels,
+        exclusive_release_grace_secs,
+        exclusive_latency_mode,
+        Arc::clone(&state.exclusive_sink.source_bank),
+        event_tx.clone(),
+        Arc::clone(&output_identity),
+    ) {
+        Ok(stream) => {
+            let actual_rate = stream.effective_sample_rate;
+            let transport_format = stream.transport_format.clone();
+            // The render thread opens exactly the planned rate, which was
+            // validated against every live deck above.
+            state.exclusive_sink.stream = Some(stream);
+            drop(pause_guards);
+            let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
+                output_identity,
+                device_name: device_label,
+                transport_format,
+            });
+            Ok(actual_rate)
+        }
+        Err(failure) => {
+            let reason = failure.user_message();
+            warn!("WASAPI exclusive grab failed; falling back to cpal shared: {reason}");
+            let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeFailed {
+                output_identity,
+                reason: reason.clone(),
+                device_name: device_label,
+            });
+            Err(anyhow!(reason))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -198,146 +300,19 @@ mod tests {
 
     #[test]
     fn exclusive_acquisition_rejects_mismatched_decoded_rates() {
-        let mut engines = [engine(1), engine(2), engine(3), engine(4)];
+        let engines = [engine(1), engine(2), engine(3), engine(4)];
         for engine in &engines {
             engine
                 .shared
                 .target_sample_rate
                 .store(48_000, Ordering::Relaxed);
         }
-        assert!(retarget_exclusive_engines(engines.iter_mut(), 96_000).is_err());
+        assert!(require_engines_decoded_at(engines.iter(), 96_000).is_err());
         assert!(
             engines
                 .iter()
                 .all(|engine| engine.shared.target_sample_rate.load(Ordering::Relaxed) == 48_000)
         );
-        assert!(retarget_exclusive_engines(engines.iter_mut(), 48_000).is_ok());
-    }
-}
-
-pub(super) fn exclusive_render_sources(
-    active: Option<&PlaybackEngine>,
-    prepared: Option<&PlaybackEngine>,
-    fading: Option<&PlaybackEngine>,
-    drop_preview: Option<&PlaybackEngine>,
-) -> Vec<ExclusiveRenderSource> {
-    let mut sources = Vec::new();
-    if let Some(engine) = active {
-        sources.push(ExclusiveRenderSource {
-            role: ExclusiveRenderRole::Active,
-            shared: Arc::clone(&engine.shared),
-        });
-    }
-    if let Some(engine) = prepared {
-        sources.push(ExclusiveRenderSource {
-            role: ExclusiveRenderRole::Prepared,
-            shared: Arc::clone(&engine.shared),
-        });
-    }
-    if let Some(engine) = fading {
-        sources.push(ExclusiveRenderSource {
-            role: ExclusiveRenderRole::Fading,
-            shared: Arc::clone(&engine.shared),
-        });
-    }
-    if let Some(engine) = drop_preview {
-        sources.push(ExclusiveRenderSource {
-            role: ExclusiveRenderRole::Prepared,
-            shared: Arc::clone(&engine.shared),
-        });
-    }
-    sources
-}
-
-pub(super) fn refresh_exclusive_sources(state: &PlaybackRuntimeLoopState) {
-    state
-        .exclusive_sink
-        .source_bank
-        .set_sources(exclusive_render_sources(
-            state.engine.as_ref(),
-            state.next_engine.as_ref(),
-            state.fading_out_engine.as_ref(),
-            state.drop_preview_engine.as_ref(),
-        ));
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn ensure_exclusive_sink_started(
-    state: &mut PlaybackRuntimeLoopState,
-    device: &cpal::Device,
-    output_config: &StreamConfig,
-    desired_sample_rate: Option<u32>,
-    exclusive_release_grace_secs: u32,
-    exclusive_latency_mode: ExclusiveLatencyMode,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
-) -> Result<u32> {
-    let exclusive_plan =
-        swap_stream_plan(output_config, desired_sample_rate, SwapBackend::Exclusive);
-    if let Some(stream) = state
-        .exclusive_sink
-        .stream
-        .as_ref()
-        .filter(|stream| !stream.is_released())
-    {
-        return Ok(stream.effective_sample_rate);
-    }
-    let output_identity = state.exclusive_sink.retire_stream();
-    retarget_exclusive_engines(
-        live_engines_mut(state),
-        exclusive_plan.stream_config.sample_rate,
-    )?;
-
-    // Shared fallback streams must relinquish the endpoint before this process
-    // attempts exclusive acquisition. Hold transport intent until startup ends.
-    let pause_guards: Vec<_> = live_engines_mut(state)
-        .map(|engine| {
-            let guard = engine::SwapPauseGuard::new(Arc::clone(&engine.shared));
-            engine.drop_stream();
-            guard
-        })
-        .collect();
-
-    let device_label = device_display_name(device);
-    let device_id = device
-        .id()
-        .context("failed to identify exclusive output endpoint")?
-        .id()
-        .to_owned();
-    match build_exclusive_stream(
-        Some(device_id.as_str()),
-        device_label.clone(),
-        exclusive_plan.stream_config.sample_rate,
-        exclusive_plan.stream_config.channels,
-        exclusive_release_grace_secs,
-        exclusive_latency_mode,
-        Arc::clone(&state.exclusive_sink.source_bank),
-        command_tx,
-        event_tx.clone(),
-        Arc::clone(&output_identity),
-    ) {
-        Ok(stream) => {
-            let actual_rate = stream.effective_sample_rate;
-            let transport_format = stream.transport_format.clone();
-            state.exclusive_sink.stream = Some(stream);
-            retarget_exclusive_engines(live_engines_mut(state), actual_rate)?;
-            drop(pause_guards);
-            let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
-                output_identity,
-                device_name: device_label,
-                transport_format,
-            });
-            Ok(actual_rate)
-        }
-        Err(failure) => {
-            let reason = failure.user_message();
-            warn!("WASAPI exclusive grab failed; falling back to cpal shared: {reason}");
-            let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeFailed {
-                output_identity,
-                reason: reason.clone(),
-                device_name: device_label,
-            });
-            Err(anyhow!(reason))
-        }
+        assert!(require_engines_decoded_at(engines.iter(), 48_000).is_ok());
     }
 }

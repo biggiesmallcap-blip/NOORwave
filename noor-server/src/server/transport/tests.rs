@@ -1279,8 +1279,45 @@ async fn cpal_fault_consumer_pauses_db_and_audibility_preserving_queue() {
             .load(std::sync::atomic::Ordering::Acquire)
     );
     let info = guard.playback_runtime_info.as_ref().unwrap();
-    assert_eq!(info.active_track_id, None);
+    assert_eq!(
+        info.active_track_id,
+        Some(1),
+        "the runtime keeps the paused deck, so Resume must not rebuild it"
+    );
     assert_eq!(info.last_error.as_deref(), Some("device removed"));
+}
+
+#[tokio::test]
+async fn cpal_fault_before_started_still_pauses_transport() {
+    // A fresh play only binds `active_track_id` at Started. A fault while the
+    // new track buffers must still pause DB/UI rather than be dropped.
+    let (state, handle, stop, live) = cpal_fault_fixture().await;
+    state
+        .write()
+        .await
+        .playback_runtime_info
+        .as_mut()
+        .unwrap()
+        .active_track_id = None;
+    assert!(handle_output_fault(&state, &handle, cpal_fault_event(&stop, &live)).await);
+    let guard = state.read().await;
+    assert!(
+        !guard
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap()
+            .state
+            .is_playing
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("device removed")
+    );
 }
 
 #[tokio::test]
@@ -2623,7 +2660,7 @@ async fn runtime_exit_listener_still_clears_dead_output_if_persisted_pause_fails
 #[test]
 fn tidal_playlist_tracks_cache_returns_fresh_entries_and_expires_stale_entries() {
     let cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
-    let key = tidal_playlist_tracks_cache_key("AU", "playlist-uuid", 100, 0);
+    let key = tidal_playlist_tracks_cache_key("AU", "playlist-uuid");
     let tracks: Vec<TidalTrack> = Vec::new();
 
     put_cached_tidal_playlist_tracks(&cache, key.clone(), tracks.clone());
@@ -4034,6 +4071,90 @@ async fn retry_resolution_fixture(
 }
 
 #[tokio::test]
+async fn transient_failure_after_retry_dispatch_pauses_instead_of_retrying_again() {
+    let (state, probe, gate) = retry_resolution_fixture(false).await;
+    let handle = probe.handle.clone();
+    let first = tokio::spawn({
+        let state = state.clone();
+        let handle = handle.clone();
+        async move {
+            handle_runtime_track_error(
+                state,
+                &handle,
+                &handle.playback_source_identity(),
+                1,
+                0,
+                "DASH stream prebuffer failed",
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .unwrap();
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        probe.commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        playback_runtime::PlaybackRuntimeCommand::Switch(_)
+    ));
+    assert_eq!(
+        state
+            .read()
+            .await
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some(RUNTIME_TRACK_RETRY_MARKER),
+        "dispatching the retry must not erase its marker before Started"
+    );
+
+    // The retried stream fails again before Started: pause, do not retry.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        handle_runtime_track_error(
+            state.clone(),
+            &handle,
+            &handle.playback_source_identity(),
+            1,
+            0,
+            "DASH stream prebuffer failed",
+        ),
+    )
+    .await
+    .expect("a second retry would wait on the stream gate")
+    .unwrap();
+    assert!(
+        probe.commands.try_recv().is_err(),
+        "second retry dispatched"
+    );
+    let guard = state.read().await;
+    assert!(
+        !guard
+            .db
+            .with_conn(player::load_snapshot)
+            .unwrap()
+            .state
+            .is_playing
+    );
+    assert_eq!(
+        guard
+            .playback_runtime_info
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("DASH stream prebuffer failed")
+    );
+}
+
+#[tokio::test]
 async fn transient_retry_resolution_cannot_dispatch_or_pause_replacement_runtime() {
     for reject in [false, true] {
         let (state, old, gate) = retry_resolution_fixture(reject).await;
@@ -4212,13 +4333,16 @@ async fn transient_retry_resolution_preserves_current_row_and_latest_pause_inten
                     .active_track_id,
                 Some(1)
             );
-            assert!(
+            // Only Started clears the marker; a second pre-Started failure
+            // must pause instead of retrying again.
+            assert_eq!(
                 guard
                     .playback_runtime_info
                     .as_ref()
                     .unwrap()
                     .last_error
-                    .is_none()
+                    .as_deref(),
+                Some(RUNTIME_TRACK_RETRY_MARKER)
             );
             assert_eq!(
                 guard.current_stream_display.as_ref().unwrap().audio_quality,
@@ -5823,4 +5947,38 @@ async fn play_command_rejects_non_library_ids_without_touching_playback() {
         super::command::CommandError::InvalidTrackId(0)
     ));
     assert!(commands.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn owned_queue_writes_are_skipped_once_superseded() {
+    use super::generation::mutate_if_owner_current;
+    let (state, handle, _, _) = cpal_fault_fixture().await;
+    let source = handle.playback_source_identity();
+    let generation = current_playback_generation(&*state.read().await);
+
+    let ran = mutate_if_owner_current(&state, generation, Some((&handle, &source)), |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(ran.is_some(), "the current owner may write");
+
+    // A user command admitted meanwhile owns the queue now.
+    let newer = super::generation::bump(&state).await;
+    let stale = mutate_if_owner_current(&state, generation, None, |_| -> anyhow::Result<()> {
+        panic!("stale generation wrote the queue")
+    })
+    .await
+    .unwrap();
+    assert!(stale.is_none());
+
+    // Same generation, but the decoder was replaced.
+    handle.test_replace_playback_source();
+    let replaced = mutate_if_owner_current(
+        &state,
+        newer,
+        Some((&handle, &source)),
+        |_| -> anyhow::Result<()> { panic!("retired decoder wrote the queue") },
+    )
+    .await
+    .unwrap();
+    assert!(replaced.is_none());
 }

@@ -94,7 +94,13 @@ pub fn enumerate_output_devices() -> Vec<OutputDeviceInfo> {
             iter.filter_map(|dev| {
                 let name = device_display_name_opt(&dev)?;
                 let id = dev.id().ok()?.to_string();
-                let configs: Vec<_> = dev.supported_output_configs().ok()?.collect();
+                // List every endpoint resolve_device considers, even one whose
+                // formats cannot be read right now; otherwise a saved name can
+                // look unique here while the server finds it ambiguous.
+                let configs: Vec<_> = dev
+                    .supported_output_configs()
+                    .map(|configs| configs.collect())
+                    .unwrap_or_default();
                 let max_channels = configs.iter().map(|c| c.channels()).max().unwrap_or(0);
                 let mut rates: Vec<u32> = configs
                     .iter()

@@ -41,7 +41,9 @@ serde_json = "1"
 # Audio decoding + output
 noor-mix = { path = "../noor-mix" }
 symphonia = { version = "0.5", features = ["all"] }
-cpal = "=0.18.2"
+# cpal 0.18 only raises the shared-mode render thread to MMCSS / time-critical
+# priority with `realtime`; 0.17 did it unconditionally on Windows.
+cpal = { version = "=0.18.2", features = ["realtime"] }
 # Sample-rate conversion. Used when a track's native rate doesn't match the
 # device rate (or when sample-rate-follow is off). Polyphase FFT resampler:
 # steeper filter than linear interpolation, no audible aliasing.

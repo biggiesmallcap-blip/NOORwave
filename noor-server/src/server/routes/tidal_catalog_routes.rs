@@ -857,9 +857,7 @@ pub(super) async fn tidal_playlist_tracks(
         let s = state.read().await;
         (s.tidal.clone(), s.tidal_playlist_tracks_cache.clone())
     };
-    let limit = 100;
-    let offset = 0;
-    let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, uuid, limit, offset);
+    let cache_key = tidal_playlist_tracks_cache_key(&tokens.country_code, uuid);
     let client = TidalClient::for_session(tidal_session.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
     let cached = if params.refresh {
@@ -908,13 +906,9 @@ pub(super) async fn tidal_playlist_tracks(
     Ok(Json(json!({ "tracks": playable })))
 }
 
-pub(crate) fn tidal_playlist_tracks_cache_key(
-    country_code: &str,
-    uuid: &str,
-    limit: i32,
-    offset: i32,
-) -> String {
-    format!("{country_code}:{uuid}:{limit}:{offset}")
+/// The cache holds a playlist's complete track list, fetched across pages.
+pub(crate) fn tidal_playlist_tracks_cache_key(country_code: &str, uuid: &str) -> String {
+    format!("{country_code}:{uuid}")
 }
 
 pub(crate) fn get_cached_tidal_playlist_tracks(

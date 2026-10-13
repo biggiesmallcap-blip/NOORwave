@@ -68,6 +68,7 @@
 			exclusiveEngaged: $exclusiveStatus.engaged,
 		})
 	);
+	let streamTooltip = $derived(formatPlayerStreamTooltip($currentStreamDisplay, streamDetail));
 	let shuffleLabel = $derived.by(() => {
 		switch ($shuffleMode) {
 			case 'true':
@@ -357,7 +358,7 @@
 			</button>
 		{/if}
 		{#if streamDetail}
-			<span class="remote-stream" aria-label={`Stream quality: ${formatPlayerStreamTooltip($currentStreamDisplay, streamDetail)}`} title={formatPlayerStreamTooltip($currentStreamDisplay, streamDetail)}>{streamDetail}</span>
+			<span class="remote-stream" aria-label={`Stream quality: ${streamTooltip}`} title={streamTooltip}>{streamDetail}</span>
 		{/if}
 	</div>
 

@@ -84,14 +84,12 @@ pub(crate) async fn sync_session_after_snapshot_for_owner(
         let source_guard =
             expected_owner.map(|(_, runtime, _)| runtime.lock_playback_source_identity());
         if let Some((generation, runtime, expected_source)) = expected_owner
-            && (super::generation::current(&state) != generation
-                || !state
-                    .playback_runtime
-                    .as_ref()
-                    .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                || !source_guard
-                    .as_ref()
-                    .is_some_and(|source| Arc::ptr_eq(source, expected_source)))
+            && !super::generation::owner_is_current(
+                &state,
+                generation,
+                Some((runtime, expected_source)),
+                source_guard.as_deref(),
+            )
         {
             return false;
         }
@@ -117,8 +115,12 @@ pub(crate) async fn sync_session_after_snapshot_for_owner(
                     is_playing = playing;
                 }
                 Err(error) => {
-                    error!("failed to validate terminal listen-session anchor: {error}");
-                    return false;
+                    // The queue already advanced. Declining here would leave
+                    // the new row undispatched and the player silent, so keep
+                    // the snapshot's intent; ownership was validated above.
+                    error!(
+                        "failed to re-read terminal listen-session anchor; using the snapshot: {error}"
+                    );
                 }
             }
         }

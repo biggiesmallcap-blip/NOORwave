@@ -30,6 +30,7 @@ use crate::server::routes::{
 };
 use crate::server::transport::generation::{
     current as current_playback_generation, is_current as playback_generation_is_current,
+    mutate_if_owner_current, owner_is_current,
 };
 use crate::server::transport::start::{
     Dispatch, Generation, StartError, StartRequest, start_track, start_track_for_runtime,
@@ -112,70 +113,6 @@ impl Drop for ExclusiveRecoveryQueue {
     }
 }
 
-#[cfg(test)]
-mod exclusive_recovery_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn recovery_burst_keeps_one_lookup_and_only_the_latest_request() {
-        let db = crate::db::Database::open_in_memory().expect("database");
-        let locked_db = db.clone();
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            locked_db.with_conn(|_| {
-                locked_tx.send(()).expect("lock signal");
-                let _ = unlock_rx.recv_timeout(Duration::from_secs(5));
-                Ok(())
-            })
-        });
-        locked_rx.recv().expect("database locked");
-        let first = Arc::new(());
-        let request = |identity| ExclusiveRecoveryRequest {
-            identity,
-            device_name: "test output".to_string(),
-            db: db.clone(),
-        };
-        let mut recovery = ExclusiveRecoveryQueue::default();
-        recovery.request(request(first.clone()));
-        let first_task = recovery.active.as_ref().expect("active").task.id();
-        let mut latest = first.clone();
-        for _ in 0..1_000 {
-            latest = Arc::new(());
-            recovery.request(request(latest.clone()));
-            recovery.request(request(first.clone()));
-        }
-        assert_eq!(
-            recovery.active.as_ref().expect("active").task.id(),
-            first_task
-        );
-        assert!(Arc::ptr_eq(
-            &recovery.latest.as_ref().expect("latest").identity,
-            &latest
-        ));
-        unlock_tx.send(()).expect("unlock");
-        holder
-            .join()
-            .expect("database holder")
-            .expect("database read");
-        let (completed, _) = recovery.completed().await.expect("first completion");
-        assert!(Arc::ptr_eq(&completed.identity, &first));
-        assert!(recovery.latest.is_none());
-        assert!(Arc::ptr_eq(
-            &recovery
-                .active
-                .as_ref()
-                .expect("next active")
-                .request
-                .identity,
-            &latest
-        ));
-        let (completed, _) = recovery.completed().await.expect("latest completion");
-        assert!(Arc::ptr_eq(&completed.identity, &latest));
-        assert!(recovery.active.is_none());
-    }
-}
-
 async fn apply_exclusive_recovery(
     state: &SharedState,
     handle: &playback_runtime::PlaybackRuntimeHandle,
@@ -183,7 +120,11 @@ async fn apply_exclusive_recovery(
     result: ExclusiveRecoveryResult,
 ) {
     let retry = match result {
-        Ok(result) => result.ok().flatten(),
+        Ok(Ok(retry)) => retry,
+        Ok(Err(error)) => {
+            warn!("Exclusive recovery could not read audio settings: {error}");
+            None
+        }
         Err(error) => {
             warn!("Exclusive recovery settings task failed: {error}");
             None
@@ -329,7 +270,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     {
                         let message =
                             format!("Failed to advance playback after track end: {error}");
-                        report_playback_failure(&state, &message);
+                        report_playback_failure(&state, &message).await;
                         error!("{message}");
                     }
                 }
@@ -426,7 +367,7 @@ pub(crate) fn spawn_playback_runtime_listener(
                     {
                         let message =
                             format!("Failed to advance playback after track error: {error}");
-                        report_playback_failure(&state, &message);
+                        report_playback_failure(&state, &message).await;
                         error!("{message}");
                     }
                 }
@@ -1277,17 +1218,12 @@ async fn switch_runtime_to_snapshot_current_for_owner(
             let mut state_guard = state.write().await;
             let source_guard =
                 expected_owner.map(|(runtime, _)| runtime.lock_playback_source_identity());
-            if current_playback_generation(&state_guard) != generation
-                || expected_owner.is_some_and(|(runtime, expected_source)| {
-                    !state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                        || source_guard
-                            .as_ref()
-                            .is_none_or(|current| !Arc::ptr_eq(current, expected_source))
-                })
-            {
+            if !owner_is_current(
+                &state_guard,
+                generation,
+                expected_owner,
+                source_guard.as_deref(),
+            ) {
                 return Ok(());
             }
             if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -1353,7 +1289,11 @@ async fn switch_runtime_to_snapshot_current_for_owner(
                 })?;
                 if let Some(info) = state_guard.playback_runtime_info.as_mut() {
                     info.active_track_id = Some(track.id);
-                    info.last_error = None;
+                    if expected_owner.is_some() {
+                        clear_error_after_owned_dispatch(info);
+                    } else {
+                        info.last_error = None;
+                    }
                 }
                 if let Some(pending) = state_guard.pending_stream_display.take() {
                     state_guard.current_stream_display = Some(pending);
@@ -1435,15 +1375,17 @@ async fn switch_runtime_to_snapshot_current_for_owner(
                     if err.is_asset_not_ready() {
                         spawn_tidal_id_reresolve(state, track.id);
                     }
-                    // Advance the persisted queue past the dead row and retry.
-                    let cleared = {
-                        let s = state.read().await;
-                        recently_cleared(&s)
+                    // Advance the persisted queue past the dead row and retry,
+                    // unless a user command or decoder change superseded us.
+                    let Some(advanced) =
+                        mutate_if_owner_current(state, generation, expected_owner, |s| {
+                            let cleared = recently_cleared(s);
+                            s.db.with_conn(|conn| player::next_track(conn, cleared))
+                        })
+                        .await?
+                    else {
+                        return Ok(());
                     };
-                    let advanced = {
-                        let s = state.read().await;
-                        s.db.with_conn(|conn| player::next_track(conn, cleared))
-                    }?;
                     snapshot = resolve_or_skip_pending_current(
                         state,
                         advanced,
@@ -1521,13 +1463,7 @@ async fn switch_runtime_to_snapshot_current_for_owner(
     }
 }
 
-/// Advance through persisted queue rows after a runtime track completes.
-///
-/// Skip-and-retry advance: a single TIDAL hiccup (especially a 429 rate-limit a
-/// few tracks into a mix) used to nuke the entire remaining queue. 429 is
-/// recoverable (sleep + retry the same track once); any other failure is
-/// track-specific (skip to the next item). Only gives up when the continuation
-/// is exhausted or MAX_CONSEC_FAILURES distinct tracks fail in a row.
+/// Test entry point: the end-of-track advance with no runtime owner.
 #[cfg(test)]
 pub(crate) async fn handle_runtime_finished(
     state: SharedState,
@@ -1543,20 +1479,10 @@ fn runtime_finish_owner_is_current(
     expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
     expected_source: Option<&Arc<std::sync::atomic::AtomicU64>>,
 ) -> bool {
-    if current_playback_generation(state_guard) != generation {
-        return false;
-    }
-    match (expected_runtime, expected_source) {
-        (None, None) => true,
-        (Some(runtime), Some(source_identity)) => {
-            state_guard
-                .playback_runtime
-                .as_ref()
-                .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                && Arc::ptr_eq(&runtime.lock_playback_source_identity(), source_identity)
-        }
-        _ => false,
-    }
+    debug_assert_eq!(expected_runtime.is_some(), expected_source.is_some());
+    let owner = expected_runtime.zip(expected_source);
+    let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
+    owner_is_current(state_guard, generation, owner, source_guard.as_deref())
 }
 
 async fn handle_runtime_finished_for_owner(
@@ -1619,18 +1545,13 @@ async fn handle_runtime_finished_for_owner(
         // Keep the source lock while the queue row is advanced. A same-runtime
         // decoder restart uses this mutex before replacing its identity.
         let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
-        let owner_is_current = current_playback_generation(&state_guard) == generation
-            && match (expected_runtime, expected_source, source_guard.as_ref()) {
-                (None, None, None) => true,
-                (Some(runtime), Some(expected_source), Some(current_source)) => {
-                    state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                        && Arc::ptr_eq(current_source, expected_source)
-                }
-                _ => false,
-            };
+        debug_assert_eq!(expected_runtime.is_some(), expected_source.is_some());
+        let owner_is_current = owner_is_current(
+            &state_guard,
+            generation,
+            expected_runtime.zip(expected_source),
+            source_guard.as_deref(),
+        );
         if !owner_is_current {
             tracing::warn!(
                 target: "noor.playback.advance",
@@ -1666,18 +1587,13 @@ async fn handle_runtime_finished_for_owner(
         // Mismatch cleanup can wait behind another writer. Revalidate while
         // holding the source identity through the session/history mutation.
         let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
-        let owner_is_current = current_playback_generation(&state_guard) == generation
-            && match (expected_runtime, expected_source, source_guard.as_ref()) {
-                (None, None, None) => true,
-                (Some(runtime), Some(expected_source), Some(current_source)) => {
-                    state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                        && Arc::ptr_eq(current_source, expected_source)
-                }
-                _ => false,
-            };
+        debug_assert_eq!(expected_runtime.is_some(), expected_source.is_some());
+        let owner_is_current = owner_is_current(
+            &state_guard,
+            generation,
+            expected_runtime.zip(expected_source),
+            source_guard.as_deref(),
+        );
         if !owner_is_current {
             return Ok(());
         }
@@ -1878,6 +1794,15 @@ pub(crate) fn runtime_track_error_is_retryable(message: &str) -> bool {
         || lower.contains("error sending request")
 }
 
+/// Runtime-owned dispatches (retries, queue advances) keep the transient
+/// retry marker: only Started proves the retried stream works. Clearing it
+/// here let every pre-Started failure retry again, forever.
+pub(crate) fn clear_error_after_owned_dispatch(info: &mut crate::PlaybackRuntimeInfo) {
+    if info.last_error.as_deref() != Some(RUNTIME_TRACK_RETRY_MARKER) {
+        info.last_error = None;
+    }
+}
+
 pub(crate) async fn handle_runtime_track_error(
     state: SharedState,
     expected_runtime: &playback_runtime::PlaybackRuntimeHandle,
@@ -1950,50 +1875,51 @@ pub(crate) async fn handle_runtime_track_error(
             }
             state_guard.db.with_conn(player::load_snapshot)?
         };
-        let Some(track) = snapshot
+        // A row that no longer holds the failed track has nothing to retry;
+        // fall through and pause rather than leave "retrying" with no audio.
+        if let Some(track) = snapshot
             .state
             .current_track
             .as_ref()
             .filter(|track| track.id == failed_track_id)
-        else {
-            return Ok(());
-        };
-        let crossfade_ms = effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await;
-        match start_track_for_runtime(
-            &state,
-            StartRequest {
-                track,
-                generation: Generation::Claimed(generation),
-                dispatch: Dispatch::Switch,
-                crossfade_ms,
-            },
-            expected_runtime,
-            expected_source,
-        )
-        .await
         {
-            Ok(_) => {
-                tracing::warn!(
-                    target: "noor.playback.recovery",
-                    event = "runtime_track_retry_dispatched",
-                    failed_track_id,
-                    generation,
-                    error = %message,
-                    "retrying the current queue row after a transient runtime failure"
-                );
-                return Ok(());
-            }
-            Err(StartError::Superseded) => return Ok(()),
-            Err(error) => {
-                tracing::warn!(
-                    target: "noor.playback.recovery",
-                    event = "runtime_track_retry_failed",
-                    failed_track_id,
-                    generation,
-                    original_error = %message,
-                    retry_error = ?error,
-                    "current-row playback recovery failed; pausing without advancing"
-                );
+            let crossfade_ms = effective_crossfade_ms(&state, snapshot.state.crossfade_ms).await;
+            match start_track_for_runtime(
+                &state,
+                StartRequest {
+                    track,
+                    generation: Generation::Claimed(generation),
+                    dispatch: Dispatch::Switch,
+                    crossfade_ms,
+                },
+                expected_runtime,
+                expected_source,
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::warn!(
+                        target: "noor.playback.recovery",
+                        event = "runtime_track_retry_dispatched",
+                        failed_track_id,
+                        generation,
+                        error = %message,
+                        "retrying the current queue row after a transient runtime failure"
+                    );
+                    return Ok(());
+                }
+                Err(StartError::Superseded) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "noor.playback.recovery",
+                        event = "runtime_track_retry_failed",
+                        failed_track_id,
+                        generation,
+                        original_error = %message,
+                        retry_error = ?error,
+                        "current-row playback recovery failed; pausing without advancing"
+                    );
+                }
             }
         }
     }
@@ -2014,6 +1940,9 @@ pub(crate) async fn handle_runtime_track_error(
                 return Ok(());
             }
             state_guard.db.with_conn(player::pause)?;
+            if let Some(info) = state_guard.playback_runtime_info.as_mut() {
+                info.last_error = Some(message.to_string());
+            }
             let outcome = flush_active_listen_session_locked(
                 &mut state_guard,
                 chrono::Utc::now(),
@@ -2057,7 +1986,7 @@ pub(crate) async fn handle_runtime_track_error(
         error = %message,
         "runtime track error; advancing queue"
     );
-    report_playback_failure(&state, message);
+    report_playback_failure(&state, message).await;
     handle_runtime_finished_with_retry_for_owner(
         state,
         failed_track_id,
@@ -2148,7 +2077,7 @@ pub(crate) async fn handle_prepared_runtime_track_error_for_runtime(
         spawn_tidal_id_reresolve(state, track_id);
         refresh_dj_after_queue_change(state.clone(), "skip_unavailable_prepared_next").await;
     }
-    report_playback_failure(state, message);
+    report_playback_failure(state, message).await;
 }
 
 pub(crate) async fn handle_output_fault(
@@ -2157,7 +2086,7 @@ pub(crate) async fn handle_output_fault(
     event: playback_runtime::PlaybackRuntimeEvent,
 ) -> bool {
     let playback_runtime::PlaybackRuntimeEvent::OutputFault {
-        active_track_id,
+        active_track_id: _,
         generation,
         active_decoder_stop,
         decoder_stop,
@@ -2170,6 +2099,8 @@ pub(crate) async fn handle_output_fault(
     use std::sync::atomic::Ordering;
     // Validate after acquiring the same lock that protects queue replacement.
     // Checking before this await allows a delayed failure to pause a newer row.
+    // The output and decoder identities already pin the fault to live decks;
+    // `active_track_id` is not compared because it lags until Started.
     let completed = {
         let mut guard = state.write().await;
         if !output_live.load(Ordering::Acquire)
@@ -2182,11 +2113,6 @@ pub(crate) async fn handle_output_fault(
                 .playback_runtime
                 .as_ref()
                 .is_some_and(|runtime| runtime.handle.is_same_runtime(handle))
-            || guard
-                .playback_runtime_info
-                .as_ref()
-                .and_then(|info| info.active_track_id)
-                != active_track_id
         {
             return false;
         }
@@ -2194,9 +2120,10 @@ pub(crate) async fn handle_output_fault(
             warn!("Failed to persist output-fault pause: {error}");
         }
         guard.audio_active.store(false, Ordering::Release);
+        // The runtime keeps the paused decks, so the active track stays bound
+        // and Resume can rebuild the output in place.
         if let Some(info) = guard.playback_runtime_info.as_mut() {
             info.last_error = Some(message.clone());
-            info.active_track_id = None;
             if info.exclusive_engaged {
                 let device = info.device_name.clone();
                 info.exclusive_engaged = false;
@@ -2281,15 +2208,14 @@ async fn handle_runtime_error_checked(
         // any asynchronous scrobble work. The audio callback never uses it.
         let source_guard = command_context
             .and_then(|_| expected_handle.map(|handle| handle.lock_playback_source_identity()));
-        if let Some((generation, source_identity)) = command_context {
-            if generation
+        if let Some((generation, source_identity)) = command_context
+            && (generation
                 .is_some_and(|generation| current_playback_generation(&state_guard) != generation)
                 || source_guard
                     .as_ref()
-                    .is_none_or(|current| !std::sync::Arc::ptr_eq(current, source_identity))
-            {
-                return false;
-            }
+                    .is_none_or(|current| !std::sync::Arc::ptr_eq(current, source_identity)))
+        {
+            return false;
         }
         let paused = match state_guard.db.with_conn(player::pause) {
             Ok(_) => true,
@@ -2303,7 +2229,12 @@ async fn handle_runtime_error_checked(
             .store(false, std::sync::atomic::Ordering::Release);
         if let Some(info) = state_guard.playback_runtime_info.as_mut() {
             info.last_error = Some(message.to_string());
-            info.active_track_id = None;
+            // A failed command leaves its paused decks in the runtime (a
+            // runtime that dropped them also sends Stopped). Other errors come
+            // from a runtime that may have lost its engines.
+            if command_context.is_none() {
+                info.active_track_id = None;
+            }
         }
         let outcome = if paused {
             flush_active_listen_session_locked(
@@ -2415,12 +2346,11 @@ pub(crate) async fn emit_track_skipped(
     });
 }
 
-pub(crate) fn report_playback_failure(state: &SharedState, message: &str) {
-    let state = state.clone();
-    let message = message.to_string();
-    tokio::spawn(async move {
-        let state = state.read().await;
-        let _ = state.event_tx.send(AppEvent::PlaybackFailed { message });
+/// Publish in order with the caller's other events. A detached task could
+/// deliver the toast after newer state changes from the same flow.
+pub(crate) async fn report_playback_failure(state: &SharedState, message: &str) {
+    let _ = state.read().await.event_tx.send(AppEvent::PlaybackFailed {
+        message: message.to_string(),
     });
 }
 
@@ -2429,5 +2359,69 @@ pub(crate) fn describe_tidal_playback_error(error: &TidalPlaybackError) -> Strin
         TidalPlaybackError::NotConnected => "TIDAL is not connected.".to_string(),
         TidalPlaybackError::SessionRefreshFailed(message) => message.clone(),
         TidalPlaybackError::StreamResolve(error) => error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod exclusive_recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn recovery_burst_keeps_one_lookup_and_only_the_latest_request() {
+        let db = crate::db::Database::open_in_memory().expect("database");
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            locked_db.with_conn(|_| {
+                locked_tx.send(()).expect("lock signal");
+                let _ = unlock_rx.recv_timeout(Duration::from_secs(5));
+                Ok(())
+            })
+        });
+        locked_rx.recv().expect("database locked");
+        let first = Arc::new(());
+        let request = |identity| ExclusiveRecoveryRequest {
+            identity,
+            device_name: "test output".to_string(),
+            db: db.clone(),
+        };
+        let mut recovery = ExclusiveRecoveryQueue::default();
+        recovery.request(request(first.clone()));
+        let first_task = recovery.active.as_ref().expect("active").task.id();
+        let mut latest = first.clone();
+        for _ in 0..1_000 {
+            latest = Arc::new(());
+            recovery.request(request(latest.clone()));
+            recovery.request(request(first.clone()));
+        }
+        assert_eq!(
+            recovery.active.as_ref().expect("active").task.id(),
+            first_task
+        );
+        assert!(Arc::ptr_eq(
+            &recovery.latest.as_ref().expect("latest").identity,
+            &latest
+        ));
+        unlock_tx.send(()).expect("unlock");
+        holder
+            .join()
+            .expect("database holder")
+            .expect("database read");
+        let (completed, _) = recovery.completed().await.expect("first completion");
+        assert!(Arc::ptr_eq(&completed.identity, &first));
+        assert!(recovery.latest.is_none());
+        assert!(Arc::ptr_eq(
+            &recovery
+                .active
+                .as_ref()
+                .expect("next active")
+                .request
+                .identity,
+            &latest
+        ));
+        let (completed, _) = recovery.completed().await.expect("latest completion");
+        assert!(Arc::ptr_eq(&completed.identity, &latest));
+        assert!(recovery.active.is_none());
     }
 }

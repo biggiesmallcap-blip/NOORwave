@@ -1,0 +1,50 @@
+name: Windows check
+
+# pr-check runs Rust on Linux only, where the WASAPI exclusive renderer, the
+# exclusive output sink and their tests are cfg'd out entirely. This job is the
+# only CI that compiles and tests them. It is path-filtered so frontend-only
+# changes do not pay for a Windows build.
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "noor-server/**"
+      - "noor-mix/**"
+      - ".github/workflows/windows-check.yml"
+  push:
+    branches: [master]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "noor-server/**"
+      - "noor-mix/**"
+      - ".github/workflows/windows-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  noor-server-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        run: cargo --version
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-targets: true
+          # Same rule as pr-check: save only from master, where the cache is
+          # readable by every PR; a PR-scoped save is unreachable garbage.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Test noor-server
+        run: cargo test -p noor-server --locked

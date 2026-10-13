@@ -783,15 +783,25 @@ fn decode_and_buffer_job_with_resampler(
             let track = format
                 .default_track()
                 .ok_or_else(|| anyhow!("TIDAL stream had no audio track"))?;
-            let decoded_sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
-            let decoded_channels = track
-                .codec_params
-                .channels
-                .map(|c| c.count() as u16)
-                .unwrap_or(2);
+            // Codec parameters are only a starting guess (symphonia's MP4
+            // reader never sets AAC channels), so every packet re-reads the
+            // rate and channel count from its decoded spec below.
+            let mut decoded_sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
             let mut decoder = symphonia::default::get_codecs()
                 .make(&track.codec_params, &DecoderOptions::default())
                 .context("failed to build Symphonia decoder")?;
+
+            if !config.dj_analysis_only {
+                // Steady state holds the high-water lookahead plus up to twice
+                // the retained history before compaction.
+                let window_secs = PLAYBACK_DECODE_HIGH_WATER_SECS
+                    + 2 * (PLAYBACK_BUFFER_RETAIN_BEHIND_MS as u64).div_ceil(1000);
+                shared.reserve_buffer_capacity(decoded_output_samples_for_secs(
+                    window_secs,
+                    shared.target_sample_rate.load(Ordering::Relaxed).max(1),
+                    device_channels,
+                ))?;
+            }
 
             // ── Pre-loop: passive analysis capture ──────────────────────────────────────
             let mut analysis_sent = false;
@@ -842,7 +852,10 @@ fn decode_and_buffer_job_with_resampler(
                     Err(err) => return Err(err.into()),
                 };
 
-                let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+                let spec = *decoded.spec();
+                decoded_sample_rate = spec.rate.max(1);
+                let decoded_channels = (spec.channels.count() as u16).max(1);
+                let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
                 sb.copy_interleaved_ref(decoded);
 
                 // Passive analysis tap: capture the first 45s as mono.
@@ -903,17 +916,10 @@ fn decode_and_buffer_job_with_resampler(
 
                 // Channel-adapt and resample this packet's samples, then push to buffer.
                 // Releasing the lock between packets lets the CPAL callback drain freely.
-                //
-                // Read the target sample rate live from shared state so a runtime
-                // `DeviceSwap` with sample-rate-follow can re-target the
-                // resampler without restarting the decoder. The cpal callback's
-                // PlaybackBuffer mixes any old- and new-rate samples that were
-                // already enqueued before the change at the new device's rate;
-                // a brief pitch glitch across the swap boundary is acceptable
-                // (matches the documented "brief silence is OK" behaviour for
-                // sample-rate-follow transitions).
+                // The output rate is fixed for a decoder's life: a live stream swap
+                // must keep the decoded rate, and a new rate starts a new decoder.
                 let live_target_rate = shared.target_sample_rate.load(Ordering::Relaxed).max(1);
-                let _ = device_sample_rate; // kept in signature for callers; live rate above is authoritative
+                let _ = device_sample_rate; // kept in signature for callers; the shared target is authoritative
                 let channelized = adapt_channels(
                     sb.samples(),
                     decoded_channels as usize,
@@ -934,6 +940,14 @@ fn decode_and_buffer_job_with_resampler(
                         None => true,
                     };
                     if needs_rebuild {
+                        // A source rate change mid-stream: deliver the old
+                        // filter's held-back frames before replacing it.
+                        if let Some(mut previous) = resampler.take() {
+                            let tail = previous.flush()?;
+                            if !tail.is_empty() {
+                                shared.append_decoded_samples(&tail)?;
+                            }
+                        }
                         // Fail the track instead of passing through
                         // unresampled: wrong-pitch playback with only a log
                         // line is worse than a visible track error, and the
@@ -991,10 +1005,18 @@ fn decode_and_buffer_job_with_resampler(
 
             // Drain the filter's delayed frames as well as residual input.
             // EOF on a full input chunk still has a tail to deliver.
+            // A drain failure costs only the last ~1.4 ms; keep the decoded
+            // track rather than failing it.
             if let Some(r) = resampler.as_mut() {
-                let tail = r.flush()?;
-                if !tail.is_empty() {
-                    shared.append_decoded_samples(&tail)?;
+                match r.flush() {
+                    Ok(tail) if !tail.is_empty() => {
+                        shared.append_decoded_samples(&tail)?;
+                    }
+                    Ok(_) => {}
+                    Err(error) => warn!(
+                        track_id = shared.track_id,
+                        "Resampler tail drain failed; finishing without it: {error:#}"
+                    ),
                 }
             }
 
@@ -1147,12 +1169,17 @@ mod tests {
     }
 
     #[test]
-    fn resampled_http_wav_failure_cannot_publish_clean_eof() {
-        // One full chunk fails during a packet; a short clip fails in EOF
-        // draining. Both run the same decoder body used by playback.
-        for frames in [1024, 13] {
-            decode_resampled_http_wav(frames, true);
-        }
+    fn resampled_http_wav_packet_failure_cannot_publish_clean_eof() {
+        // One full chunk fails during a packet, through the same decoder body
+        // used by playback.
+        decode_resampled_http_wav(1024, true);
+    }
+
+    #[test]
+    fn resampled_http_wav_tail_drain_failure_still_finishes_the_track() {
+        // A short clip only reaches the resampler in EOF draining. Losing that
+        // ~1.4 ms tail must not fail an otherwise decoded track.
+        decode_resampled_http_wav(13, true);
     }
 
     fn decode_resampled_http_wav(frames: usize, broken_resampler: bool) {
@@ -1265,14 +1292,19 @@ mod tests {
             decode_and_buffer_job(config, job, shared.clone(), 48_000, 2)
         };
         server.join().unwrap();
+        if broken_resampler && frames < StreamResampler::CHUNK_SIZE_IN {
+            result.unwrap();
+            assert!(shared.buffer.lock().unwrap().finished);
+            return;
+        }
         if broken_resampler {
             let error = result.unwrap_err();
-            let context = if frames < 1024 {
-                "rubato EOF drain failed"
-            } else {
-                "rubato packet processing failed"
-            };
-            assert!(error.to_string().contains(context), "{error:#}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("rubato packet processing failed"),
+                "{error:#}"
+            );
             assert!(!shared.buffer.lock().unwrap().finished);
             assert_eq!(shared.total_samples.load(Ordering::Acquire), 0);
             assert!(!command_rx.try_iter().any(|command| matches!(

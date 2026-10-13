@@ -508,6 +508,18 @@ async fn get_status(
             .as_ref()
             .and_then(|info| info.active_track_id);
         let active_generation = super::current_playback_generation(&state);
+        // Read the handoff counter before taking the DB connection. Transport
+        // listeners hold the playback source lock while they write SQLite, so
+        // locking it from inside `with_conn` inverts that order and deadlocks.
+        let handoff_elapsed_ms = state
+            .playback_runtime
+            .as_ref()
+            .zip(state.playback_runtime_info.as_ref())
+            .and_then(|(runtime, info)| {
+                runtime
+                    .handle
+                    .get_dj_handoff_elapsed_ms(info.sample_rate, info.channels)
+            });
         state
             .db
             .with_conn(|conn| {
@@ -589,13 +601,10 @@ async fn get_status(
                     state.playback_runtime_info.as_ref(),
                 ).map(|(runtime, info)| runtime.handle.get_position_ms(info.sample_rate, info.channels));
                 let active_transition = if enabled {
-                    let elapsed_ms = state.playback_runtime.as_ref().zip(
-                        state.playback_runtime_info.as_ref(),
-                    ).and_then(|(runtime, info)| runtime.handle.get_dj_handoff_elapsed_ms(info.sample_rate, info.channels));
                     active_transition_for_runtime(conn,
                         state.active_listen_session.as_ref()
                             .filter(|session| Some(session.track_id) == active_track_id),
-                        current_ref.as_ref(), elapsed_ms)?
+                        current_ref.as_ref(), handoff_elapsed_ms)?
                 } else { None };
                 let feedback_transition_event_id = conn.query_row(
                     "SELECT id FROM dj_transition_events

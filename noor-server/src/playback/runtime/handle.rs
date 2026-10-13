@@ -39,7 +39,12 @@ pub struct PlaybackRuntimeHandle {
     /// the frontend reads `buffered_start_ms` via this as a visual cue.
     /// Same unwrap-audit reasoning as `position_source` / `buffered_source`.
     pub(super) offset_source: Arc<Mutex<Arc<AtomicU64>>>,
+    /// The audible decoder's DJ handoff counter, for telemetry only.
     pub(super) handoff_elapsed_source: Arc<Mutex<Arc<AtomicU64>>>,
+    /// The audible decoder's ownership token. Transport listeners hold this
+    /// lock while they write SQLite. Lock order: this mutex, then the DB
+    /// connection. Never lock it from inside `Database::with_conn`.
+    pub(super) source_identity: Arc<Mutex<Arc<AtomicU64>>>,
     pub(super) exclusive_event_identity: Arc<Mutex<Arc<()>>>,
 }
 
@@ -73,14 +78,14 @@ impl PlaybackRuntimeHandle {
     pub(crate) fn lock_playback_source_identity(
         &self,
     ) -> std::sync::MutexGuard<'_, Arc<AtomicU64>> {
-        self.handoff_elapsed_source
+        self.source_identity
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
     #[cfg(test)]
     pub(crate) fn test_replace_playback_source(&self) {
-        *self.handoff_elapsed_source.lock().unwrap() = Arc::new(AtomicU64::new(u64::MAX));
+        *self.source_identity.lock().unwrap() = Arc::new(AtomicU64::new(0));
     }
 
     #[cfg(test)]
@@ -108,6 +113,7 @@ impl PlaybackRuntimeHandle {
             buffered_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             offset_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             handoff_elapsed_source: Arc::new(Mutex::new(Arc::new(AtomicU64::new(u64::MAX)))),
+            source_identity: Arc::new(Mutex::new(Arc::new(AtomicU64::new(0)))),
             exclusive_event_identity: Arc::new(Mutex::new(Arc::new(()))),
         }
     }
@@ -373,7 +379,7 @@ impl PlaybackRuntimeHandle {
         let samples = self
             .handoff_elapsed_source
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poison| poison.into_inner())
             .load(Ordering::Relaxed);
         (samples != u64::MAX).then(|| samples_to_ms(samples, sample_rate, channels))
     }
