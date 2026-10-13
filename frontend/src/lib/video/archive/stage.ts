@@ -1,7 +1,7 @@
 // The Stage: the rows under the watch page's player. Each row comes from the
-// Atlas and Air endpoints; any of them may answer 501 (not built yet) or fail,
-// and the page falls back to the old related grid when the exploring rows
-// (same scene, one step out) come back empty.
+// Atlas and Air endpoints; any of them may answer 501 (not built yet) or fail.
+// The concert and the other cuts sit by the player; the exploring picks (same
+// scene, one step out) open the related grid under it.
 
 import type {
 	AtlasArtistCard,
@@ -201,7 +201,25 @@ export async function loadStage(
 	await Promise.all([songTask, atlasTask]);
 }
 
-/** The exploring rows came back empty: show the old related grid instead. */
-export function needsFallback(rows: StageRows): boolean {
-	return rows.scene === null && rows.stepOut.length === 0;
+/** The picks that open the watch page's related grid: the same scene and
+ *  one step out, woven two to one so the first rows mix the familiar with
+ *  the new, each saying why it is there. The playing video and repeats are
+ *  left out; related and radio picks follow them in the same grid. */
+export function explorePicks(rows: StageRows, playingId: number): ExploreVideo[] {
+	const near = (rows.scene?.videos ?? []).map((video) => ({ ...video, why: video.why || 'Same scene' }));
+	const out = rows.stepOut.map(({ video, neighbor }) => ({ ...video, why: `One step out, ${viaLabel(neighbor.source)}` }));
+	const woven: ExploreVideo[] = [];
+	let n = 0;
+	let o = 0;
+	while (n < near.length || o < out.length) {
+		if (n < near.length) woven.push(near[n++]);
+		if (n < near.length) woven.push(near[n++]);
+		if (o < out.length) woven.push(out[o++]);
+	}
+	const seen = new Set<number>([playingId]);
+	return woven.filter((video) => {
+		if (seen.has(video.tidal_id)) return false;
+		seen.add(video.tidal_id);
+		return true;
+	});
 }

@@ -13,12 +13,16 @@
 		artistId,
 		trail = [],
 		look = 'place',
+		caption = true,
 	}: {
 		/** TIDAL id of the artist on stage. */
 		artistId: number | null;
 		/** Recent artist ids, oldest first (the current one may be last). */
 		trail?: number[];
 		look?: 'light' | 'place';
+		/** The scene name and "Open Atlas" over the map; off where the
+		 *  surrounding card already says where it is. */
+		caption?: boolean;
 	} = $props();
 
 	let canvasEl = $state<HTMLCanvasElement>();
@@ -118,10 +122,12 @@
 
 <button type="button" class="minimap" class:empty={!loaded} onclick={open} aria-label={sceneName ? `Open the Atlas at ${sceneName}` : 'Open the Atlas'}>
 	<canvas bind:this={canvasEl} aria-hidden="true"></canvas>
-	<span class="caption">
-		<span class="where">{sceneName ?? 'Atlas'}</span>
-		<span class="go">Open Atlas</span>
-	</span>
+	{#if caption}
+		<span class="caption">
+			<span class="where">{sceneName ?? 'Atlas'}</span>
+			<span class="go">Open Atlas</span>
+		</span>
+	{/if}
 </button>
 
 <style>

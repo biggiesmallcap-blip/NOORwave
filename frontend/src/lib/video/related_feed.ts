@@ -38,10 +38,12 @@ export function placeholderCount(count: number, columns: number, loading: boolea
 }
 
 /** A feed that has ended keeps whole rows only. The sharp rows are never
- *  cut: if the feed ran dry inside them, show what there is. */
-export function trimToRows<T>(items: T[], columns: number): T[] {
-	if (items.length <= FOCUS_ROWS * columns) return items;
-	return items.slice(0, items.length - (items.length % columns));
+ *  cut: if the feed ran dry inside them, show what there is. `lead` counts
+ *  tiles that sit before the items in the same grid (the map tile). */
+export function trimToRows<T>(items: T[], columns: number, lead = 0): T[] {
+	const total = items.length + lead;
+	if (total <= FOCUS_ROWS * columns) return items;
+	return items.slice(0, items.length - (total % columns));
 }
 
 /** Append a batch, skipping the playing video and repeats. */

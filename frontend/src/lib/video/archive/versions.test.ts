@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import type { ExploreVideo, VideoCut, VideoVersion } from '$lib/api/video_explore_types';
-import { concertLength, concertQueue, orderVersions, runtimeLabel, versionCaption, versionsQueue } from './versions';
+import { concertLength, concertQueue, cutChipLabel, distinctCuts, orderVersions, runtimeLabel, versionCaption, versionsQueue } from './versions';
 import { decadeAt, decadeDomain, decadeRange, decadeTick, riverPath, selectionSpan } from './river';
 
 function video(id: number, durationS = 240): ExploreVideo {
@@ -47,6 +47,14 @@ describe('version ordering', () => {
 		expect(versionCaption({ label: 'Live at Croke Park 2006', cut: 'live', cut_year: 2006 }, 'Live')).toBe('Live at Croke Park 2006');
 		expect(versionCaption({ label: 'The Farewell Tour', cut: 'live', cut_year: 2012 }, 'Live')).toBe('The Farewell Tour, Live, 2012');
 		expect(versionCaption({ label: '', cut: 'lyric', cut_year: null }, 'Lyric')).toBe('Lyric');
+	});
+
+	test('the cuts line names one of each other kind, never the kind on', () => {
+		const others = [version(1, 'official', 2000), version(2, 'live', 2001), version(3, 'live', 2006), version(4, 'lyric', null)];
+		expect(distinctCuts(others, 'official').map((v) => v.video.tidal_id)).toEqual([2, 4]);
+		expect(distinctCuts(others, null).map((v) => v.video.tidal_id)).toEqual([1, 2, 4]);
+		expect(cutChipLabel({ cut_year: 2006 }, 'Live')).toBe('Live, 2006');
+		expect(cutChipLabel({ cut_year: null }, 'Lyric')).toBe('Lyric');
 	});
 
 	test('a picked version leads its queue, the rest keep list order', () => {

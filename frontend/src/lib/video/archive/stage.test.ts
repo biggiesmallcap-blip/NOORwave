@@ -9,8 +9,8 @@ import type {
 import {
 	EMPTY_STAGE,
 	clearStageCache,
+	explorePicks,
 	loadStage,
-	needsFallback,
 	stepOutNeighbors,
 	type StageClient,
 	type StageRows,
@@ -87,10 +87,10 @@ describe('stage rows', () => {
 		return rows;
 	}
 
-	test('every endpoint answering 501 leaves the rows empty and asks for the fallback', async () => {
+	test('every endpoint answering 501 leaves the rows empty and the grid to related picks', async () => {
 		const rows = await run(client({}));
 		expect(rows).toEqual(EMPTY_STAGE);
-		expect(needsFallback(rows)).toBe(true);
+		expect(explorePicks(rows, current.tidal_id)).toEqual([]);
 	});
 
 	test('builds concert, scene, step-out and versions rows', async () => {
@@ -128,7 +128,11 @@ describe('stage rows', () => {
 		expect(rows.concert?.id).toBe(77);
 		expect(rows.scene?.videos.map((v) => v.tidal_id)).toEqual([600, 601]);
 		expect(rows.stepOut.map((pick) => [pick.neighbor.id, pick.video.tidal_id])).toEqual([[8, 800]]);
-		expect(needsFallback(rows)).toBe(false);
+		expect(explorePicks(rows, current.tidal_id).map((v) => [v.tidal_id, v.why])).toEqual([
+			[600, 'Same scene'],
+			[601, 'Same scene'],
+			[800, 'One step out, Last.fm similar'],
+		]);
 	});
 
 	test('an unknown video (404) leaves the versions row empty', async () => {

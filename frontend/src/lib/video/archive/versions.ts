@@ -65,6 +65,22 @@ export function versionsQueue(versions: readonly VideoVersion[], pickedId: numbe
 	return picked ? [picked.video, ...rest] : rest;
 }
 
+/** The other cuts worth naming beside the player: one of each kind, in the
+ *  given order, leaving out the kind that is playing. */
+export function distinctCuts(others: readonly VideoVersion[], playingCut: VideoCut | null): VideoVersion[] {
+	const seen = new Set<VideoCut>(playingCut ? [playingCut] : []);
+	return others.filter((version) => {
+		if (seen.has(version.cut)) return false;
+		seen.add(version.cut);
+		return true;
+	});
+}
+
+/** "Live, 2006": a cut's kind and year, short enough for a chip. */
+export function cutChipLabel(version: Pick<VideoVersion, 'cut_year'>, cutLabel: string): string {
+	return version.cut_year ? `${cutLabel}, ${version.cut_year}` : cutLabel;
+}
+
 /** A one-line caption for a version card: its label, plus the cut and the
  *  year only when the label does not already say them ("Official video",
  *  "Live at Croke Park 2006" stay as they are; "The Farewell Tour" becomes
