@@ -12,6 +12,7 @@
 	import { videoStageReveal } from '$lib/stores/video_session';
 	import { VIDEO_TABS, WATCH_PATH, videoSectionQuery, videoTabFor } from '$lib/video/section';
 	import { lensesToSearch, parseLenses } from '$lib/video/archive/lenses';
+	import { ATLAS_SEARCH_LABEL } from '$lib/video/atlas/links';
 
 	// One frame for the whole video section, so every tab has the same top:
 	// the shared command header puts Back and the search field on the first
@@ -34,7 +35,7 @@
 	let placeholder = $derived(
 		onLiked ? 'Search your liked videos'
 			: onArchive ? 'Search song titles in the archive'
-				: onAtlas ? 'Find an artist on the map'
+				: onAtlas ? ATLAS_SEARCH_LABEL
 					: 'Search TIDAL videos'
 	);
 
