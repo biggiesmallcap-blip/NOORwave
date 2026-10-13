@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-use super::{archive, build, scenes};
+use super::{archive, build, journey, scenes};
 use crate::SharedState;
 use crate::db::Database;
 
@@ -111,7 +111,8 @@ fn run_blocking(db: &Database, force: bool) -> Result<bool> {
     Ok(true)
 }
 
-/// Load the Archive index for the current build into its cache.
+/// Load the Archive index and the journey graphs for the current build into
+/// their caches.
 fn warm(conn: &Connection) {
     match archive::cached(conn) {
         Ok(index) => tracing::debug!(
@@ -122,6 +123,9 @@ fn warm(conn: &Connection) {
         Err(error) => {
             tracing::warn!(target: "noor.video_intel", %error, "archive index warm-up failed")
         }
+    }
+    if let Err(error) = journey::cached_collab(conn).and_then(|_| journey::cached_facts(conn)) {
+        tracing::warn!(target: "noor.video_intel", %error, "journey warm-up failed");
     }
 }
 

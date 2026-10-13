@@ -36,6 +36,10 @@ blocks it; each is small on its own.
 - Logbook: there is no cheap liked-videos count for its Liked row.
 - Atlas routes are not cached (no `video_routes` table); they answer in under
   50 ms, so only add one if that changes.
+- Journeys replace Route: once the frontend calls `/api/videos/atlas/journey`
+  only, delete `GET /api/videos/atlas/route` (`video_atlas_routes::route`,
+  its test, `AtlasRoute*` types and `ArtistGraph::route` if nothing else
+  uses it).
 - Migration 077 was taken on this branch; check no other branch claimed 077
   before merging.
 - Spawned by: branch `bsc/video-exploration-redesign-56c487` (Atlas and Air).
