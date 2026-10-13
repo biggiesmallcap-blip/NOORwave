@@ -1185,6 +1185,38 @@ fn reresolve_verifies_a_same_isrc_release_for_a_row_that_never_recorded_explicit
 }
 
 #[test]
+fn withdrawn_row_folds_into_the_local_row_that_holds_its_playable_release() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let mut dead = test_tidal_track(10, "To Become Born");
+        dead.isrc = Some("USKHG2021201".into());
+        let dead_id = insert_tidal_track(conn, &dead, false, false, None)?.unwrap();
+        // The reissue was imported as its own row, without the shared ISRC.
+        let mut reissue = test_tidal_track(11, "To Become Born");
+        reissue.isrc = None;
+        let twin_id = insert_tidal_track(conn, &reissue, false, false, None)?.unwrap();
+        conn.execute(
+            "INSERT INTO listen_history(track_id,started_at) VALUES(?1,'2026-01-01')",
+            [dead_id],
+        )?;
+
+        crate::library::duplicates::merge_into_twin(conn, dead_id, twin_id)?;
+
+        let dead_left: i64 =
+            conn.query_row("SELECT COUNT(*) FROM tracks WHERE id=?1", [dead_id], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(dead_left, 0);
+        let history_owner: i64 =
+            conn.query_row("SELECT track_id FROM listen_history", [], |r| r.get(0))?;
+        assert_eq!(history_owner, twin_id);
+        assert_eq!(crate::db::catalogue::track_id(conn, 10)?, Some(twin_id));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn catalogue_alias_identity_refresh_and_owner_guards_prevent_wrong_recording() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {

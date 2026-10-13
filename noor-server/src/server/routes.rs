@@ -2017,6 +2017,9 @@ pub(crate) fn verified_alias_of(
     ))
 }
 
+/// Search matches the heal tries before giving up on a recording.
+const RERESOLVE_CANDIDATE_TRIES: usize = 3;
+
 /// Returns `Some(new_tidal_id)` when the row was healed with a fresh, verified
 /// id; `None` when no better id was found. Errors only on infrastructure
 /// failures (DB, no TIDAL session), never on "couldn't find a match".
@@ -2062,30 +2065,38 @@ pub(crate) async fn reresolve_tidal_id(
     let client = TidalClient::for_session(state.read().await.tidal.clone(), &tokens.country_code)
         .with_metadata_store(state.read().await.db.clone());
     let query = format!("{artist} {title}");
-    let results = client.search(&query, TIDAL_RESOLVE_POOL).await?;
-    let Some((_score, candidate)) = select_best_tidal_match(&artist, &title, results) else {
+    let mut results = client.search(&query, TIDAL_RESOLVE_POOL).await?;
+    // TIDAL can list a re-recorded release first; the same recording may be
+    // the next best match.
+    let mut verified_release = None;
+    for _ in 0..RERESOLVE_CANDIDATE_TRIES {
+        let Some((_score, candidate)) = select_best_tidal_match(&artist, &title, results.clone())
+        else {
+            break;
+        };
+        results.retain(|track| track.id != candidate.id);
+        // Same id that just failed: nothing to heal with.
+        if Some(candidate.id) == old_tidal_id {
+            continue;
+        }
+        // Don't swap one dead id for another: confirm the candidate actually
+        // streams before rewriting the row.
+        let request = tidal_stream::StreamRequest::new(candidate.id, "LOSSLESS");
+        if tidal_stream::resolve_stream(&http, &tokens.access_token, &request)
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        let full = client.get_track(candidate.id).await?;
+        if db.with_conn(|conn| verified_alias_of(conn, track_id, &full))? {
+            verified_release = Some(full);
+            break;
+        }
+    }
+    let Some(full) = verified_release else {
         return Ok(None);
     };
-    // Same id that just failed, or a match we can't distinguish: nothing to heal.
-    if Some(candidate.id) == old_tidal_id {
-        return Ok(None);
-    }
-
-    // Don't swap one dead id for another: confirm the candidate actually streams
-    // before rewriting the row.
-    let request = tidal_stream::StreamRequest::new(candidate.id, "LOSSLESS");
-    if tidal_stream::resolve_stream(&http, &tokens.access_token, &request)
-        .await
-        .is_err()
-    {
-        return Ok(None);
-    }
-
-    let full = client.get_track(candidate.id).await?;
-    let verified = db.with_conn(|conn| verified_alias_of(conn, track_id, &full))?;
-    if !verified {
-        return Ok(None);
-    }
     // A transient asset failure does not prove that a catalogue release was withdrawn.
     let unavailable = if let Some(old) = old_tidal_id {
         match client.get_track(old).await {
@@ -2102,6 +2113,32 @@ pub(crate) async fn reresolve_tidal_id(
         false
     };
     let new_id = full.id;
+    let twin = db.with_conn(|conn| {
+        Ok(crate::db::catalogue::track_id(conn, new_id)?.filter(|&id| id != track_id))
+    })?;
+    if let Some(twin) = twin {
+        // The playable release already lives on another local row (a copy
+        // imported without the shared ISRC). Only a confirmed withdrawal folds
+        // the dead row into it.
+        if !unavailable {
+            return Ok(None);
+        }
+        let outcome = db.with_conn(|conn| {
+            if let Some(old) = old_tidal_id {
+                crate::db::catalogue::observe(conn, old, "unavailable", "metadata_check")?;
+            }
+            crate::library::duplicates::merge_into_twin(conn, track_id, twin)
+        })?;
+        let s = state.read().await;
+        if outcome.reconcile.queue_changed {
+            let _ = s.event_tx.send(AppEvent::QueueUpdated);
+        }
+        if outcome.reconcile.current_changed {
+            let _ = s.event_tx.send(AppEvent::PlaybackStateChanged);
+        }
+        let _ = s.event_tx.send(AppEvent::LibrarySynced);
+        return Ok(Some(new_id));
+    }
     let updated = db.with_conn(|conn| {
         let tx = conn.unchecked_transaction()?;
         if crate::db::catalogue::track_id(&tx, new_id)?.is_some_and(|id| id != track_id) {

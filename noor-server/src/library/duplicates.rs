@@ -1399,6 +1399,24 @@ pub struct MergeOutcome {
     pub reconcile: ReconcileOutcome,
 }
 
+/// Fold a withdrawn row into the local row that already holds its verified
+/// playable release, through the same history-preserving merge as dedupe.
+pub fn merge_into_twin(
+    conn: &Connection,
+    dead_track_id: i64,
+    twin_track_id: i64,
+) -> Result<MergeOutcome> {
+    conn.execute("INSERT INTO duplicate_groups(status) VALUES('pending')", [])?;
+    let group_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO duplicate_members(group_id, track_id) VALUES(?1, ?2), (?1, ?3)",
+        params![group_id, dead_track_id, twin_track_id],
+    )?;
+    merge_group(conn, group_id, twin_track_id).inspect_err(|_| {
+        let _ = conn.execute("DELETE FROM duplicate_groups WHERE id = ?1", [group_id]);
+    })
+}
+
 /// Merge a duplicate group into `preferred_track_id`, preserving history.
 /// Unlike [`resolve_group`] (manual UI path, deletes references outright),
 /// this REPOINTS listen_history and playlist memberships to the kept row,
