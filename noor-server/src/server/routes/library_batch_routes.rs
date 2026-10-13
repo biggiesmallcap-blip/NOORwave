@@ -87,34 +87,59 @@ fn album_requires_catalog_retention(conn: &Connection, album_id: i64) -> rusqlit
     )
 }
 
+/// A status with a sentence the picker can show as it is.
+fn batch_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({ "message": message })))
+}
+
 pub(super) async fn batch_add_to_playlist(
     State(state): State<SharedState>,
     Json(payload): Json<BatchPlaylistRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    require_positive_batch_id(payload.playlist_id)?;
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_positive_batch_id(payload.playlist_id)
+        .map_err(|status| batch_error(status, "Expected a positive playlist id"))?;
 
     let track_ids = dedupe_positive_ids(&payload.track_ids);
     if track_ids.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(batch_error(StatusCode::BAD_REQUEST, "No tracks to add"));
     }
 
-    let (playlist, track_pairs) = {
+    // For a TIDAL playlist only the tracks the local add will insert are
+    // considered: one already here can map to a different TIDAL release than
+    // the copy TIDAL holds, and TIDAL's own duplicate check would then add it
+    // remotely only, leaving the two lists different lengths.
+    let (playlist, new_count, track_pairs) = {
         let state = state.read().await;
         state
             .db
             .with_conn(|conn| {
                 let playlist = queries::get_playlist(conn, payload.playlist_id)?;
-                let track_pairs = queries::get_track_tidal_ids(conn, &track_ids)?;
-                Ok((playlist, track_pairs))
+                let candidates = match &playlist {
+                    Some(playlist) if playlist.tidal_uuid.is_some() => {
+                        queries::new_playlist_track_ids(conn, payload.playlist_id, &track_ids)?
+                    }
+                    _ => track_ids.clone(),
+                };
+                let track_pairs = queries::get_track_tidal_ids(conn, &candidates)?;
+                Ok((playlist, candidates.len(), track_pairs))
             })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|_| {
+                batch_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not read the playlist",
+                )
+            })?
     };
 
-    let playlist = playlist.ok_or(StatusCode::NOT_FOUND)?;
+    let playlist = playlist
+        .ok_or_else(|| batch_error(StatusCode::NOT_FOUND, "That playlist no longer exists"))?;
     if playlist.is_smart {
         // A smart playlist's contents come from its rules; adding to it directly
         // is meaningless and would be silently discarded on the next evaluation.
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(batch_error(
+            StatusCode::BAD_REQUEST,
+            "A smart playlist's contents come from its rules",
+        ));
     }
 
     // A locally created playlist has no TIDAL counterpart. It used to be
@@ -128,23 +153,24 @@ pub(super) async fn batch_add_to_playlist(
     // track is exactly what the user is trying to add.
     let local_ids: Vec<i64> = if let Some(playlist_uuid) = playlist.tidal_uuid.as_deref() {
         let tidal_track_ids: Vec<i64> = track_pairs.iter().map(|(_, tidal_id)| *tidal_id).collect();
-        if tidal_track_ids.is_empty() {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-
-        let client = state
-            .read()
-            .await
-            .tidal
-            .client()
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-
-        tidal_mutations::add_to_playlist(&client, playlist_uuid, &tidal_track_ids)
-            .await
-            .map_err(|error| {
-                tracing::error!("Batch add to playlist failed: {error}");
-                StatusCode::BAD_GATEWAY
+        if !tidal_track_ids.is_empty() {
+            let client = state.read().await.tidal.client().ok_or_else(|| {
+                batch_error(
+                    StatusCode::UNAUTHORIZED,
+                    "Connect TIDAL to add to this playlist",
+                )
             })?;
+            tidal_mutations::add_to_playlist(&client, playlist_uuid, &tidal_track_ids)
+                .await
+                .map_err(super::playlist_routes::tidal_write_error)?;
+        } else if new_count > 0 {
+            // New tracks, but none of them exist on TIDAL. (No new tracks at
+            // all is a no-op, reported below as added 0.)
+            return Err(batch_error(
+                StatusCode::BAD_REQUEST,
+                "These tracks are not on TIDAL, so they can't go in a TIDAL playlist",
+            ));
+        }
 
         track_pairs.iter().map(|(track_id, _)| *track_id).collect()
     } else {
@@ -162,7 +188,12 @@ pub(super) async fn batch_add_to_playlist(
                 // position collisions, so re-adding a track inserted it twice.
                 queries::add_tracks_to_playlist(conn, payload.playlist_id, &local_ids)
             })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|_| {
+                batch_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not save the playlist",
+                )
+            })?
     };
 
     super::playlist_routes::notify_playlists_changed(&state).await;

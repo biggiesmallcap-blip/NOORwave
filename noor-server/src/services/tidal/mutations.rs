@@ -85,7 +85,7 @@ async fn create_playlist_snapshot_at(
     }
     .await;
     if let Err(error) = populate {
-        if delete_playlist(client, &uuid).await.is_err() {
+        if delete_playlist_unchecked(client, &uuid).await.is_err() {
             return Err(UnfinishedPlaylist {
                 playlist_uuid: uuid,
                 source: error,
@@ -117,19 +117,26 @@ fn writes_allowed(policy: Option<&str>, development: bool) -> bool {
     }
 }
 
+/// A TIDAL library write refused by the development write gate. Typed so the
+/// API can say so instead of reporting it as TIDAL rejecting the change.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "TIDAL library writes are disabled for this development instance. Set NOOR_TIDAL_LIBRARY_WRITES=allow to enable them."
+)]
+pub struct LibraryWritesDisabled;
+
 pub(crate) fn check_library_writes() -> Result<()> {
     let development = cfg!(debug_assertions)
         || std::env::var_os("NOOR_DEV_PORT").is_some()
         || std::env::current_exe()
             .ok()
             .is_some_and(|p| p.components().any(|v| v.as_os_str() == "target"));
-    anyhow::ensure!(
-        writes_allowed(
-            std::env::var("NOOR_TIDAL_LIBRARY_WRITES").ok().as_deref(),
-            development
-        ),
-        "TIDAL library writes are disabled for this development instance"
-    );
+    if !writes_allowed(
+        std::env::var("NOOR_TIDAL_LIBRARY_WRITES").ok().as_deref(),
+        development,
+    ) {
+        return Err(LibraryWritesDisabled.into());
+    }
     Ok(())
 }
 
@@ -242,6 +249,110 @@ mod write_policy_tests {
                 assert_eq!(calls.len(), 3);
             }
             server.abort();
+        }
+    }
+
+    fn fixture_session(
+        address: std::net::SocketAddr,
+    ) -> crate::services::tidal::session::TidalSession {
+        crate::services::tidal::session::TidalSession::new(
+            crate::services::tidal::session::TidalSessionConfig {
+                api_http: reqwest::Client::new(),
+                api_base: format!("http://{address}/v1"),
+                refresher: std::sync::Arc::new(NoRefresh),
+                store: None,
+                events: None,
+            },
+            Some(crate::services::tidal::auth::TidalTokens {
+                access_token: "test-token".into(),
+                refresh_token: "test-refresh".into(),
+                token_type: "Bearer".into(),
+                expires_in: 3600,
+                user_id: "test".into(),
+                country_code: "AU".into(),
+                auth_flow: Some("pkce".into()),
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn playlist_items_keep_video_slots_and_reject_mixed_revisions() {
+        use axum::{Router, body::Body, http::Request};
+        for (second_page_etag, conflict) in [("rev-1", false), ("rev-2", true)] {
+            let app = Router::new().fallback(move |request: Request<Body>| async move {
+                let second_page = request
+                    .uri()
+                    .query()
+                    .unwrap_or_default()
+                    .contains("offset=100");
+                let (etag, items) = if second_page {
+                    (
+                        second_page_etag,
+                        vec![r#"{"type":"track","item":{"id":9}}"#.to_string()],
+                    )
+                } else {
+                    let mut items = vec![
+                        r#"{"type":"track","item":{"id":7}}"#.to_string(),
+                        r#"{"type":"video","item":{"id":8}}"#.to_string(),
+                    ];
+                    items.extend(
+                        (0..98)
+                            .map(|i| format!(r#"{{"type":"track","item":{{"id":{}}}}}"#, 100 + i)),
+                    );
+                    ("rev-1", items)
+                };
+                (
+                    [("content-type", "application/json"), ("etag", etag)],
+                    format!(
+                        r#"{{"totalNumberOfItems":101,"items":[{}]}}"#,
+                        items.join(",")
+                    ),
+                )
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let session = fixture_session(address);
+            let result = super::get_playlist_items(&session.client().unwrap(), "pl").await;
+            if conflict {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<super::PlaylistConflict>()
+                        .is_some()
+                );
+            } else {
+                let list = result.unwrap();
+                assert_eq!(list.etag, "rev-1");
+                assert_eq!(list.items.len(), 101);
+                assert_eq!(list.items[0], Some(7));
+                assert_eq!(list.items[1], None, "a video keeps its TIDAL index");
+                assert_eq!(list.items[100], Some(9));
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn development_builds_refuse_every_destructive_playlist_edit() {
+        // Tests count as a development instance, so each call must stop at the
+        // write gate before any request (nothing listens on this address).
+        let session = fixture_session("127.0.0.1:9".parse().unwrap());
+        let client = session.client().unwrap();
+        for result in [
+            super::remove_playlist_items(&client, "pl", &[0], "rev").await,
+            super::move_playlist_item(&client, "pl", 0, 1, "rev").await,
+            super::rename_playlist(&client, "pl", "Renamed", None).await,
+            super::delete_playlist(&client, "pl").await,
+        ] {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("disabled for this development instance")
+            );
         }
     }
 
@@ -486,33 +597,125 @@ where
     Err(PlaylistConflict.into())
 }
 
-/// Remove items from a TIDAL playlist by zero-based position.
+/// A TIDAL playlist's live item list and the revision it was read at.
+#[derive(Debug, Clone)]
+pub struct PlaylistItems {
+    /// One entry per TIDAL item, in TIDAL's order, so a vector index is a
+    /// TIDAL item index: the track id, or `None` for a video or anything else
+    /// that is not a track.
+    pub items: Vec<Option<i64>>,
+    /// The ETag the list was read at. Writes send it back, so TIDAL refuses
+    /// them (412) if the playlist changed after this read.
+    pub etag: String,
+}
+
+/// Read every item of a TIDAL playlist, videos included, with its ETag.
 ///
-/// Positions, not track ids: TIDAL addresses playlist items by index, and a
-/// playlist may legitimately hold the same track twice. Descending order is
-/// load-bearing - removing a low index shifts everything after it down, so
-/// highest-first keeps the remaining indices valid within the one call.
+/// `/playlists/{uuid}/tracks` (what sync reads) leaves videos out, but item
+/// edits address `/items` indices, which count them. Index-based edits must
+/// therefore be planned against this list, never against the local copy.
+pub async fn get_playlist_items(
+    client: &TidalClient,
+    playlist_uuid: &str,
+) -> Result<PlaylistItems> {
+    const PAGE: usize = 100;
+    let country_code = client.country_code().to_string();
+    let mut items = Vec::new();
+    let mut etag: Option<String> = None;
+    loop {
+        let offset = items.len().to_string();
+        let resp = client
+            .send_authed(|http, api_base, bearer| {
+                http.get(format!("{api_base}/playlists/{playlist_uuid}/items"))
+                    .header("Authorization", bearer)
+                    .query(&[
+                        ("countryCode", country_code.as_str()),
+                        ("limit", "100"),
+                        ("offset", offset.as_str()),
+                    ])
+            })
+            .await?;
+        let resp = checked_playlist_response(resp).await?;
+        let page_etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!("TIDAL did not return an ETag for playlist {playlist_uuid}")
+            })?;
+        // Pages read at different revisions cannot be stitched into one list.
+        match &etag {
+            Some(first) if *first != page_etag => return Err(PlaylistConflict.into()),
+            Some(_) => {}
+            None => etag = Some(page_etag),
+        }
+        let body: serde_json::Value = resp.json().await?;
+        let page = body
+            .get("items")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        items.extend(page.iter().map(|entry| {
+            (entry.get("type").and_then(|value| value.as_str()) == Some("track"))
+                .then(|| entry.pointer("/item/id").and_then(|value| value.as_i64()))
+                .flatten()
+        }));
+        let total = body
+            .get("totalNumberOfItems")
+            .and_then(|value| value.as_u64());
+        if page.len() < PAGE || total.is_none_or(|total| items.len() as u64 >= total) {
+            break;
+        }
+    }
+    Ok(PlaylistItems {
+        items,
+        etag: etag.ok_or_else(|| anyhow::anyhow!("TIDAL returned no playlist pages"))?,
+    })
+}
+
+/// Send one playlist write guarded by an ETag the caller already holds. No
+/// retry on 412: the write was planned against that revision, so a newer one
+/// means the plan may point at the wrong items.
+async fn send_at_revision<F>(client: &TidalClient, build: F) -> Result<()>
+where
+    F: Fn(&reqwest::Client, &str, &str) -> reqwest::RequestBuilder,
+{
+    let resp = client.send_authed(build).await?;
+    if resp.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+        return Err(PlaylistConflict.into());
+    }
+    ensure_success(resp).await
+}
+
+/// Remove items from a TIDAL playlist by TIDAL item index, at revision `etag`.
+///
+/// Indices, not track ids: TIDAL addresses playlist items by index, and a
+/// playlist may hold the same track twice. Plan the indices with
+/// [`get_playlist_items`] and pass its ETag. Descending order is load-bearing:
+/// removing a low index shifts everything after it down.
 pub async fn remove_playlist_items(
     client: &TidalClient,
     playlist_uuid: &str,
-    positions: &[i64],
+    indices: &[usize],
+    etag: &str,
 ) -> Result<()> {
-    if positions.is_empty() {
+    check_library_writes()?;
+    if indices.is_empty() {
         return Ok(());
     }
-    let mut ordered: Vec<i64> = positions.to_vec();
+    let mut ordered = indices.to_vec();
     ordered.sort_unstable_by(|a, b| b.cmp(a));
     ordered.dedup();
     let indices = ordered
         .iter()
-        .map(|index| index.to_string())
+        .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(",");
     let country_code = client.country_code().to_string();
-    with_playlist_etag(client, playlist_uuid, |http, api_base, bearer, etag| {
+    send_at_revision(client, |http, api_base, bearer| {
         http.delete(format!(
-            "{}/playlists/{}/items/{}?countryCode={}",
-            api_base, playlist_uuid, indices, country_code
+            "{api_base}/playlists/{playlist_uuid}/items/{indices}?countryCode={country_code}"
         ))
         .header("Authorization", bearer)
         .header("If-None-Match", etag)
@@ -520,18 +723,20 @@ pub async fn remove_playlist_items(
     .await
 }
 
-/// Move a playlist item from one zero-based index to another.
+/// Move the TIDAL item at index `from` to `to` (measured after lifting the item
+/// out), at revision `etag`.
 pub async fn move_playlist_item(
     client: &TidalClient,
     playlist_uuid: &str,
-    from: i64,
-    to: i64,
+    from: usize,
+    to: usize,
+    etag: &str,
 ) -> Result<()> {
+    check_library_writes()?;
     let country_code = client.country_code().to_string();
-    with_playlist_etag(client, playlist_uuid, |http, api_base, bearer, etag| {
+    send_at_revision(client, |http, api_base, bearer| {
         http.post(format!(
-            "{}/playlists/{}/items/{}?countryCode={}",
-            api_base, playlist_uuid, from, country_code
+            "{api_base}/playlists/{playlist_uuid}/items/{from}?countryCode={country_code}"
         ))
         .header("Authorization", bearer)
         .header("If-None-Match", etag)
@@ -547,6 +752,7 @@ pub async fn rename_playlist(
     title: &str,
     description: Option<&str>,
 ) -> Result<()> {
+    check_library_writes()?;
     let description = description.unwrap_or_default().to_string();
     let country_code = client.country_code().to_string();
     with_playlist_etag(client, playlist_uuid, |http, api_base, bearer, etag| {
@@ -567,6 +773,13 @@ pub async fn rename_playlist(
 /// Delete a TIDAL playlist outright. No ETag: there is nothing left to conflict
 /// with once the whole playlist is going away.
 pub async fn delete_playlist(client: &TidalClient, playlist_uuid: &str) -> Result<()> {
+    check_library_writes()?;
+    delete_playlist_unchecked(client, playlist_uuid).await
+}
+
+/// `delete_playlist` without the write gate, for removing a half-saved
+/// snapshot that was created under the gate a moment earlier.
+async fn delete_playlist_unchecked(client: &TidalClient, playlist_uuid: &str) -> Result<()> {
     let country_code = client.country_code().to_string();
     let resp = client
         .send_authed(|http, api_base, bearer| {

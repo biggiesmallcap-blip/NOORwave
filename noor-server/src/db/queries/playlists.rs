@@ -151,7 +151,7 @@ pub fn touch_playlist(conn: &Connection, playlist_id: i64) -> Result<()> {
 
 /// The playlist's track ids in position order. Positions may have gaps; this
 /// returns the sequence, not the positions.
-pub(super) fn playlist_track_order(conn: &Connection, playlist_id: i64) -> Result<Vec<i64>> {
+pub fn playlist_track_order(conn: &Connection, playlist_id: i64) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position ASC",
     )?;
@@ -253,6 +253,28 @@ pub fn move_playlist_track(conn: &Connection, playlist_id: i64, from: i64, to: i
     Ok(())
 }
 
+/// The ids in `track_ids` that an add would actually insert: not already in
+/// the playlist, first occurrence only, in request order. A TIDAL-mirrored add
+/// sends exactly these to TIDAL so both sides gain the same tracks.
+pub fn new_playlist_track_ids(
+    conn: &Connection,
+    playlist_id: i64,
+    track_ids: &[i64],
+) -> Result<Vec<i64>> {
+    let existing: std::collections::HashSet<i64> = {
+        let mut stmt =
+            conn.prepare("SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1")?;
+        stmt.query_map(params![playlist_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    let mut seen = std::collections::HashSet::new();
+    Ok(track_ids
+        .iter()
+        .copied()
+        .filter(|id| !existing.contains(id) && seen.insert(*id))
+        .collect())
+}
+
 /// Bulk-insert tracks into a playlist, skipping any already present.
 /// Returns the number of tracks actually inserted.
 pub fn add_tracks_to_playlist(
@@ -264,22 +286,7 @@ pub fn add_tracks_to_playlist(
         return Ok(0);
     }
 
-    // Find which tracks are already in the playlist
-    let existing: std::collections::HashSet<i64> = {
-        let mut stmt =
-            conn.prepare("SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1")?;
-        stmt.query_map(params![playlist_id], |row| row.get(0))?
-            .collect::<Result<_, _>>()?
-    };
-
-    let to_insert: Vec<i64> = {
-        let mut seen = std::collections::HashSet::new();
-        track_ids
-            .iter()
-            .copied()
-            .filter(|id| !existing.contains(id) && seen.insert(*id))
-            .collect()
-    };
+    let to_insert = new_playlist_track_ids(conn, playlist_id, track_ids)?;
 
     if to_insert.is_empty() {
         return Ok(0);
