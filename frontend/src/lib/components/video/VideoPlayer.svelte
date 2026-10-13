@@ -39,6 +39,13 @@
 		saved?: boolean;
 		savePending?: boolean;
 		onToggleSaved?: () => void;
+		/** Seconds into the video where a new source's first load starts (a
+		 *  channel tune-in joins mid-video). Steps and replays start at 0. */
+		startAt?: number;
+		/** A channel is on air and the stage draws its own credits: the
+		 *  player's title strip and "Coming next" pill stand down, and the
+		 *  fullscreen pills make room for the channel bug. */
+		broadcast?: boolean;
 	};
 
 	let {
@@ -67,6 +74,8 @@
 		saved = false,
 		savePending = false,
 		onToggleSaved,
+		startAt = 0,
+		broadcast = false,
 	}: Props = $props();
 
 	let container: HTMLDivElement | null = $state(null);
@@ -233,7 +242,9 @@
 		if (!nextSrc) return;
 
 		if (HlsClass.isSupported()) {
-			const instance = new HlsClass({ enableWorker: true });
+			// startPosition: a mid-video start fetches its own segments first,
+			// not the opening ones it is about to skip.
+			const instance = new HlsClass({ enableWorker: true, startPosition: resumeAt > 0 ? resumeAt : -1 });
 			hls = instance;
 			instance.on(HlsClass.Events.MANIFEST_PARSED, () => {
 				levels = instance.levels
@@ -408,7 +419,7 @@
 			}
 		};
 		document.addEventListener('fullscreenchange', fullscreenListener);
-		await load(src);
+		await load(src, startAt);
 	});
 
 	// Host-driven fullscreen: mirror the host's state.
@@ -420,7 +431,7 @@
 
 	$effect(() => {
 		if (!mounted || retrying || src === currentSrc) return;
-		void load(src);
+		void load(src, startAt);
 	});
 
 	$effect(() => {
@@ -525,13 +536,15 @@
 		<div class="status error" role="alert">{displayError}</div>
 	{/if}
 
-	<div class="top-meta">
-		<strong>{title}</strong>
-		{#if artist}<span>{artist}</span>{/if}
-	</div>
+	{#if !broadcast}
+		<div class="top-meta">
+			<strong>{title}</strong>
+			{#if artist}<span>{artist}</span>{/if}
+		</div>
+	{/if}
 
 	{#if fullscreen}
-		<div class="fs-actions">
+		<div class="fs-actions" class:below-bug={broadcast}>
 			{#if onToggleSaved}
 				<button type="button" class="fs-pill heart" class:saved onclick={() => onToggleSaved?.()} disabled={savePending}
 					aria-pressed={saved} aria-label={saved ? 'Remove video from likes' : 'Save video to likes'}
@@ -543,7 +556,7 @@
 		{#if queueOpen}<FullscreenVideoQueue onClose={closeQueue} />{/if}
 	{/if}
 
-	{#if autoplayNext && upNextTitle && upNextVisible}
+	{#if autoplayNext && upNextTitle && upNextVisible && !broadcast}
 		<div class="up-next-pill">
 			<span>Coming next</span>
 			<strong>{upNextArtist ? `${upNextArtist} - ${upNextTitle}` : upNextTitle}</strong>
@@ -855,6 +868,11 @@
 		display: flex;
 		gap: 8px;
 		transition: opacity var(--motion-base);
+	}
+
+	/* On air the channel bug owns the top right corner. */
+	.fs-actions.below-bug {
+		top: 64px;
 	}
 
 	.fs-pill {
