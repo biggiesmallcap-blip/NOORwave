@@ -457,15 +457,17 @@
       const entries = await api.resolveTidalBulk(ids, true);
       if (seq !== loadSeq || !detail) return;
       const byId = new Map(entries.map((e) => [e.spotifyId, e.tidal]));
-      const before = playableCount;
+      // A doubtful match that firms up counts as found, not just new ones.
+      let found = 0;
       detail = {
         ...detail,
         tracks: detail.tracks.map((t) => {
           const next = t.spotifyId ? byId.get(t.spotifyId) : undefined;
-          return next ? { ...t, tidal: next } : t;
+          if (!next) return t;
+          if (next.status === 'resolved' && t.tidal.status !== 'resolved') found += 1;
+          return { ...t, tidal: next };
         }),
       };
-      const found = playableCount - before;
       showToast(
         found > 0 ? `Found ${found} more on TIDAL.` : 'No new matches on TIDAL yet.',
         found > 0 ? 'success' : 'info',

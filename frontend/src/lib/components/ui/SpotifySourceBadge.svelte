@@ -25,7 +25,7 @@
 		color: #1ed760;
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-semibold);
-		line-height: 1.2;
+		line-height: var(--line-height-tight);
 		white-space: nowrap;
 	}
 </style>
