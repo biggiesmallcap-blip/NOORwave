@@ -378,7 +378,7 @@ type GraphCache = Option<(String, Instant, Arc<ArtistGraph>)>;
 static GRAPH_CACHE: Mutex<GraphCache> = Mutex::new(None);
 
 /// The database file a connection reads, None for in-memory databases.
-fn cache_key(conn: &Connection) -> Option<String> {
+pub(super) fn cache_key(conn: &Connection) -> Option<String> {
     conn.path()
         .filter(|path| !path.is_empty())
         .map(str::to_owned)
@@ -519,7 +519,8 @@ pub fn load_artist_videos(conn: &Connection) -> Result<BTreeMap<i64, ArtistVideo
     Ok(out)
 }
 
-fn load_popularity(conn: &Connection) -> Result<HashMap<i64, i64>> {
+/// TIDAL popularity of every artist the ledger has one for.
+pub(super) fn load_popularity(conn: &Connection) -> Result<HashMap<i64, i64>> {
     let mut stmt = conn.prepare(
         "SELECT artist_tidal_id, popularity FROM video_artist_state WHERE popularity IS NOT NULL",
     )?;

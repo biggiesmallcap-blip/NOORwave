@@ -1,5 +1,6 @@
 //! The Atlas: the whole map in one columnar payload, lazy names, artist
-//! and scene cards, probes into the crawler, and routes between artists.
+//! and scene cards, probes into the crawler, routes between artists and
+//! journeys (collab chains, somewhere new).
 //!
 //! Every read is local: the derived tables from services::video_intel plus
 //! the listener's light, computed per request. Only a probe reaches the
@@ -18,9 +19,11 @@ use serde_json::{Value, json};
 
 use crate::SharedState;
 use crate::db::Database;
+use crate::services::video_air::day;
 use crate::services::video_discovery::crawler::{self, Urgent};
 use crate::services::video_discovery::setting::{self as discovery_setting, DiscoverySetting};
 use crate::services::video_discovery::{artist_state, roots};
+use crate::services::video_intel::journey::{self, COLLAB_MAX_STEPS};
 use crate::services::video_intel::layout::MAP_SIZE;
 use crate::services::video_intel::light::{self, LightMap};
 use crate::services::video_intel::scenes::{self, MIN_PROGRAMMABLE_S, VARIOUS_ARTISTS_ID};
@@ -171,6 +174,84 @@ struct AtlasRouteStop {
 pub(super) struct AtlasRouteResponse {
     found: bool,
     stops: Vec<AtlasRouteStop>,
+}
+
+#[derive(Debug, Serialize)]
+struct JourneyStop {
+    artist_id: i64,
+    name: String,
+    light: u8,
+    video: Option<VideoSetItem>,
+    why: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JourneyDestination {
+    scene_id: i64,
+    name: String,
+}
+
+/// `AtlasJourneyResponse` on the wire: every field always present.
+#[derive(Debug, Serialize)]
+pub(super) struct AtlasJourneyResponse {
+    found: bool,
+    kind: &'static str,
+    title: String,
+    /// Somewhere new only.
+    destination: Option<JourneyDestination>,
+    stops: Vec<JourneyStop>,
+    reason: Option<String>,
+}
+
+impl AtlasJourneyResponse {
+    fn lost(kind: &'static str, title: String, reason: impl Into<String>) -> Self {
+        Self {
+            found: false,
+            kind,
+            title,
+            destination: None,
+            stops: Vec::new(),
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum JourneyRequest {
+    Collab { from: i64, to: i64 },
+    New { from: i64, scene: Option<i64> },
+}
+
+impl JourneyRequest {
+    /// kind=collab&from&to or kind=new&from[&scene]; Err is the 400 message.
+    fn parse(params: &HashMap<String, String>) -> Result<Self, &'static str> {
+        // Absent is None, anything but a positive integer is an error.
+        let id = |name: &str| -> Result<Option<i64>, ()> {
+            match params.get(name).map(|v| v.trim()).filter(|v| !v.is_empty()) {
+                None => Ok(None),
+                Some(value) => value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|id| *id > 0)
+                    .map(Some)
+                    .ok_or(()),
+            }
+        };
+        let kind = params.get("kind").map(String::as_str);
+        if !matches!(kind, Some("collab" | "new")) {
+            return Err("kind must be collab or new");
+        }
+        let from = id("from")
+            .ok()
+            .flatten()
+            .ok_or("from must be an artist id")?;
+        if kind == Some("collab") {
+            let to = id("to").ok().flatten().ok_or("to must be an artist id")?;
+            return Ok(Self::Collab { from, to });
+        }
+        let scene = id("scene").map_err(|_| "scene must be a scene id")?;
+        Ok(Self::New { from, scene })
+    }
 }
 
 // --------------------------------------------------------------- reads
@@ -609,6 +690,205 @@ pub(super) fn route(conn: &Connection, from: i64, to: i64) -> anyhow::Result<Atl
     Ok(AtlasRouteResponse { found: true, stops })
 }
 
+/// An edge provider as the Archive's stage words it (frontend viaLabel).
+fn via_label(source: Option<&str>) -> &'static str {
+    match source {
+        Some("tidal") => "TIDAL related",
+        Some("lastfm") => "Last.fm similar",
+        Some("featured") => "Featured together",
+        Some("colist") => "Listed together",
+        _ => "Nearby",
+    }
+}
+
+pub(super) fn journey(
+    conn: &Connection,
+    request: JourneyRequest,
+) -> anyhow::Result<AtlasJourneyResponse> {
+    match request {
+        JourneyRequest::Collab { from, to } => collab_journey(conn, from, to),
+        JourneyRequest::New { from, scene } => new_journey(conn, from, scene),
+    }
+}
+
+/// Every step a video both artists are on. Stop 0 plays the start's best
+/// video (never one of the chain's links), each later stop the link video
+/// from the stop before.
+fn collab_journey(conn: &Connection, from: i64, to: i64) -> anyhow::Result<AtlasJourneyResponse> {
+    const KIND: &str = "collab";
+    let (Some(from_name), Some(to_name)) = (artist_name(conn, from)?, artist_name(conn, to)?)
+    else {
+        return Ok(AtlasJourneyResponse::lost(
+            KIND,
+            String::new(),
+            "unknown artist",
+        ));
+    };
+    let title = format!("{from_name} to {to_name}");
+    if from == to {
+        return Ok(AtlasJourneyResponse::lost(
+            KIND,
+            title,
+            "start and end are the same artist",
+        ));
+    }
+    let collab = journey::cached_collab(conn)?;
+    let facts = journey::cached_facts(conn)?;
+    // Stops in between stay on the map, so the camera can follow them.
+    let Some(chain) = collab.chain(from, to, COLLAB_MAX_STEPS, |id| facts.on_map(id)) else {
+        return Ok(AtlasJourneyResponse::lost(
+            KIND,
+            title,
+            format!("no collab chain within {COLLAB_MAX_STEPS} steps"),
+        ));
+    };
+    let links: HashSet<i64> = chain
+        .iter()
+        .filter_map(|(_, link)| link.map(|link| link.video_id))
+        .collect();
+    let opener = journey::pick_video(
+        &journey::programmable_videos(conn, from)?,
+        &HashSet::new(),
+        &links,
+    );
+    let ids: Vec<i64> = links.iter().copied().chain(opener).collect();
+    let videos = day::catalog_videos(conn, &ids)?;
+    let light = light_map(conn)?;
+    let names: Vec<String> = chain
+        .iter()
+        .map(|(id, _)| Ok(artist_name(conn, *id)?.unwrap_or_default()))
+        .collect::<anyhow::Result<_>>()?;
+    let mut stops = Vec::with_capacity(chain.len());
+    for (at, (artist_id, link)) in chain.iter().enumerate() {
+        let (video_id, why) = match link {
+            None => (opener, format!("Start: {}", names[at])),
+            Some(link) => {
+                // The link video's own artist leads; the other end is featured.
+                let (main, featured) = if link.main == *artist_id {
+                    (at, at - 1)
+                } else {
+                    (at - 1, at)
+                };
+                let main_name = videos
+                    .get(&link.video_id)
+                    .and_then(|entry| entry.video.artist_name.clone())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| names[main].clone());
+                (
+                    Some(link.video_id),
+                    format!("{main_name} with {}", names[featured]),
+                )
+            }
+        };
+        stops.push(JourneyStop {
+            artist_id: *artist_id,
+            name: names[at].clone(),
+            light: light.light(*artist_id, facts.charted(*artist_id)),
+            video: video_id
+                .and_then(|id| videos.get(&id))
+                .map(|entry| day::item(entry, &why)),
+            why,
+        });
+    }
+    Ok(AtlasJourneyResponse {
+        found: true,
+        kind: KIND,
+        title,
+        destination: None,
+        stops,
+        reason: None,
+    })
+}
+
+/// From `from` to a scene the listener has barely seen (or `scene`),
+/// through artists new to them; each stop plays its best cut not yet
+/// watched.
+fn new_journey(
+    conn: &Connection,
+    from: i64,
+    scene: Option<i64>,
+) -> anyhow::Result<AtlasJourneyResponse> {
+    const KIND: &str = "new";
+    let Some(from_name) = artist_name(conn, from)? else {
+        return Ok(AtlasJourneyResponse::lost(
+            KIND,
+            String::new(),
+            "unknown artist",
+        ));
+    };
+    let graph = scenes::cached_graph(conn)?;
+    let facts = journey::cached_facts(conn)?;
+    let light = light::load(conn, &graph)?;
+    let scene_rows = journey::scenes_seen(conn)?;
+    let scene_name = |id: i64| {
+        scene_rows
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.name.clone())
+    };
+    let trip = match journey::plan_new(&graph, &facts, &light, &scene_rows, from, scene) {
+        Ok(trip) => trip,
+        Err(reason) => {
+            let title = scene
+                .and_then(scene_name)
+                .map(|name| format!("{from_name} to {name}"))
+                .unwrap_or_default();
+            return Ok(AtlasJourneyResponse::lost(KIND, title, reason));
+        }
+    };
+    let destination = scene_name(trip.scene).unwrap_or_default();
+    let watched = journey::watched_videos(conn)?;
+    let never = HashSet::new();
+    let picks: Vec<Option<i64>> = trip
+        .path
+        .iter()
+        .map(|(id, _)| {
+            Ok(journey::pick_video(
+                &journey::programmable_videos(conn, *id)?,
+                &watched,
+                &never,
+            ))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    let ids: Vec<i64> = picks.iter().flatten().copied().collect();
+    let videos = day::catalog_videos(conn, &ids)?;
+    let last = trip.path.len() - 1;
+    let mut stops = Vec::with_capacity(trip.path.len());
+    for (at, ((artist_id, via), pick)) in trip.path.iter().zip(&picks).enumerate() {
+        let name = artist_name(conn, *artist_id)?.unwrap_or_default();
+        let level = light.light(*artist_id, facts.charted(*artist_id));
+        let why = if at == 0 {
+            format!("Start: {name}")
+        } else if at == last {
+            format!("Arriving in {destination}")
+        } else if level == light::LIT {
+            format!("You know {name}")
+        } else {
+            format!("New to you, via {}", via_label(*via))
+        };
+        stops.push(JourneyStop {
+            artist_id: *artist_id,
+            name,
+            light: level,
+            video: pick
+                .and_then(|id| videos.get(&id))
+                .map(|entry| day::item(entry, &why)),
+            why,
+        });
+    }
+    Ok(AtlasJourneyResponse {
+        found: true,
+        kind: KIND,
+        title: format!("{from_name} to {destination}"),
+        destination: Some(JourneyDestination {
+            scene_id: trip.scene,
+            name: destination,
+        }),
+        stops,
+        reason: None,
+    })
+}
+
 /// Whether a probe can and should go to the crawler.
 pub(super) fn probe_decision(
     setting: DiscoverySetting,
@@ -753,6 +1033,18 @@ pub(super) async fn get_video_atlas_route(
         ));
     }
     read(&state, move |conn| route(conn, query.from, query.to))
+        .await
+        .map(Json)
+}
+
+/// GET /api/videos/atlas/journey?kind=collab&from&to or ?kind=new&from[&scene]
+pub(super) async fn get_video_atlas_journey(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<AtlasJourneyResponse>, ApiError> {
+    let request = JourneyRequest::parse(&params)
+        .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    read(&state, move |conn| journey(conn, request))
         .await
         .map(Json)
 }
@@ -1075,6 +1367,457 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
+    /// A catalog video, optionally featuring others.
+    fn add_video(
+        conn: &Connection,
+        id: i64,
+        artist: i64,
+        featured: &[i64],
+        popularity: i64,
+    ) -> rusqlite::Result<usize> {
+        let json = json!({
+            "tidal_id": id, "title": format!("Video {id}"), "duration_s": 200,
+            "artist_id": artist, "artist_name": format!("Artist {artist}"),
+            "popularity": popularity, "featured_artist_ids": featured,
+        });
+        conn.execute(
+            "INSERT INTO video_catalog (tidal_video_id, artist_tidal_id, artist_name, item_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, artist, format!("Artist {artist}"), json.to_string()],
+        )
+    }
+
+    /// An artist on the map, in `scene` (charted) or on the ring.
+    fn add_artist(
+        conn: &Connection,
+        id: i64,
+        scene: Option<i64>,
+        videos: i64,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO video_artist_facets (artist_tidal_id, name, scene_id, x, y, videos,
+                    playable, charted)
+             VALUES (?1, ?2, ?3, 1, 1, ?4, ?4, ?5)",
+            params![
+                id,
+                format!("Artist {id}"),
+                scene,
+                videos,
+                scene.is_some() as i64
+            ],
+        )
+    }
+
+    /// Collab links only through the catalog's featured artists:
+    /// 11 -> 12 -> 13 (unpopular), 11 -> 14 -> 13 (popular), 11 -> 21 -> 22
+    /// -> 13 (a step longer), 11 -> 15 -> 13 (most popular, but 15 is off the
+    /// map); 51 features 52 and 53 on one video and 53 again on a weaker one;
+    /// 31 -> 32 -> ... -> 40 is a nine-step line. A Last.fm edge joins 11 and
+    /// 13 directly, and 11 is watched.
+    fn collab_db() -> Database {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            for (id, artist, featured, popularity) in [
+                (1100i64, 11i64, vec![], 30i64),
+                (1101, 11, vec![12], 1),
+                (1102, 11, vec![14], 50),
+                (1103, 11, vec![21], 40),
+                (1104, 11, vec![15], 45),
+                (1300, 13, vec![], 5),
+                (1301, 13, vec![12], 1),
+                (1302, 13, vec![14], 50),
+                (1303, 13, vec![15], 99),
+                (1200, 12, vec![], 5),
+                (1400, 14, vec![], 5),
+                (2101, 21, vec![22], 40),
+                (2201, 22, vec![13], 40),
+                (5101, 51, vec![52, 53], 80),
+                (5102, 51, vec![53], 10),
+                (5200, 52, vec![], 5),
+                (5300, 53, vec![], 5),
+            ] {
+                add_video(&tx, id, artist, &featured, popularity)?;
+            }
+            for step in 1..=9i64 {
+                add_video(&tx, 3100 + step, 30 + step, &[31 + step], 5)?;
+            }
+            for id in [11i64, 12, 13, 14, 21, 22, 51, 52, 53] {
+                add_artist(&tx, id, Some(1), 2)?;
+            }
+            for id in 31..=40i64 {
+                add_artist(&tx, id, Some(1), 1)?;
+            }
+            tx.execute_batch(
+                "INSERT INTO video_related_artists (seed_tidal_id, related_tidal_id, name, source, weight)
+                     VALUES (11, 13, 'x', 'lastfm', 0.9);
+                 INSERT INTO video_history (tidal_video_id, artist_tidal_id, artist_name)
+                     VALUES (1100, 11, 'Artist 11');",
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .unwrap();
+        db
+    }
+
+    fn stop_ids(journey: &Value) -> Vec<i64> {
+        journey["stops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["artist_id"].as_i64().unwrap())
+            .collect()
+    }
+
+    fn video_ids(journey: &Value) -> Vec<i64> {
+        journey["stops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["video"]["tidal_id"].as_i64().unwrap())
+            .collect()
+    }
+
+    /// (main artist, featured artists) of a catalog video.
+    fn credits(db: &Database, video: i64) -> (i64, Vec<i64>) {
+        db.with_conn(|conn| {
+            let json: String = conn.query_row(
+                "SELECT item_json FROM video_catalog WHERE tidal_video_id = ?1",
+                [video],
+                |row| row.get(0),
+            )?;
+            let item: VideoCandidate = serde_json::from_str(&json)?;
+            Ok((item.artist_id.unwrap(), item.featured_artist_ids))
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn collab_journeys_step_through_videos_both_artists_are_on() {
+        let db = collab_db();
+        let (status, trip) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=collab&from=11&to=13",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(trip["found"], true);
+        assert_eq!(trip["kind"], "collab");
+        assert_eq!(trip["title"], "Artist 11 to Artist 13");
+        assert_eq!(trip["destination"], Value::Null);
+        assert_eq!(trip["reason"], Value::Null);
+        // Fewest steps (not the Last.fm edge, not the longer popular line),
+        // the popular link on ties, never through 15 off the map.
+        assert_eq!(stop_ids(&trip), vec![11, 14, 13]);
+        let videos = video_ids(&trip);
+        assert_eq!(
+            videos,
+            vec![1104, 1102, 1302],
+            "the start never replays a link"
+        );
+        let stops = trip["stops"].as_array().unwrap();
+        for pair in stops.windows(2) {
+            let (a, b) = (
+                pair[0]["artist_id"].as_i64().unwrap(),
+                pair[1]["artist_id"].as_i64().unwrap(),
+            );
+            let (main, featured) = credits(&db, pair[1]["video"]["tidal_id"].as_i64().unwrap());
+            assert!(
+                (main == a && featured.contains(&b)) || (main == b && featured.contains(&a)),
+                "{a} and {b} are both on the link"
+            );
+        }
+        let why: Vec<&str> = stops.iter().map(|s| s["why"].as_str().unwrap()).collect();
+        assert_eq!(
+            why,
+            vec![
+                "Start: Artist 11",
+                "Artist 11 with Artist 14",
+                "Artist 13 with Artist 14"
+            ]
+        );
+        assert_eq!(stops[1]["video"]["why"], "Artist 11 with Artist 14");
+        let lights: Vec<i64> = stops.iter().map(|s| s["light"].as_i64().unwrap()).collect();
+        assert_eq!(lights, vec![3, 1, 2], "watched, charted, next to watched");
+
+        // A video by 51 features 52 and 53; the chain plays it once.
+        let (_, hub) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=collab&from=52&to=53",
+            None,
+        )
+        .await;
+        assert_eq!(stop_ids(&hub), vec![52, 51, 53]);
+        assert_eq!(video_ids(&hub), vec![5200, 5101, 5102]);
+    }
+
+    #[tokio::test]
+    async fn collab_journeys_stop_at_eight_steps_and_unknown_artists() {
+        let db = collab_db();
+        let (_, eight) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=collab&from=31&to=39",
+            None,
+        )
+        .await;
+        assert_eq!(eight["found"], true);
+        assert_eq!(stop_ids(&eight), (31..=39).collect::<Vec<i64>>());
+        let (status, nine) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=collab&from=31&to=40",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            nine,
+            json!({
+                "found": false, "kind": "collab", "title": "Artist 31 to Artist 40",
+                "destination": null, "stops": [], "reason": "no collab chain within 8 steps",
+            })
+        );
+        let (_, unknown) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=collab&from=11&to=999",
+            None,
+        )
+        .await;
+        assert_eq!(unknown["found"], false);
+        assert_eq!(unknown["reason"], "unknown artist");
+    }
+
+    /// Scenes for somewhere new, every artist on the map with programmable
+    /// videos (quality falls with the index, so `a * 10` is a's best):
+    /// 1 Home 101..108, 2 Seen 201..208 (201 and 202 watched), 3 Fresh
+    /// 301..312 (311 and 312 rank last), 4 Tiny 401..403, 5 Far 501..508,
+    /// ring artists 150 and 601..605. Cliques inside scenes; 101 - 201 -
+    /// 312 strong, 101 - 150 - 312 a little weaker, 101 - 401, and a line
+    /// 310 - 601 - ... - 605 - 501 that puts Far out of reach.
+    fn new_db() -> Database {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut members: Vec<(i64, Option<i64>, i64)> = Vec::new();
+            for (scene, ids) in [
+                (1i64, (101..=108).collect::<Vec<i64>>()),
+                (2, (201..=208).collect()),
+                (3, (301..=312).collect()),
+                (4, (401..=403).collect()),
+                (5, (501..=508).collect()),
+            ] {
+                for id in ids {
+                    let videos = if id == 311 || id == 312 { 1 } else { 4 };
+                    members.push((id, Some(scene), videos));
+                }
+            }
+            for id in [150i64, 601, 602, 603, 604, 605] {
+                members.push((id, None, 2));
+            }
+            for (id, scene, videos) in &members {
+                add_artist(&tx, *id, *scene, *videos)?;
+                for v in 0..*videos {
+                    let video = id * 10 + v;
+                    add_video(&tx, video, *id, &[], 10)?;
+                    tx.execute(
+                        "INSERT INTO video_facets (tidal_video_id, artist_tidal_id, cut, programmable,
+                                song_key, quality, popularity, duration_s)
+                         VALUES (?1, ?2, 'official', 1, ?3, ?4, 10, 200)",
+                        params![video, id, format!("{id}-{v}"), 1.0 - v as f64 * 0.1],
+                    )?;
+                }
+            }
+            for (scene, name) in [(1i64, "Home"), (2, "Seen"), (3, "Fresh"), (4, "Tiny"), (5, "Far")] {
+                let (videos, artists) = members
+                    .iter()
+                    .filter(|m| m.1 == Some(scene))
+                    .fold((0, 0), |(v, a), m| (v + m.2, a + 1));
+                tx.execute(
+                    "INSERT INTO video_scenes (scene_id, name, video_count, artist_count)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![scene, name, videos, artists],
+                )?;
+            }
+            let mut edge = tx.prepare(
+                "INSERT INTO video_related_artists (seed_tidal_id, related_tidal_id, name, source, weight)
+                 VALUES (?1, ?2, 'x', ?3, ?4)",
+            )?;
+            for scene in 1..=5i64 {
+                let ids: Vec<i64> = members
+                    .iter()
+                    .filter(|m| m.1 == Some(scene))
+                    .map(|m| m.0)
+                    .collect();
+                for (i, a) in ids.iter().enumerate() {
+                    for b in &ids[i + 1..] {
+                        edge.execute(params![a, b, "lastfm", 0.9])?;
+                    }
+                }
+            }
+            for (a, b, weight) in [
+                (101i64, 201i64, 0.9),
+                (201, 312, 0.9),
+                (101, 150, 0.8),
+                (150, 312, 0.8),
+                (101, 401, 0.9),
+                (310, 601, 0.9),
+                (601, 602, 0.9),
+                (602, 603, 0.9),
+                (603, 604, 0.9),
+                (604, 605, 0.9),
+                (605, 501, 0.9),
+            ] {
+                edge.execute(params![a, b, "tidal", weight])?;
+            }
+            drop(edge);
+            tx.execute_batch(
+                "INSERT INTO video_history (tidal_video_id, artist_tidal_id, artist_name) VALUES
+                     (2010, 201, 'Artist 201'), (2020, 202, 'Artist 202');",
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn somewhere_new_goes_to_the_least_seen_scene_in_reach_through_new_artists() {
+        let db = new_db();
+        let (status, trip) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=101",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(trip["found"], true);
+        assert_eq!(trip["kind"], "new");
+        assert_eq!(trip["reason"], Value::Null);
+        // Home is the start's own scene, Tiny too small, Far out of reach,
+        // Seen already watched: Fresh.
+        assert_eq!(
+            trip["destination"],
+            json!({ "scene_id": 3, "name": "Fresh" })
+        );
+        assert_eq!(trip["title"], "Artist 101 to Fresh");
+        let ids = stop_ids(&trip);
+        assert!((4..=8).contains(&ids.len()), "{ids:?}");
+        assert_eq!(&ids[..3], &[101, 150, 312], "around the watched 201");
+        let end = *ids.last().unwrap();
+        assert!((301..=310).contains(&end), "ends at a top artist: {end}");
+        let stops = trip["stops"].as_array().unwrap();
+        let why: Vec<&str> = stops.iter().map(|s| s["why"].as_str().unwrap()).collect();
+        assert_eq!(
+            why,
+            vec![
+                "Start: Artist 101",
+                "New to you, via TIDAL related",
+                "New to you, via TIDAL related",
+                "Arriving in Fresh"
+            ]
+        );
+        let lights: Vec<i64> = stops.iter().map(|s| s["light"].as_i64().unwrap()).collect();
+        assert_eq!(lights, vec![2, 0, 2, 1]);
+        assert!(
+            stops
+                .iter()
+                .all(|s| s["video"]["artist_id"] == s["artist_id"]
+                    && s["video"]["tidal_id"].as_i64()
+                        == Some(s["artist_id"].as_i64().unwrap() * 10)),
+            "each artist's best cut"
+        );
+        assert_eq!(stops[0]["video"]["cut"], "official");
+
+        // From a watched artist: Seen is home now, Home is the least seen in
+        // reach, and the start plays its best cut not yet watched.
+        let (_, back) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=201",
+            None,
+        )
+        .await;
+        assert_eq!(back["destination"]["name"], "Home");
+        let first = &back["stops"][0];
+        assert_eq!(
+            (first["light"].clone(), first["why"].clone()),
+            (json!(3), json!("Start: Artist 201"))
+        );
+        assert_eq!(first["video"]["tidal_id"], 2011);
+        let end = *stop_ids(&back).last().unwrap();
+        assert!((101..=108).contains(&end));
+    }
+
+    #[tokio::test]
+    async fn somewhere_new_honours_the_scene_and_validates_params() {
+        let db = new_db();
+        let (_, seen) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=101&scene=2",
+            None,
+        )
+        .await;
+        assert_eq!(seen["found"], true);
+        assert_eq!(
+            seen["destination"],
+            json!({ "scene_id": 2, "name": "Seen" })
+        );
+        let ids = stop_ids(&seen);
+        assert!((4..=8).contains(&ids.len()), "{ids:?}");
+        assert!((201..=208).contains(ids.last().unwrap()));
+        assert_eq!(seen["stops"][ids.len() - 1]["why"], "Arriving in Seen");
+
+        let (_, far) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=101&scene=5",
+            None,
+        )
+        .await;
+        assert_eq!(far["found"], false);
+        assert_eq!(far["title"], "Artist 101 to Far");
+        assert_eq!(far["reason"], "no route to Far within 8 stops");
+        let (_, unknown) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=101&scene=99",
+            None,
+        )
+        .await;
+        assert_eq!(unknown["reason"], "unknown scene");
+        let (_, nobody) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=999",
+            None,
+        )
+        .await;
+        assert_eq!(nobody["reason"], "unknown artist");
+
+        for uri in [
+            "/api/videos/atlas/journey?from=101",
+            "/api/videos/atlas/journey?kind=route&from=101",
+            "/api/videos/atlas/journey?kind=new",
+            "/api/videos/atlas/journey?kind=new&from=abc",
+            "/api/videos/atlas/journey?kind=new&from=101&scene=x",
+            "/api/videos/atlas/journey?kind=collab&from=101",
+            "/api/videos/atlas/journey?kind=collab&from=0&to=101",
+        ] {
+            let (status, body) = call(&db, "GET", uri, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert!(body["error"].is_string(), "{uri}");
+        }
+    }
+
     #[test]
     fn best_cuts_follow_catalog_facets_once_they_exist() {
         let db = seeded_db();
@@ -1134,6 +1877,100 @@ mod tests {
             probe_decision(DiscoverySetting::Off, false, None).reason,
             Some("discovery off")
         );
+    }
+
+    /// Journey latency and examples over a copy of a real database that
+    /// already holds a build, opened read-only (a debug build is fine):
+    ///   NOOR_INTEL_DB=<copy> cargo test -p noor-server --bin noor-server real_catalog_journeys -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_catalog_journeys() {
+        use rusqlite::OpenFlags;
+        let Ok(path) = std::env::var("NOOR_INTEL_DB") else {
+            eprintln!("NOOR_INTEL_DB not set");
+            return;
+        };
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        // The caches a cold first journey builds, one at a time.
+        let started = std::time::Instant::now();
+        scenes::cached_graph(&conn).unwrap();
+        eprintln!("artist graph: {} ms", started.elapsed().as_millis());
+        let started = std::time::Instant::now();
+        journey::cached_facts(&conn).unwrap();
+        eprintln!("map facts: {} ms", started.elapsed().as_millis());
+        let started = std::time::Instant::now();
+        journey::cached_collab(&conn).unwrap();
+        eprintln!("collab graph: {} ms", started.elapsed().as_millis());
+        let started = std::time::Instant::now();
+        light_map(&conn).unwrap();
+        eprintln!("light: {} ms", started.elapsed().as_millis());
+        let id_of = |name: &str| -> i64 {
+            conn.query_row(
+                "SELECT artist_tidal_id FROM video_artist_facets WHERE name = ?1
+                  ORDER BY videos DESC LIMIT 1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let run = |label: String, request: JourneyRequest, rounds: usize| {
+            let mut times = Vec::new();
+            let mut last = None;
+            for _ in 0..rounds {
+                let started = std::time::Instant::now();
+                let response = journey(&conn, request).unwrap();
+                let bytes = serde_json::to_vec(&response).unwrap().len();
+                times.push(started.elapsed().as_millis());
+                last = Some((response, bytes));
+            }
+            let (response, bytes) = last.unwrap();
+            eprintln!(
+                "{label}: {times:?} ms, {bytes} bytes, found {} \"{}\" {}",
+                response.found,
+                response.title,
+                response.reason.as_deref().unwrap_or("")
+            );
+            for stop in &response.stops {
+                eprintln!(
+                    "    {} [{}] {} | {}",
+                    stop.name,
+                    stop.light,
+                    stop.why,
+                    stop.video
+                        .as_ref()
+                        .map_or("(no video)", |v| v.title.as_str())
+                );
+            }
+        };
+        for (from, to) in [
+            ("Drake", "Calvin Harris"),
+            ("Rihanna", "Taylor Swift"),
+            ("Drake", "Miles Davis"),
+            ("Metallica", "Bad Bunny"),
+        ] {
+            let request = JourneyRequest::Collab {
+                from: id_of(from),
+                to: id_of(to),
+            };
+            run(format!("collab {from} -> {to}"), request, 3);
+        }
+        // JAY-Z's TIDAL name is not plain ASCII; 7804 is his id.
+        for (from, id) in [
+            ("James Blake", id_of("James Blake")),
+            ("JAY-Z", 7804),
+            ("Elvis Presley", id_of("Elvis Presley")),
+            ("Metallica", id_of("Metallica")),
+        ] {
+            let request = JourneyRequest::New {
+                from: id,
+                scene: None,
+            };
+            run(format!("new from {from}"), request, 3);
+        }
     }
 
     /// Payload size and endpoint latency over a copy of a real database that

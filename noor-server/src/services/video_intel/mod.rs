@@ -18,6 +18,7 @@ pub mod concerts;
 pub mod cuts;
 pub mod era;
 pub mod job;
+pub mod journey;
 pub mod layout;
 pub mod light;
 pub mod link;

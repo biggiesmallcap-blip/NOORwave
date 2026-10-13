@@ -795,6 +795,10 @@ pub fn api_routes(state: SharedState) -> Router {
             get(video_atlas_routes::get_video_atlas_route),
         )
         .route(
+            "/api/videos/atlas/journey",
+            get(video_atlas_routes::get_video_atlas_journey),
+        )
+        .route(
             "/api/videos/channels",
             get(video_channel_routes::get_video_channels),
         )

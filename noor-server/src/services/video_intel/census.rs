@@ -169,24 +169,28 @@ pub fn read(conn: &Connection, running: bool) -> Result<Census> {
     })
 }
 
+/// Distinct watched videos per scene, by the scene of each video's artist.
+pub fn seen_per_scene(conn: &Connection) -> Result<HashMap<i64, i64>> {
+    let mut seen: HashMap<i64, i64> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT a.scene_id, COUNT(DISTINCT h.tidal_video_id)
+           FROM video_history h
+           LEFT JOIN video_facets f ON f.tidal_video_id = h.tidal_video_id
+           JOIN video_artist_facets a
+             ON a.artist_tidal_id = COALESCE(f.artist_tidal_id, h.artist_tidal_id)
+          WHERE a.scene_id IS NOT NULL
+          GROUP BY a.scene_id",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        seen.insert(row.get(0)?, row.get(1)?);
+    }
+    Ok(seen)
+}
+
 /// Every scene with what the listener has seen and lit in it.
 pub fn scene_rows(conn: &Connection, lights: &Lights) -> Result<Vec<SceneRow>> {
-    let mut seen: HashMap<i64, i64> = HashMap::new();
-    {
-        let mut stmt = conn.prepare(
-            "SELECT a.scene_id, COUNT(DISTINCT h.tidal_video_id)
-               FROM video_history h
-               LEFT JOIN video_facets f ON f.tidal_video_id = h.tidal_video_id
-               JOIN video_artist_facets a
-                 ON a.artist_tidal_id = COALESCE(f.artist_tidal_id, h.artist_tidal_id)
-              WHERE a.scene_id IS NOT NULL
-              GROUP BY a.scene_id",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            seen.insert(row.get(0)?, row.get(1)?);
-        }
-    }
+    let seen = seen_per_scene(conn)?;
     let mut lit: HashMap<i64, i64> = HashMap::new();
     {
         let mut stmt = conn.prepare(
