@@ -1148,6 +1148,43 @@ fn catalogue_missing_unavailable_favorite_is_unresolved_but_verified_unlike_clea
 }
 
 #[test]
+fn reresolve_verifies_a_same_isrc_release_for_a_row_that_never_recorded_explicit() {
+    let db = fresh_migrated_db();
+    db.with_conn(|conn| {
+        let mut old = test_tidal_track(10, "And Now He Has Wings");
+        old.isrc = Some("USKHG2021204".into());
+        let local = insert_tidal_track(conn, &old, false, false, None)?.unwrap();
+        // Older catalogue rows never stored explicit; TIDAL always sends it.
+        conn.execute(
+            "UPDATE tracks SET catalogue_explicit=NULL WHERE id=?1",
+            [local],
+        )?;
+        let mut reissue = old.clone();
+        reissue.id = 11;
+        reissue
+            .extra
+            .insert("explicit".into(), serde_json::json!(false));
+        assert!(verified_alias_of(conn, local, &reissue)?);
+
+        // A recorded explicit flag still has to agree.
+        conn.execute(
+            "UPDATE tracks SET catalogue_explicit=1 WHERE id=?1",
+            [local],
+        )?;
+        assert!(!verified_alias_of(conn, local, &reissue)?);
+
+        // Without a shared ISRC there is no recording identity to go on.
+        conn.execute(
+            "UPDATE tracks SET catalogue_explicit=NULL, isrc=NULL WHERE id=?1",
+            [local],
+        )?;
+        assert!(!verified_alias_of(conn, local, &reissue)?);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn catalogue_alias_identity_refresh_and_owner_guards_prevent_wrong_recording() {
     let db = fresh_migrated_db();
     db.with_conn(|conn| {

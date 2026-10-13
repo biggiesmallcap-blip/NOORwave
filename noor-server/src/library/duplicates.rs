@@ -552,7 +552,9 @@ pub fn decide_import(incoming: &IncomingTrack, candidates: &[ExistingCandidate])
                 incoming.explicit,
                 &cand.title,
                 cand.version.as_deref(),
-                cand.explicit,
+                // Older rows never recorded explicit (NULL): unknown, not a
+                // conflict. The shared ISRC above still carries identity.
+                cand.explicit.or(incoming.explicit),
             )
         {
             return ImportDecision::LinkAlias {

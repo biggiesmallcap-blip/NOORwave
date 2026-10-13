@@ -1984,6 +1984,39 @@ pub(crate) fn sqlite_database_locked(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether `full` is the same recording as local row `track_id` under another
+/// TIDAL id, strongly enough to keep it as an alias.
+pub(crate) fn verified_alias_of(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+    full: &crate::services::tidal::client::TidalTrack,
+) -> anyhow::Result<bool> {
+    let incoming = crate::library::duplicates::IncomingTrack {
+        tidal_id: full.id,
+        title: &full.title,
+        artist_name: &full.artist.name,
+        isrc: full.isrc.as_deref(),
+        duration_ms: full.duration * 1000,
+        version: full.extra.get("version").and_then(|v| v.as_str()),
+        explicit: full.extra.get("explicit").and_then(|v| v.as_bool()),
+    };
+    let candidates = crate::library::duplicates::fetch_import_candidates(
+        conn,
+        full.id,
+        full.artist.id,
+        full.isrc.as_deref(),
+        incoming.duration_ms,
+    )?;
+    let same = candidates
+        .into_iter()
+        .filter(|c| c.track_id == track_id)
+        .collect::<Vec<_>>();
+    Ok(matches!(
+        crate::library::duplicates::decide_import(&incoming, &same),
+        crate::library::duplicates::ImportDecision::LinkAlias { .. }
+    ))
+}
+
 /// Returns `Some(new_tidal_id)` when the row was healed with a fresh, verified
 /// id; `None` when no better id was found. Errors only on infrastructure
 /// failures (DB, no TIDAL session), never on "couldn't find a match".
@@ -2049,32 +2082,7 @@ pub(crate) async fn reresolve_tidal_id(
     }
 
     let full = client.get_track(candidate.id).await?;
-    let verified = db.with_conn(|conn| {
-        let incoming = crate::library::duplicates::IncomingTrack {
-            tidal_id: full.id,
-            title: &full.title,
-            artist_name: &full.artist.name,
-            isrc: full.isrc.as_deref(),
-            duration_ms: full.duration * 1000,
-            version: full.extra.get("version").and_then(|v| v.as_str()),
-            explicit: full.extra.get("explicit").and_then(|v| v.as_bool()),
-        };
-        let candidates = crate::library::duplicates::fetch_import_candidates(
-            conn,
-            full.id,
-            full.artist.id,
-            full.isrc.as_deref(),
-            incoming.duration_ms,
-        )?;
-        let same = candidates
-            .into_iter()
-            .filter(|c| c.track_id == track_id)
-            .collect::<Vec<_>>();
-        Ok(matches!(
-            crate::library::duplicates::decide_import(&incoming, &same),
-            crate::library::duplicates::ImportDecision::LinkAlias { .. }
-        ))
-    })?;
+    let verified = db.with_conn(|conn| verified_alias_of(conn, track_id, &full))?;
     if !verified {
         return Ok(None);
     }
