@@ -28,6 +28,7 @@
   import { tidalStatus } from '$lib/stores/tidal';
   import DetailHero from '$lib/components/ui/DetailHero.svelte';
   import ActionBar from '$lib/components/ui/ActionBar.svelte';
+  import SpotifySourceBadge from '$lib/components/ui/SpotifySourceBadge.svelte';
 
   const spotifyId = $derived($page.params.id ?? '');
 
@@ -248,7 +249,7 @@
   {:else if detail}
     {@const heroDetail = detail as SpotifyAlbumDetail}
     <DetailHero
-      eyebrow="Spotify album · ephemeral"
+      eyebrow="External album"
       title={heroDetail.title ?? '-'}
       artwork={heroDetail.thumbnail}
       backdrop={heroDetail.thumbnail}
@@ -256,6 +257,7 @@
       variant="immersive"
     >
       {#snippet meta()}
+        <SpotifySourceBadge />
           {#if heroDetail.primaryArtist}
             <!-- Artist pages are TIDAL + local library only; the spotify-artist
                  route was an unreachable dead layer and has been removed. -->

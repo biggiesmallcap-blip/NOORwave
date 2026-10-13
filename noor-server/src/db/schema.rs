@@ -77,6 +77,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_073,
     MIGRATION_074,
     MIGRATION_075,
+    MIGRATION_076,
 ];
 
 // Radio continuation and one queue-source switch.
@@ -94,6 +95,16 @@ UPDATE playback_state
 SET automix_discover_new = MAX(automix_discover_new, automix_allow_external),
     automix_allow_external = 0,
     automix_use_learning = 1;
+"#;
+
+// A playlist saved from Spotify remembers the Spotify playlist it came from,
+// so the external playlist page can show the saved copy and Update appends to
+// it instead of saving a duplicate. NULL for every other playlist.
+// Runs inside the >= 69 migration transaction: no BEGIN/COMMIT here.
+const MIGRATION_076: &str = r#"
+ALTER TABLE playlists ADD COLUMN spotify_source_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_playlists_spotify_source
+    ON playlists(spotify_source_id) WHERE spotify_source_id IS NOT NULL;
 "#;
 
 // Global "Not for me" feedback: a track or artist the listener never wants

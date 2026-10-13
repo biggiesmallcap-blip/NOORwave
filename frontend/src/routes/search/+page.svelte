@@ -41,6 +41,8 @@
   import SearchField from '$lib/search/ui/SearchField.svelte'
   import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte'
   import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte'
+  import TidalCollectionPopup from '$lib/components/playlist/TidalCollectionPopup.svelte'
+  import { buildTidalCollectionMenu } from '$lib/player/tidal_collection_menu'
   import RailNavigation from '$lib/components/ui/RailNavigation.svelte'
 
   const RECENT_KEY = 'noor_recent_searches'
@@ -1007,9 +1009,16 @@
     ]
   }
 
+  // A TIDAL playlist card opens its track list, like the Discover rails; the
+  // corner button plays it.
+  let playlistPopup = $state<TidalSearchPlaylist | null>(null)
+
   function tidalPlaylistMenuItems(playlist: TidalSearchPlaylist): MenuItem[] {
     return [
-      { label: 'Play', icon: '▶', onSelect: () => void playTidalPlaylist(playlist.uuid) },
+      ...buildTidalCollectionMenu({
+        onOpen: () => { playlistPopup = playlist },
+        onPlay: () => void playTidalPlaylist(playlist.uuid),
+      }),
       downloadMenuItem((format) => void downloadTidalPlaylist(playlist.uuid, format), 'Download playlist'),
     ]
   }
@@ -1873,8 +1882,8 @@
                 class="album-card"
                 role="button"
                 tabindex="0"
-                onclick={() => void playTidalPlaylist(playlist.uuid)}
-                onkeydown={(e) => e.key === 'Enter' && void playTidalPlaylist(playlist.uuid)}
+                onclick={() => { playlistPopup = playlist }}
+                onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); playlistPopup = playlist } }}
                 oncontextmenu={(e) => openSearchContextMenu(e, tidalPlaylistMenuItems(playlist), playlist.title)}
               >
                 <div class="art-wrap">
@@ -2171,6 +2180,14 @@
   {/if}
   </div>
 </div>
+
+{#if playlistPopup}
+  {#key playlistPopup.uuid}
+    <TidalCollectionPopup id={playlistPopup.uuid} kind="playlist" title={playlistPopup.title}
+      subtitle={playlistPopup.description} artworkUrl={playlistPopup.artwork_url}
+      onClose={() => playlistPopup = null} />
+  {/key}
+{/if}
 
 <style>
   /* Results motion (audit "Motion"): the previous query's results dim while

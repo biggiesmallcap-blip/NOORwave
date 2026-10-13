@@ -4508,3 +4508,42 @@ fn tidal_mix_sightings_feed_the_sighted_lane_with_their_source() {
             .all(|row| row.source.as_deref() == Some(TIDAL_MIX_SIGHTING_SOURCE))
     );
 }
+
+#[test]
+fn spotify_source_playlist_links_the_saved_copy() {
+    let conn = Connection::open_in_memory().expect("in-memory db");
+    schema::run_migrations(&conn).expect("migrations");
+    conn.execute_batch(
+        r#"
+        INSERT INTO playlists (id, name, is_smart, is_synced) VALUES (1, 'Local', 0, 0);
+        INSERT INTO playlists (id, name, is_smart, is_synced) VALUES (2, 'From Spotify', 0, 0);
+    "#,
+    )
+    .unwrap();
+
+    assert!(
+        find_spotify_source_playlist(&conn, "37i9dQZF1E")
+            .unwrap()
+            .is_none()
+    );
+
+    set_spotify_source(&conn, 2, "37i9dQZF1E").unwrap();
+    let saved = find_spotify_source_playlist(&conn, "37i9dQZF1E")
+        .unwrap()
+        .expect("linked playlist");
+    assert_eq!(saved.id, 2);
+    assert!(
+        find_spotify_source_playlist(&conn, "other")
+            .unwrap()
+            .is_none()
+    );
+
+    // A deleted copy no longer counts as saved.
+    conn.execute("DELETE FROM playlists WHERE id = 2", [])
+        .unwrap();
+    assert!(
+        find_spotify_source_playlist(&conn, "37i9dQZF1E")
+            .unwrap()
+            .is_none()
+    );
+}

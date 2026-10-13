@@ -14,6 +14,8 @@
 	import DetailHero from '$lib/components/ui/DetailHero.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import AlbumPopup from '$lib/components/album/AlbumPopup.svelte';
+	import TidalCollectionPopup from '$lib/components/playlist/TidalCollectionPopup.svelte';
+	import { buildTidalCollectionMenu } from '$lib/player/tidal_collection_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildAlbumMenu } from '$lib/player/album_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -29,6 +31,8 @@
 	let loadSeq = 0;
 	/** The album tile whose detail popup is open, if any. */
 	let albumPopupItem = $state<TidalHomeItem | null>(null);
+	/** The playlist tile whose track list popup is open, if any. */
+	let playlistPopupItem = $state<TidalHomeItem | null>(null);
 
 	$effect(() => {
 		const id = moduleId;
@@ -77,7 +81,7 @@
 			return;
 		}
 		if (item.kind === 'playlist') {
-			void playTidalPlaylist(item.id);
+			playlistPopupItem = item;
 			return;
 		}
 	}
@@ -103,11 +107,10 @@
 		openContextMenu(
 			event,
 			[
-				{
-					label: 'Play playlist',
-					icon: '▶',
-					onSelect: () => { void playTidalPlaylist(item.id); }
-				},
+				...buildTidalCollectionMenu({
+					onOpen: () => { playlistPopupItem = item; },
+					onPlay: () => void playTidalPlaylist(item.id)
+				}),
 				downloadMenuItem((format) => void downloadTidalPlaylist(item.id, format), 'Download playlist')
 			],
 			item.title
@@ -144,6 +147,7 @@
 
 	function ariaLabelFor(item: TidalHomeItem): string {
 		if (item.kind === 'album') return `Open album ${item.title}`;
+		if (item.kind === 'playlist') return `Open playlist ${item.title}`;
 		return `Play ${item.title}`;
 	}
 
@@ -260,6 +264,14 @@
 			}}
 			onClose={() => (albumPopupItem = null)}
 		/>
+	{/key}
+{/if}
+
+{#if playlistPopupItem}
+	{#key playlistPopupItem.id}
+		<TidalCollectionPopup id={playlistPopupItem.id} kind="playlist" title={playlistPopupItem.title}
+			subtitle={playlistPopupItem.creator_name} artworkUrl={playlistPopupItem.artwork_url}
+			onClose={() => (playlistPopupItem = null)} />
 	{/key}
 {/if}
 
