@@ -590,6 +590,8 @@ pub fn select_seeded_batch(
             artwork_url: video.artwork_url.clone(),
             quality: video.quality.clone(),
             explicit: video.explicit,
+            cut: None,
+            song_year: None,
             kind: "Music Video".into(),
             why: match lane {
                 SourceLane::Seed => "More from this artist",
@@ -686,6 +688,8 @@ pub fn select_batch(
             artwork_url: video.artwork_url.clone(),
             quality: video.quality.clone(),
             explicit: video.explicit,
+            cut: None,
+            song_year: None,
             kind: "Music Video".into(),
             why: String::new(),
         });
@@ -806,6 +810,8 @@ mod tests {
             artwork_url: None,
             quality: None,
             explicit: None,
+            cut: None,
+            song_year: None,
             kind: "Music Video".into(),
             why: String::new(),
         };

@@ -270,6 +270,8 @@ pub fn to_item(video: &VideoCandidate) -> VideoSetItem {
             .clone()
             .unwrap_or_else(|| "Music Video".into()),
         why: String::new(),
+        cut: None,
+        song_year: None,
     }
 }
 
