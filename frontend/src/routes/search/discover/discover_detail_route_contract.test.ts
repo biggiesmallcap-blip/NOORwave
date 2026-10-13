@@ -67,11 +67,11 @@ describe('TIDAL discover detail route contract', () => {
 
 	test('keeps shelf item actions wired through shared TIDAL helpers', () => {
 		expect(source).toContain('void playTidalTrackNow(tidalHomeItemToPlayable(item));');
-		expect(source).toContain('void playTidalPlaylist(item.id);');
+		expect(source).toContain('onPlay: () => void playTidalPlaylist(item.id)');
 		expect(source).toContain('openContextMenu(event, buildTidalTrackMenu(tidalHomeItemToPlayable(item)), item.title);');
 		expect(source).toContain('openContextMenu(event, buildAlbumMenu({');
 		expect(source).toContain('openContextMenu(event, buildArtistMenu({');
-		expect(source).toContain("label: 'Play playlist'");
+		expect(source).toContain('...buildTidalCollectionMenu({');
 		expect(source).toContain('event.preventDefault();');
 		expect(source).toContain('event.stopPropagation();');
 		expect(source).not.toContain('$:');
@@ -89,5 +89,12 @@ describe('TIDAL discover detail route contract', () => {
 		// Passed so the artist name inside the popup is a working link; a
 		// TIDAL-only album has no local artist id to derive one from.
 		expect(source).toContain('artistTidalId={albumPopupItem.artist_id}');
+	});
+
+	test('playlist tiles in the View all grid open the track list popup', () => {
+		// Same as the shelf rail: a playlist tile opens its track list; Play
+		// stays in the popup and the right-click menu.
+		expect(source).toContain('playlistPopupItem = item;');
+		expect(source).toContain('<TidalCollectionPopup id={playlistPopupItem.id} kind="playlist"');
 	});
 });

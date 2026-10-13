@@ -8,6 +8,9 @@
 	import MediaRail from '$lib/components/ui/MediaRail.svelte';
 	import PlayOverlay from '$lib/components/ui/PlayOverlay.svelte';
 	import SectionHeader from '$lib/components/ui/SectionHeader.svelte';
+	import TidalCollectionPopup from '$lib/components/playlist/TidalCollectionPopup.svelte';
+	import { openContextMenu } from '$lib/stores/context_menu';
+	import { buildTidalCollectionMenu } from '$lib/player/tidal_collection_menu';
 
 	type State = 'loading' | 'ready' | 'empty' | 'disconnected' | 'error';
 
@@ -25,6 +28,9 @@
 	let refreshing = $state(false);
 	let lastRefreshFailed = $state(false);
 	let errorMsg = $state<string>('');
+	// Stations are TIDAL mixes: the card opens the same track list quick view
+	// as Music Mixes, and the corner button plays straight away.
+	let selectedStation = $state<TidalMix | null>(null);
 
 	// The subscription is the sole writer of stations/viewState. Svelte calls it
 	// immediately with the current (hydrated) state, then on every revalidate.
@@ -74,15 +80,25 @@
 		viewState = stations.length > 0 ? 'ready' : 'loading';
 		void stationsQuery.refresh().catch(() => {});
 	}
+
+	function stationMenu(event: MouseEvent, station: TidalMix) {
+		openContextMenu(event, buildTidalCollectionMenu({
+			onOpen: () => { selectedStation = station; },
+			onPlay: () => void playTidalMix(station.id),
+		}), station.title);
+	}
 </script>
 
 {#snippet stationCard(station: TidalMix)}
-	<button
-		type="button"
+	<div
+		role="button"
+		tabindex="0"
 		class="mix-card"
 		title={station.sub_title ?? station.title}
-		aria-label={`Play radio station ${station.title}`}
-		onclick={() => playTidalMix(station.id)}
+		aria-label={`Open radio station ${station.title}`}
+		onclick={() => { selectedStation = station; }}
+		onkeydown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); selectedStation = station; } }}
+		oncontextmenu={(event) => stationMenu(event, station)}
 	>
 		<div class="art-wrap">
 			<ArtworkImage
@@ -98,6 +114,7 @@
 				position="corner"
 				size="sm"
 				label={`Play radio station ${station.title}`}
+				onclick={(event) => { event.stopPropagation(); void playTidalMix(station.id); }}
 			/>
 		</div>
 		<div class="meta">
@@ -106,7 +123,7 @@
 				<p class="artist">{station.sub_title}</p>
 			{/if}
 		</div>
-	</button>
+	</div>
 {/snippet}
 
 {#snippet stationRail(items: TidalMix[])}
@@ -160,6 +177,14 @@
 		</p>
 	{/if}
 </section>
+
+{#if selectedStation}
+	{#key selectedStation.id}
+		<TidalCollectionPopup id={selectedStation.id} kind="mix" title={selectedStation.title}
+			subtitle={selectedStation.sub_title} artworkUrl={selectedStation.image_url}
+			onClose={() => selectedStation = null} />
+	{/key}
+{/if}
 
 <style>
 	.discovery-section {
