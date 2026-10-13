@@ -97,6 +97,7 @@ import type {
 	RadioResponse,
 	RadioBlend,
 	RadioCompareResult,
+	RadioSettings,
 	RadioCompareTrack,
 	RadioQueue,
 	HomeReleasesResponse,
@@ -1604,6 +1605,17 @@ export const api = {
 		return fetchApi('/api/radio/start', undefined, {
 			method: 'POST',
 			body: JSON.stringify(params),
+		});
+	},
+
+	getRadioSettings() {
+		return fetchApi<RadioSettings>('/api/radio/settings');
+	},
+
+	saveRadioSettings(settings: RadioSettings) {
+		return fetchApi<RadioSettings>('/api/radio/settings', undefined, {
+			method: 'PUT',
+			body: JSON.stringify(settings),
 		});
 	},
 

@@ -32,7 +32,10 @@
 		type MusicBrainzStatus,
 		type PlaybackRuntimeInfo,
 		type PortableMusicBrainzSnapshotStatus,
-		type ArtworkCacheSettings
+		type ArtworkCacheSettings,
+		type RadioBlend,
+		type RadioSettings,
+		type RadioStationSource
 	} from '$lib/api/client';
 	import { wsMessages } from '$lib/api/ws';
 	import {
@@ -436,6 +439,48 @@
 	// Settings > Playback > Transitions. Crossfade is the plain fade between
 	// tracks; DJ plans its own overlaps, so it applies when DJ is off. The DJ
 	// transition style is DJ policy and lives on the Mix page.
+	const RADIO_SOURCE_OPTIONS: { value: RadioStationSource; label: string }[] = [
+		{ value: 'balanced', label: 'Balanced' },
+		{ value: 'lastfm', label: 'Last.fm' },
+		{ value: 'tidal', label: 'TIDAL radio' },
+		{ value: 'hybrid', label: 'TIDAL + Last.fm' },
+	];
+	const RADIO_SOURCE_DESCRIPTIONS: Record<RadioStationSource, string> = {
+		balanced: 'Balanced uses your library and listening, Last.fm and the radio index.',
+		lastfm: 'Last.fm plays what its listeners play together.',
+		tidal: "TIDAL radio plays TIDAL's own station for the seed.",
+		hybrid: 'TIDAL + Last.fm builds from both, reordered by your listening and likes.',
+	};
+	const RADIO_BLEND_OPTIONS: { value: RadioBlend; label: string }[] = [
+		{ value: 'familiar', label: 'Familiar' },
+		{ value: 'mixed', label: 'Mixed' },
+		{ value: 'adventurous', label: 'Adventurous' },
+	];
+	let radioSettings = $state<RadioSettings | null>(null);
+	let radioSettingsError = $state<string | null>(null);
+
+	async function loadRadioSettings() {
+		try {
+			radioSettings = await api.getRadioSettings();
+			radioSettingsError = null;
+		} catch {
+			radioSettingsError = "Couldn't load radio settings.";
+		}
+	}
+
+	async function saveRadioSettings(patch: Partial<RadioSettings>) {
+		if (!radioSettings) return;
+		const previous = radioSettings;
+		radioSettings = { ...previous, ...patch };
+		try {
+			radioSettings = await api.saveRadioSettings(radioSettings);
+			radioSettingsError = null;
+		} catch {
+			radioSettings = previous;
+			radioSettingsError = "Couldn't save radio settings.";
+		}
+	}
+
 	const CROSSFADE_OPTIONS = [
 		{ value: '0', label: 'Off' },
 		{ value: '2000', label: '2s' },
@@ -1597,6 +1642,7 @@
 			void syncAnalysisStatus();
 			void loadPassiveDspState();
 			void loadAudioOutput();
+			void loadRadioSettings();
 			return;
 		}
 		if (activeCategory === 'services') {
@@ -2478,6 +2524,15 @@
 					<Segmented label="Crossfade" options={CROSSFADE_OPTIONS} value={crossfadeStep} onchange={(value) => void setPlayerCrossfadeMs(Number(value))} />
 				</SettingRow>
 				<p class="setting-status">DJ transition style, mix intent and speed are on the <a href="/mix">Mix page</a>.</p>
+			</section><section class="glass-tile section-panel" data-setting-id="radio"><SectionHeader title="Radio" />
+				<SettingRow label="Station source" hint="Where song, artist and album radio find their tracks. If a source has nothing for a seed, that station uses Balanced instead.">
+					<Segmented label="Station source" options={RADIO_SOURCE_OPTIONS} value={radioSettings?.source ?? 'balanced'} disabled={radioSettings === null} onchange={(value) => void saveRadioSettings({ source: value })} />
+				</SettingRow>
+				<SettingRow label="Discovery" hint="How far stations reach from the seed. Familiar stays close; Adventurous reaches further.">
+					<Segmented label="Discovery" options={RADIO_BLEND_OPTIONS} value={radioSettings?.blend ?? 'mixed'} disabled={radioSettings === null} onchange={(value) => void saveRadioSettings({ blend: value })} />
+				</SettingRow>
+				<p class="setting-status">{RADIO_SOURCE_DESCRIPTIONS[radioSettings?.source ?? 'balanced']} Not sure which you prefer? Compare them blind in the <a href="/radio-compare">radio blind test</a>.</p>
+				{#if radioSettingsError}<p class="error" role="alert">{radioSettingsError}</p>{/if}
 			</section><section class="glass-tile section-panel" data-setting-id="library-audio-data"><SectionHeader title="Analysis" />
 <SettingRow label="Analyse while playing" hint="Save BPM, key and energy as tracks play for DJ transitions and harmonic shuffle. Turning this off keeps existing analysis."><Toggle label="Analyse while playing" checked={$audioAnalysis.passiveEnabled} disabled={!$passiveDspKnown || $passiveDspPending} onchange={(event) => void setPassiveDspEnabled(event.currentTarget.checked)} /></SettingRow>
 {#if $audioAnalysisError}<p class="error" role="alert">{$audioAnalysisError}</p><button class="btn btn-glass" onclick={() => void loadPassiveDspState()} disabled={$passiveDspPending}>Retry setting</button>{/if}

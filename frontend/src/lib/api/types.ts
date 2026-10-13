@@ -1659,6 +1659,15 @@ export interface RadioResponse {
 
 export type RadioBlend = 'familiar' | 'mixed' | 'adventurous';
 
+/** Where stations find their tracks (Settings > Playback > Radio). */
+export type RadioStationSource = 'balanced' | 'lastfm' | 'tidal' | 'hybrid';
+
+export interface RadioSettings {
+	source: RadioStationSource;
+	/** Used by radio starts that don't ask for a blend. */
+	blend: RadioBlend;
+}
+
 /** A row in the blind radio comparison: a `TidalPlayable`, plus the library id
  * when the pick is a library track (`tidal_id` is 0 for a local-only file). */
 export interface RadioCompareTrack extends TidalPlayable {

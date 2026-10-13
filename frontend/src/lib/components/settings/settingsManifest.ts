@@ -27,6 +27,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'video-fullscreen', target: 'playback-output', focus: '[aria-label="Fullscreen transition"]', category: 'playback', label: 'Fullscreen transition', keywords: 'video fullscreen full screen dim grow classic animation' },
 	{ id: 'now-playing-path', category: 'playback', label: 'Output details', keywords: 'runtime device format now playing track path diagnostics' },
 	{ id: 'transitions', category: 'playback', label: 'Transitions', keywords: 'crossfade fade gap blend' },
+	{ id: 'radio', category: 'playback', label: 'Radio', keywords: 'radio station source discovery blend familiar mixed adventurous tidal last.fm lastfm hybrid' },
 	{ id: 'library-audio-data', category: 'playback', label: 'Analyse while playing', keywords: 'analysis bpm key energy dsp passive audio data' },
 	{ id: 'library-songs-scope', category: 'library', label: 'Songs tab shows', keywords: 'liked library songs tracks favorites hearted albums' },
 	{ id: 'library-video-likes-song', category: 'library', label: 'Saving a video likes its song', keywords: 'video save liked song favorite favourite music video library sync' },
