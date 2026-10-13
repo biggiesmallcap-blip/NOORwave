@@ -1051,6 +1051,11 @@ pub fn assemble_set_with_context(
             if exclude.contains(&video.tidal_id) {
                 continue;
             }
+            // Shelves play only what any channel may: no clips, interviews,
+            // trailers or compilations (the shared programmable rule).
+            if !crate::services::video_intel::cuts::is_programmable(video) {
+                continue;
+            }
             if let Some(decade) = era_decade {
                 match video.release_year {
                     Some(year) if year >= decade && year < decade + 10 => {}
