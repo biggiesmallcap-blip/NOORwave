@@ -11,6 +11,7 @@
 //! - catalog worker: cuts, songs, concerts, era, link, census, job, build
 //! - atlas worker: scenes, louvain, spread, layout, light
 
+pub mod archive;
 pub mod build;
 pub mod census;
 pub mod concerts;
