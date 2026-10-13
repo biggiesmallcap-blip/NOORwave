@@ -98,6 +98,34 @@ describe('label level of detail', () => {
 		expect(artists).toEqual(['Beyonc\u00e9 Tribute', 'Carlos Rivera', 'Shakira']);
 	});
 
+	test('with a pointer, names gather in the scene under it and stay out of far scenes', () => {
+		// Before artist names start on their own (zoom 1.5), centred on her.
+		const i = [...Array(data.count).keys()].find((k) => names.get(data.ids[k]) === 'Shakira')!;
+		const base = input(1.5, data.x[i], data.y[i]);
+		expect(planLabels(base).filter((l) => l.kind === 'artist')).toEqual([]);
+		const scene = data.scene[i];
+		const sx = 800;
+		const sy = 500;
+		const named = planLabels({ ...base, spotlight: { x: sx, y: sy, scene } }).filter((l) => l.kind === 'artist');
+		expect(named.length).toBeGreaterThan(0);
+		// Every name is from the hovered scene or close to the pointer.
+		for (const label of named) {
+			const close = Math.hypot((label.wx - data.x[i]) * 1.5, (label.wy - data.y[i]) * 1.5) <= 150;
+			expect(data.scene[label.index] === scene || close).toBe(true);
+		}
+		// The pointer in a far corner, over no scene: no artist names.
+		const away = planLabels({ ...base, spotlight: { x: 2, y: 2, scene: -1 } });
+		expect(away.filter((l) => l.kind === 'artist')).toEqual([]);
+	});
+
+	test('a name already showing keeps its place over a new one', () => {
+		const base = input(12, 850, 670);
+		const first = planLabels(base).filter((l) => l.kind === 'artist').map((l) => l.index);
+		expect(first.length).toBeGreaterThan(0);
+		const again = planLabels({ ...base, sticky: new Set(first) }).filter((l) => l.kind === 'artist').map((l) => l.index);
+		expect(again).toEqual(expect.arrayContaining(first));
+	});
+
 	test('no label is placed under an overlay', () => {
 		const open = planLabels(input(1));
 		expect(open.length).toBeGreaterThan(0);

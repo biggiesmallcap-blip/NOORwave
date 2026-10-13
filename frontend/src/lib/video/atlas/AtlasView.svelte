@@ -391,6 +391,7 @@
 	function onPointerLeave() {
 		if (pointers.size === 0) {
 			renderer?.setHover(-1, -1);
+			renderer?.setPointer(null);
 			tip = null;
 		}
 	}
@@ -410,6 +411,8 @@
 
 	function hover(x: number, y: number) {
 		if (!renderer || dragging) return;
+		// Artist names gather around the pointer (labels.ts).
+		renderer.setPointer(x, y);
 		const hit = renderer.hitTest(x, y);
 		if (dwellTimer) clearTimeout(dwellTimer);
 		dwellTimer = null;

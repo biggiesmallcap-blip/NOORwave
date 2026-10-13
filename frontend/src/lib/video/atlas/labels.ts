@@ -1,6 +1,11 @@
-// Level of detail for Atlas labels. Zoomed out the map reads as scenes; in
-// the middle the hubs of each scene get their names; close in every named
-// artist does. Collisions are resolved by Genre Galaxy's greedy placer
+// Level of detail for Atlas labels. Scene names always; artist names follow
+// the pointer: the scene under it names its artists, densest near the
+// pointer, and the scenes beside it only name a few close to the pointer.
+// Without a pointer (touch, keyboard, the mouse off the map) zoom decides:
+// zoomed out the map reads as scenes, in the middle the hubs of each scene
+// get their names, close in every named artist does. Names already on screen
+// keep their place over new ones, so moving the pointer never reshuffles
+// them. Collisions are resolved by Genre Galaxy's greedy placer
 // (`placeLabels`), which this module feeds and never changes.
 
 import { placeLabels, type LabelRect } from '$lib/components/Genre/galaxyLabels';
@@ -60,6 +65,30 @@ export interface PlannedLabel {
 	text: string;
 }
 
+/** Where artist names gather while the pointer is over the map. */
+export interface Spotlight {
+	/** Pointer in CSS px. */
+	x: number;
+	y: number;
+	/** Scene under the pointer, -1 for none. */
+	scene: number;
+}
+
+/** Spotlight reach in CSS px: the hovered scene's names thin out past
+ *  `far`; other scenes only get names within `near` of the pointer. */
+export function spotlightRadii(compact: boolean): { near: number; far: number } {
+	return compact ? { near: 110, far: 300 } : { near: 150, far: 420 };
+}
+
+/** Names a hovered scene shows even zoomed right out, and how deep a scene
+ *  beside it reaches near the pointer. */
+export const SPOT_SCENE_TOP = 6;
+export const SPOT_NEAR_TOP = 2;
+/** A name on screen in the last plan wins its spot over a new one, and
+ *  reaches this much further from the pointer before it is dropped. */
+const STICKY_PRIORITY = 300;
+const STICKY_REACH = 1.5;
+
 export interface LabelPlanInput {
 	data: AtlasData;
 	names: Map<number, string>;
@@ -83,6 +112,11 @@ export interface LabelPlanInput {
 	/** Screen boxes covered by overlays (toolbars, legend, the open card).
 	 *  No label is placed under them. */
 	obstacles?: readonly ScreenBox[];
+	/** The pointer and the scene under it; null or absent when there is
+	 *  no pointer over the map. */
+	spotlight?: Spotlight | null;
+	/** Artists named in the last plan. */
+	sticky?: ReadonlySet<number>;
 }
 
 export interface ScreenBox {
@@ -147,7 +181,8 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 			y: sy + dy - pad.y,
 			width: box.width + pad.x * 2,
 			height: box.height + pad.y * 2,
-			priority: (focus ? 950 : 500) + (maxVideos > 0 ? (scene.videos / maxVideos) * 100 : 0),
+			// Above every artist name but a pinned one (artists top out at 800).
+			priority: (focus ? 960 : 840) + (maxVideos > 0 ? (scene.videos / maxVideos) * 100 : 0),
 		});
 		meta.set(id, {
 			kind: 'scene',
@@ -167,12 +202,38 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 	const quota = artistRankQuota(k, compact);
 	const pinned = new Set<number>();
 	for (let p = 0; p < input.pinned.length; p++) if (input.pinned[p] >= 0) pinned.add(input.pinned[p]);
+	const sticky = input.sticky;
+	const spot = input.spotlight ?? null;
+	const { near, far } = spotlightRadii(compact);
 	const candidates: number[] = [];
-	if (quota >= 0) {
-		const minX = camera.cx - halfW / camera.scale;
-		const maxX = camera.cx + halfW / camera.scale;
-		const minY = camera.cy - halfH / camera.scale;
-		const maxY = camera.cy + halfH / camera.scale;
+	const distance = new Map<number, number>();
+	const minX = camera.cx - halfW / camera.scale;
+	const maxX = camera.cx + halfW / camera.scale;
+	const minY = camera.cy - halfH / camera.scale;
+	const maxY = camera.cy + halfH / camera.scale;
+	if (spot) {
+		// Around the pointer: the hovered (or picked) scene names its
+		// artists, densest near the pointer; scenes beside it name a few,
+		// close to the pointer only.
+		const sceneQuota = Math.max(quota, SPOT_SCENE_TOP);
+		const nearQuota = quota < 0 ? SPOT_NEAR_TOP : Math.max(SPOT_NEAR_TOP, Math.floor(quota / 3));
+		input.grid.forEachIn(minX, minY, maxX, maxY, (i) => {
+			if (pinned.has(i)) return;
+			const scene = data.scene[i];
+			const rank = data.rankInScene[i];
+			const d = Math.hypot(toSx(data.x[i]) - spot.x, toSy(data.y[i]) - spot.y);
+			const home = scene >= 0 && (scene === spot.scene || scene === input.focusScene);
+			const reach = sticky?.has(i) ? STICKY_REACH : 1;
+			if (home) {
+				if (rank > sceneQuota || (d > far * reach && rank >= 3)) return;
+			} else if (d > near * reach || rank > nearQuota) {
+				return;
+			}
+			if (!names.has(data.ids[i])) return;
+			candidates.push(i);
+			distance.set(i, home ? d : d + far);
+		});
+	} else if (quota >= 0) {
 		input.grid.forEachIn(minX, minY, maxX, maxY, (i) => {
 			if (pinned.has(i)) return;
 			if (data.rankInScene[i] > quota) return;
@@ -184,12 +245,23 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 	}
 	const cap = input.maxArtistCandidates ?? (compact ? 160 : 420);
 	if (candidates.length > cap) {
-		candidates.sort((a, b) => data.globalRank[a] - data.globalRank[b]);
+		if (spot) candidates.sort((a, b) => (distance.get(a) ?? 0) - (distance.get(b) ?? 0));
+		else candidates.sort((a, b) => data.globalRank[a] - data.globalRank[b]);
 		candidates.length = cap;
 	}
 	for (const i of pinned) candidates.push(i);
 
 	const total = Math.max(1, data.count);
+	const priorityOf = (i: number): number => {
+		if (pinned.has(i)) return 1000;
+		const rankPart = (1 - data.globalRank[i] / total) * (spot ? 150 : 300);
+		const stickyPart = sticky?.has(i) ? STICKY_PRIORITY : 0;
+		if (!spot) return 100 + rankPart + stickyPart;
+		// Closer to the pointer wins; the hovered scene's names before its
+		// neighbours' (their distance carries `far` on top).
+		const d = distance.get(i) ?? far * 2;
+		return 100 + rankPart + stickyPart + Math.max(0, 1 - d / (far * 2)) * 250;
+	};
 	for (const i of candidates) {
 		const text = names.get(data.ids[i]);
 		if (!text) continue;
@@ -207,7 +279,7 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 			y: sy + dy,
 			width,
 			height,
-			priority: isPinned ? 1000 : 100 + (1 - data.globalRank[i] / total) * 300,
+			priority: priorityOf(i),
 			altY: sy - r - height - 2,
 		});
 		meta.set(i, {

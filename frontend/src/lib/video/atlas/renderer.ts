@@ -312,8 +312,21 @@ export class AtlasRenderer {
 	 *  names step aside until it settles, then everything is placed once. */
 	private inMotion = false;
 	private lastMoveAt = -Infinity;
-	private labelFade = 1;
-	private labelFadeStart = 0;
+	/** When each name on screen appeared (key "scene:3", "artist:812"). A
+	 *  name already showing stays put through a re-plan (a hover, a pick);
+	 *  only a new one, or an artist name that stepped aside while the camera
+	 *  moved, fades in. */
+	private labelBorn = new Map<string, number>();
+	private labelFadeUntil = 0;
+	private movedSincePlan = false;
+	/** Artist names dropped by the last plan, fading out from `gone`. */
+	private leaving: { label: PlannedLabel; gone: number }[] = [];
+	/** The pointer over the map in CSS px (null when it is off the map),
+	 *  the scene under it, and where the current names were planned from.
+	 *  Artist names gather around the pointer (labels.ts). */
+	private pointer: { x: number; y: number } | null = null;
+	private pointerScene = -1;
+	private planPointer: { x: number; y: number; scene: number } | null = null;
 
 	// Motion.
 	private raf = 0;
@@ -577,6 +590,45 @@ export class AtlasRenderer {
 		this.requestDraw();
 	}
 
+	/** Where the pointer is over the map, or null when it leaves. Names
+	 *  re-plan when it crosses into another scene or strays more than
+	 *  SPOT_REPLAN_PX from where they were planned, never on every move. */
+	setPointer(x: number | null, y = 0): void {
+		if (x === null) {
+			if (!this.pointer) return;
+			this.pointer = null;
+			this.pointerScene = -1;
+			this.labelsStale = true;
+			this.requestDraw();
+			return;
+		}
+		this.pointer = { x, y };
+		const scene = this.pointerSceneAt(x, y);
+		const plan = this.planPointer;
+		if (!plan || scene !== plan.scene || Math.hypot(x - plan.x, y - plan.y) > SPOT_REPLAN_PX) {
+			this.pointerScene = scene;
+			this.labelsStale = true;
+			this.requestDraw();
+		}
+	}
+
+	/** The scene under the pointer. The one it is already in holds until
+	 *  the pointer is well past its edge, so crossing a border back and
+	 *  forth does not swap the names each time. */
+	private pointerSceneAt(x: number, y: number): number {
+		const data = this.data;
+		if (!data) return -1;
+		const cam = this.camera;
+		const wx = (x - this.viewport.width / 2) / cam.scale + cam.cx;
+		const wy = (y - this.viewport.height / 2) / cam.scale + cam.cy;
+		const held = this.pointerScene;
+		if (held >= 0 && held < data.scenes.length) {
+			const scene = data.scenes[held];
+			if (Math.hypot(wx - scene.x, wy - scene.y) <= scene.r * 1.2) return held;
+		}
+		return sceneAt(data.scenes, wx, wy, 1.04);
+	}
+
 	setSelection(artist: number, scene: number): void {
 		if (artist === this.selectedArtist && scene === this.selectedScene) return;
 		this.selectedArtist = artist;
@@ -602,9 +654,10 @@ export class AtlasRenderer {
 	}
 
 	private refreshPinned(): void {
+		// The hovered artist is not pinned: its tooltip already names it, and
+		// pinning it pushed its neighbours' names off and back on (flicker).
 		const pins: number[] = [];
 		if (this.selectedArtist >= 0) pins.push(this.selectedArtist);
-		if (this.hover >= 0) pins.push(this.hover);
 		if (this.routeIdx) for (const i of this.routeIdx) pins.push(i);
 		if (this.trailIdx && this.trailIdx.length) pins.push(this.trailIdx[this.trailIdx.length - 1]);
 		this.pinned = pins;
@@ -890,24 +943,22 @@ export class AtlasRenderer {
 			copyCamera(this.camera, this.lastCam);
 			this.labelsStale = true;
 			this.lastMoveAt = now;
+			this.movedSincePlan = true;
 		}
 		// While the camera moves (a glide, a flight, a fling or a drag) labels
 		// are not re-placed at all: scene names ride along with the map and
 		// artist names step aside. Placement runs once, when it settles, and
-		// the names fade back in.
+		// the names that are new fade in; names already showing never blink.
 		this.inMotion = cameraMoving || now - this.lastMoveAt < 140;
 		if (data && this.labelsStale && !this.inMotion) {
+			const previous = this.labels;
 			this.computeLabels(false);
 			this.labelsAt = now;
 			this.labelsStale = false;
 			this.labelsPartial = false;
-			this.labelFade = this.reducedMotion ? 1 : 0;
-			this.labelFadeStart = now;
+			this.stampLabels(now, previous);
 		}
-		if (this.labelFade < 1) {
-			this.labelFade = clamp((now - this.labelFadeStart) / 180, 0, 1);
-			if (this.labelFade < 1) animating = true;
-		}
+		if (now < this.labelFadeUntil) animating = true;
 		this.draw(now);
 		this.dirty = false;
 		if (moved && this.onCamera) this.onCamera(this.camera);
@@ -963,8 +1014,12 @@ export class AtlasRenderer {
 		return box;
 	}
 
+	/** The meta line (channel, artists, hours) shows from a little zoom in,
+	 *  and for the picked scene. Not for the hovered one: its tooltip says
+	 *  the same, and a label that grew under the pointer bumped its
+	 *  neighbours' names off and back on. */
 	private sceneMetaShown(s: number): boolean {
-		return this.zoomLevel() >= 1.45 || s === this.hoverScene || s === this.selectedScene;
+		return this.zoomLevel() >= 1.45 || s === this.selectedScene;
 	}
 
 	/** In motion, fewer candidates keep placement cheap; the settle pass places them all. */
@@ -978,6 +1033,13 @@ export class AtlasRenderer {
 			this.labels = this.miniLabels(growth);
 			return;
 		}
+		const spot = this.pointer
+			? { x: this.pointer.x, y: this.pointer.y, scene: this.pointerSceneAt(this.pointer.x, this.pointer.y) }
+			: null;
+		this.pointerScene = spot?.scene ?? -1;
+		this.planPointer = spot;
+		const sticky = new Set<number>();
+		for (const label of this.labels) if (label.kind === 'artist') sticky.add(label.index);
 		this.labels = planLabels({
 			data,
 			names: this.names,
@@ -1001,6 +1063,8 @@ export class AtlasRenderer {
 			artistLabelHeight: ARTIST_FONT_PX + 3,
 			maxArtistCandidates: moving ? 160 : undefined,
 			obstacles: this.obstacles,
+			spotlight: spot,
+			sticky,
 		});
 	}
 
@@ -1413,10 +1477,13 @@ export class AtlasRenderer {
 	private drawRings(growth: number): void {
 		const ctx = this.ctx;
 		const data = this.data!;
-		if (this.hoverScene >= 0 && this.hover < 0 && this.selectedScene !== this.hoverScene && !this.mini) {
-			// A hovered scene gets a soft lift, never a hard outline.
-			const scene = data.scenes[this.hoverScene];
-			const p = this.sceneScreen(this.hoverScene);
+		// The scene under the pointer gets a soft lift, never a hard outline.
+		// It follows the pointer's scene, not the hit test, so it holds steady
+		// while the pointer crosses dots and the gaps between them.
+		const lifted = this.pointer ? this.pointerScene : this.hoverScene;
+		if (lifted >= 0 && this.selectedScene !== lifted && !this.mini) {
+			const scene = data.scenes[lifted];
+			const p = this.sceneScreen(lifted);
 			const r = scene.r * this.camera.scale * 1.15;
 			const g = ctx.createRadialGradient(p.x, p.y, r * 0.2, p.x, p.y, r);
 			g.addColorStop(0, `hsla(${scene.hue}, 80%, 70%, 0.07)`);
@@ -1454,14 +1521,73 @@ export class AtlasRenderer {
 		}
 	}
 
+	private drawArtistLabel(label: PlannedLabel, x: number, y: number, fade: number, pinned: boolean): void {
+		const ctx = this.ctx;
+		const data = this.data!;
+		ctx.globalAlpha = label.alpha * fade * (this.selectedScene >= 0 && data.scene[label.index] !== this.selectedScene ? 0.5 : 1);
+		ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+		if (pinned) {
+			const w = ctx.measureText(label.text).width;
+			const alpha = ctx.globalAlpha;
+			ctx.globalAlpha = alpha * 0.9;
+			ctx.drawImage(labelShade(), x - 18, y - 9, w + 36, ARTIST_FONT_PX + 20);
+			ctx.globalAlpha = alpha;
+		}
+		ctx.strokeStyle = STAGE.textHalo;
+		ctx.lineWidth = 2.5;
+		ctx.strokeText(label.text, x, y + 1);
+		ctx.fillStyle = pinned ? '#ffffff' : STAGE.text;
+		ctx.fillText(label.text, x, y + 1);
+	}
+
+	/** Birth times for the new plan's names (see labelBorn). */
+	private stampLabels(now: number, previous: PlannedLabel[]): void {
+		const born = new Map<string, number>();
+		const moved = this.movedSincePlan;
+		let latest = 0;
+		// Names the new plan drops fade out where they were; after a camera
+		// move they were already stepped aside, so they just go.
+		const kept = new Set(this.labels.filter((label) => label.kind === 'artist').map((label) => label.index));
+		this.leaving =
+			moved || this.reducedMotion
+				? []
+				: previous.filter((label) => label.kind === 'artist' && !kept.has(label.index)).map((label) => ({ label, gone: now }));
+		if (this.leaving.length) latest = now;
+		for (const label of this.labels) {
+			const key = `${label.kind}:${label.index}`;
+			const before = this.labelBorn.get(key);
+			const keep = before !== undefined && !(moved && label.kind !== 'scene');
+			const at = keep ? before : this.reducedMotion ? -Infinity : now;
+			born.set(key, at);
+			latest = Math.max(latest, at);
+		}
+		this.labelBorn = born;
+		this.labelFadeUntil = latest + LABEL_FADE_MS;
+		this.movedSincePlan = false;
+	}
+
+	private labelFadeOf(kind: string, index: number, now: number): number {
+		const born = this.labelBorn.get(`${kind}:${index}`);
+		return born === undefined ? 1 : clamp((now - born) / LABEL_FADE_MS, 0, 1);
+	}
+
 	private drawLabels(reveal: number): void {
 		const ctx = this.ctx;
 		const data = this.data!;
 		const cam = this.camera;
 		const halfW = this.viewport.width / 2;
 		const halfH = this.viewport.height / 2;
+		const now = performance.now();
 		ctx.textBaseline = 'top';
 		ctx.lineJoin = 'round';
+		if (!this.inMotion) {
+			this.leaving = this.leaving.filter((item) => now - item.gone < LABEL_FADE_MS);
+			for (const { label, gone } of this.leaving) {
+				const x = (label.wx - cam.cx) * cam.scale + halfW + label.dx;
+				const y = (label.wy - cam.cy) * cam.scale + halfH + label.dy;
+				this.drawArtistLabel(label, x, y, reveal * (1 - (now - gone) / LABEL_FADE_MS), false);
+			}
+		}
 		for (let n = 0; n < this.labels.length; n++) {
 			const label = this.labels[n];
 			const x = (label.wx - cam.cx) * cam.scale + halfW + label.dx;
@@ -1470,7 +1596,7 @@ export class AtlasRenderer {
 				const scene = data.scenes[label.index];
 				const box = this.sceneBox(label.index, label.height > this.sceneBox(label.index, false).height + 1);
 				const dimmed = this.selectedScene >= 0 && this.selectedScene !== label.index ? 0.45 : 1;
-				const alpha = label.alpha * dimmed * reveal;
+				const alpha = label.alpha * dimmed * reveal * this.labelFadeOf('scene', label.index, now);
 				const name = scene.name.toUpperCase();
 				const cx = x + box.width / 2;
 				// A soft dark pool under the name, so it reads over a busy cluster.
@@ -1490,7 +1616,7 @@ export class AtlasRenderer {
 				ctx.letterSpacing = '0px';
 				if (box.meta && !this.inMotion) {
 					ctx.font = `500 ${META_FONT_PX}px ${MONO_FONT}`;
-					ctx.globalAlpha = alpha * 0.75 * this.labelFade;
+					ctx.globalAlpha = alpha * 0.75;
 					ctx.lineWidth = 2.5;
 					const my = y + box.size * 1.25 + 3;
 					ctx.strokeText(box.meta, cx, my);
@@ -1501,21 +1627,8 @@ export class AtlasRenderer {
 			} else {
 				const pinnedLabel = label.index === this.selectedArtist || label.index === this.hover;
 				if (this.inMotion && !pinnedLabel) continue;
-				const fade = pinnedLabel ? 1 : this.labelFade;
-				ctx.globalAlpha = label.alpha * reveal * fade * (this.selectedScene >= 0 && data.scene[label.index] !== this.selectedScene ? 0.5 : 1);
-				ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
-				if (pinnedLabel) {
-					const w = ctx.measureText(label.text).width;
-					const alpha = ctx.globalAlpha;
-					ctx.globalAlpha = alpha * 0.9;
-					ctx.drawImage(labelShade(), x - 18, y - 9, w + 36, ARTIST_FONT_PX + 20);
-					ctx.globalAlpha = alpha;
-				}
-				ctx.strokeStyle = STAGE.textHalo;
-				ctx.lineWidth = 2.5;
-				ctx.strokeText(label.text, x, y + 1);
-				ctx.fillStyle = pinnedLabel ? '#ffffff' : STAGE.text;
-				ctx.fillText(label.text, x, y + 1);
+				const fade = pinnedLabel ? 1 : this.labelFadeOf('artist', label.index, now);
+				this.drawArtistLabel(label, x, y, reveal * fade, pinnedLabel);
 			}
 		}
 		ctx.globalAlpha = 1;
@@ -1546,6 +1659,12 @@ function labelShade(): HTMLCanvasElement {
 	LABEL_SHADE = canvas;
 	return canvas;
 }
+
+/** How long a new name takes to fade in (and a dropped one to fade out). */
+const LABEL_FADE_MS = 180;
+/** How far the pointer may stray from where names were planned before they
+ *  re-plan around it. */
+const SPOT_REPLAN_PX = 64;
 
 const STAR_LAYERS: [HTMLCanvasElement | null, number, number][] = [
 	[null, 0, 512],
