@@ -756,12 +756,7 @@ pub async fn orchestrate_album(
 ) -> Result<RadioQueue> {
     let album_id = seed_album_id;
     let (seed_track_ids, album_title, album_artist) = db.with_conn(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT t.id FROM tracks t WHERE t.album_id = ?1 ORDER BY t.disc_number ASC, t.track_number ASC LIMIT 3",
-        )?;
-        let ids: Vec<i64> = stmt
-            .query_map(rusqlite::params![album_id], |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let ids = album_seed_track_ids(conn, album_id)?;
         let meta = conn
             .query_row(
                 "SELECT al.title, ar.name FROM albums al LEFT JOIN artists ar ON al.artist_id = ar.id WHERE al.id = ?1",
@@ -824,14 +819,13 @@ pub async fn orchestrate_artist(
 ) -> Result<RadioQueue> {
     let artist_id = seed_artist_id;
     let (seed_track_ids, artist_name) = db.with_conn(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM tracks WHERE artist_id = ?1 ORDER BY play_count DESC, last_played_at DESC LIMIT 3",
-        )?;
-        let ids: Vec<i64> = stmt
-            .query_map(rusqlite::params![artist_id], |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let ids = artist_seed_track_ids(conn, artist_id)?;
         let name: Option<String> = conn
-            .query_row("SELECT name FROM artists WHERE id = ?1", rusqlite::params![artist_id], |row| row.get(0))
+            .query_row(
+                "SELECT name FROM artists WHERE id = ?1",
+                rusqlite::params![artist_id],
+                |row| row.get(0),
+            )
             .ok();
         Ok((ids, name))
     })?;
@@ -876,13 +870,41 @@ pub async fn orchestrate_artist(
     })
 }
 
+/// The tracks album radio seeds from: the album's first three.
+pub(crate) fn album_seed_track_ids(
+    conn: &rusqlite::Connection,
+    album_id: i64,
+) -> anyhow::Result<Vec<i64>> {
+    Ok(conn
+        .prepare(
+            "SELECT t.id FROM tracks t WHERE t.album_id = ?1
+             ORDER BY t.disc_number ASC, t.track_number ASC LIMIT 3",
+        )?
+        .query_map(rusqlite::params![album_id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The tracks artist radio seeds from: the artist's three most played.
+pub(crate) fn artist_seed_track_ids(
+    conn: &rusqlite::Connection,
+    artist_id: i64,
+) -> anyhow::Result<Vec<i64>> {
+    Ok(conn
+        .prepare(
+            "SELECT id FROM tracks WHERE artist_id = ?1
+             ORDER BY play_count DESC, last_played_at DESC LIMIT 3",
+        )?
+        .query_map(rusqlite::params![artist_id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 /// Album and artist radio: one final selection over every seed's picks. Each
 /// seed's radio was spaced on its own, but their union could still put one
 /// artist several times in a row, so the artist cap runs again on the blend.
 /// The blend reaches past `limit` so the cap has substitutes.
-fn select_across_seeds(
+pub(crate) fn select_across_seeds(
     db: &Database,
     candidates: Vec<RadioCandidate>,
     blend: RadioBlend,

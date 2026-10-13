@@ -185,8 +185,6 @@ pub async fn top_up(state: &SharedState) -> anyhow::Result<usize> {
 }
 
 async fn top_up_inner(state: &SharedState) -> anyhow::Result<usize> {
-    use crate::services::radio::{orchestrate_album, orchestrate_artist, orchestrate_song};
-
     let (db, lastfm, cache, event_tx) = {
         let g = state.read().await;
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
@@ -200,61 +198,30 @@ async fn top_up_inner(state: &SharedState) -> anyhow::Result<usize> {
     let Some((seed, exclude)) = db.with_conn(|conn| Ok(due_top_up(conn)))? else {
         return Ok(0);
     };
-    let orchestrated = match seed.kind {
-        RadioSeedKind::Track => {
-            orchestrate_song(
-                &db,
-                lastfm.as_ref(),
-                Some(&cache),
-                seed.id,
-                seed.blend,
-                TOP_UP_LIMIT,
-                &exclude,
-            )
-            .await
-        }
-        RadioSeedKind::Album => {
-            orchestrate_album(
-                &db,
-                lastfm.as_ref(),
-                Some(&cache),
-                seed.id,
-                seed.blend,
-                TOP_UP_LIMIT,
-                &exclude,
-            )
-            .await
-        }
-        RadioSeedKind::Artist => {
-            orchestrate_artist(
-                &db,
-                lastfm.as_ref(),
-                Some(&cache),
-                seed.id,
-                seed.blend,
-                TOP_UP_LIMIT,
-                &exclude,
-            )
-            .await
-        }
+    // The listener's chosen station source, with the station's own blend.
+    let preferences = crate::server::routes::radio_preferences(&db);
+    let station = crate::server::routes::radio_station::StationContext {
+        state,
+        db: &db,
+        lastfm: lastfm.as_ref(),
+        cache: &cache,
     };
-    let mut tracks: Vec<RadioCandidate> =
-        orchestrated.map(|queue| queue.tracks).unwrap_or_default();
-    let mix_seed = match seed.kind {
-        RadioSeedKind::Track => Some(crate::server::routes::TidalMixSeed::Track(seed.id)),
-        RadioSeedKind::Artist => Some(crate::server::routes::TidalMixSeed::Artist(seed.id)),
-        RadioSeedKind::Album => None,
+    let station_seed = match seed.kind {
+        RadioSeedKind::Track => crate::server::routes::radio_station::StationSeed::Track(seed.id),
+        RadioSeedKind::Album => crate::server::routes::radio_station::StationSeed::Album(seed.id),
+        RadioSeedKind::Artist => crate::server::routes::radio_station::StationSeed::Artist(seed.id),
     };
-    if let Some(mix_seed) = mix_seed {
-        crate::server::routes::add_tidal_mix_fallback(
-            state,
-            &db,
-            mix_seed,
-            &mut tracks,
-            TOP_UP_LIMIT,
-        )
-        .await;
-    }
+    let tracks: Vec<RadioCandidate> = crate::server::routes::radio_station::build_station(
+        &station,
+        station_seed,
+        seed.blend,
+        TOP_UP_LIMIT,
+        &exclude,
+        preferences.source,
+    )
+    .await
+    .map(|queue| queue.tracks)
+    .unwrap_or_default();
     let (appended, pending_item_ids) = db.with_conn(move |conn| {
         let before = queued_row_count(conn);
         let build =

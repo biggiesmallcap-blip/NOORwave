@@ -83,6 +83,7 @@ mod playlist_routes;
 mod queue_routes;
 mod radio_compare_routes;
 mod radio_routes;
+pub(crate) mod radio_station;
 mod resolve_routes;
 mod search_routes;
 mod setup_discovery_routes;
@@ -501,6 +502,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route("/api/radio/album", post(radio_album))
         .route("/api/radio/artist", post(radio_artist))
         .route("/api/radio/start", post(radio_start))
+        .route(
+            "/api/radio/settings",
+            get(get_radio_settings).put(put_radio_settings),
+        )
         .route(
             "/api/radio/compare",
             post(radio_compare_routes::radio_compare_seed),
