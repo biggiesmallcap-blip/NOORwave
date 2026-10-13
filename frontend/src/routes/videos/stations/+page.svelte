@@ -81,6 +81,9 @@
 </svelte:head>
 
 <div class="stations-page">
+	<!-- Stations live under On Air: one quiet way back to the dial. -->
+	<p class="onair-link"><a href="/videos">Back to On Air</a> <span>Numbered channels on a clock</span></p>
+
 	{#if error}
 		<EmptyState title="Could not load stations" copy={error} />
 	{:else if !data}
@@ -170,6 +173,30 @@
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-medium);
 	}
+
+	.onair-link {
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+		margin: 0;
+		padding: 0 12px;
+		font-size: var(--font-size-xs);
+	}
+	.onair-link a {
+		color: var(--text-secondary);
+		font-weight: var(--font-weight-semibold);
+		text-decoration: none;
+	}
+	.onair-link a::before {
+		content: '\2190';
+		margin-right: 6px;
+	}
+	.onair-link a:hover { color: var(--text-primary); }
+	.onair-link a:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
+	}
+	.onair-link span { color: var(--text-tertiary); }
 
 	.note {
 		padding: 0 12px;
