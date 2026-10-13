@@ -14,16 +14,6 @@ pub(crate) async fn load_persisted_playback_snapshot(
     state_guard.db.with_conn(player::load_snapshot)
 }
 
-pub(crate) async fn next_persisted_playback_snapshot(
-    state: &SharedState,
-) -> anyhow::Result<player::PlaybackSnapshot> {
-    let state_guard = state.read().await;
-    let cleared = recently_cleared(&state_guard);
-    state_guard
-        .db
-        .with_conn(|conn| player::next_track(conn, cleared))
-}
-
 pub(crate) async fn previous_persisted_playback_snapshot(
     state: &SharedState,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
@@ -36,13 +26,18 @@ pub(crate) async fn previous_persisted_playback_snapshot(
         .with_conn(|conn| Ok(player::previous_track(conn, 0, None)?.snapshot))
 }
 
-pub(crate) async fn step_persisted_playback_snapshot(
-    state: &SharedState,
+pub(crate) fn step_playback_snapshot(
+    state: &crate::AppState,
     direction: PendingAdvanceDirection,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
     match direction {
-        PendingAdvanceDirection::Next => next_persisted_playback_snapshot(state).await,
-        PendingAdvanceDirection::Previous => previous_persisted_playback_snapshot(state).await,
+        PendingAdvanceDirection::Next => {
+            let cleared = recently_cleared(state);
+            state.db.with_conn(|conn| player::next_track(conn, cleared))
+        }
+        PendingAdvanceDirection::Previous => state
+            .db
+            .with_conn(|conn| Ok(player::previous_track(conn, 0, None)?.snapshot)),
     }
 }
 
@@ -71,7 +66,13 @@ pub(crate) async fn restore_playback_anchor(
     state: &SharedState,
     saved: SavedPlaybackAnchor,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
-    let state_guard = state.read().await;
+    restore_playback_anchor_in(&*state.read().await, saved)
+}
+
+pub(crate) fn restore_playback_anchor_in(
+    state_guard: &crate::AppState,
+    saved: SavedPlaybackAnchor,
+) -> anyhow::Result<player::PlaybackSnapshot> {
     let snapshot = state_guard.db.with_conn(move |conn| {
         conn.execute(
             "UPDATE playback_state
@@ -91,8 +92,8 @@ pub(crate) async fn restore_playback_anchor(
     Ok(snapshot)
 }
 
-pub(crate) async fn stop_persisted_playback_after_advance_failure(
-    state: &SharedState,
+pub(crate) fn stop_playback_after_advance_failure(
+    state_guard: &crate::AppState,
     context: &'static str,
 ) -> anyhow::Result<player::PlaybackSnapshot> {
     tracing::warn!(
@@ -101,7 +102,6 @@ pub(crate) async fn stop_persisted_playback_after_advance_failure(
         context,
         "stopping playback after pending queue rows failed to resolve"
     );
-    let state_guard = state.read().await;
     state_guard.db.with_conn(|conn| {
         conn.execute(
             "UPDATE playback_state

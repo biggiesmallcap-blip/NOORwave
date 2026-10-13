@@ -144,18 +144,7 @@ async fn start_track_inner(
     {
         return Err(StartError::Superseded);
     }
-    let is_playing = state_guard
-        .db
-        .with_conn(|conn| {
-            conn.query_row(
-                "SELECT is_playing FROM playback_state WHERE id=1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(Into::into)
-        })
-        .map(|value| value != 0)
-        .unwrap_or(true);
+    let is_playing = super::settings::transport_intent_is_playing(&state_guard);
     let source_guard =
         expected_runtime.map(|(expected, _)| expected.lock_playback_source_identity());
     if let Some((_, expected_source)) = expected_runtime {

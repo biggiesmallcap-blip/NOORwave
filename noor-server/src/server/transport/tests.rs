@@ -5948,3 +5948,37 @@ async fn play_command_rejects_non_library_ids_without_touching_playback() {
     ));
     assert!(commands.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn owned_queue_writes_are_skipped_once_superseded() {
+    use super::generation::mutate_if_owner_current;
+    let (state, handle, _, _) = cpal_fault_fixture().await;
+    let source = handle.playback_source_identity();
+    let generation = current_playback_generation(&*state.read().await);
+
+    let ran = mutate_if_owner_current(&state, generation, Some((&handle, &source)), |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(ran.is_some(), "the current owner may write");
+
+    // A user command admitted meanwhile owns the queue now.
+    let newer = super::generation::bump(&state).await;
+    let stale = mutate_if_owner_current(&state, generation, None, |_| -> anyhow::Result<()> {
+        panic!("stale generation wrote the queue")
+    })
+    .await
+    .unwrap();
+    assert!(stale.is_none());
+
+    // Same generation, but the decoder was replaced.
+    handle.test_replace_playback_source();
+    let replaced = mutate_if_owner_current(
+        &state,
+        newer,
+        Some((&handle, &source)),
+        |_| -> anyhow::Result<()> { panic!("retired decoder wrote the queue") },
+    )
+    .await
+    .unwrap();
+    assert!(replaced.is_none());
+}

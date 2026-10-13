@@ -30,6 +30,7 @@ use crate::server::routes::{
 };
 use crate::server::transport::generation::{
     current as current_playback_generation, is_current as playback_generation_is_current,
+    mutate_if_owner_current, owner_is_current,
 };
 use crate::server::transport::start::{
     Dispatch, Generation, StartError, StartRequest, start_track, start_track_for_runtime,
@@ -1281,17 +1282,12 @@ async fn switch_runtime_to_snapshot_current_for_owner(
             let mut state_guard = state.write().await;
             let source_guard =
                 expected_owner.map(|(runtime, _)| runtime.lock_playback_source_identity());
-            if current_playback_generation(&state_guard) != generation
-                || expected_owner.is_some_and(|(runtime, expected_source)| {
-                    !state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                        || source_guard
-                            .as_ref()
-                            .is_none_or(|current| !Arc::ptr_eq(current, expected_source))
-                })
-            {
+            if !owner_is_current(
+                &state_guard,
+                generation,
+                expected_owner,
+                source_guard.as_deref(),
+            ) {
                 return Ok(());
             }
             if let Some(info) = state_guard.playback_runtime_info.as_mut() {
@@ -1443,15 +1439,17 @@ async fn switch_runtime_to_snapshot_current_for_owner(
                     if err.is_asset_not_ready() {
                         spawn_tidal_id_reresolve(state, track.id);
                     }
-                    // Advance the persisted queue past the dead row and retry.
-                    let cleared = {
-                        let s = state.read().await;
-                        recently_cleared(&s)
+                    // Advance the persisted queue past the dead row and retry,
+                    // unless a user command or decoder change superseded us.
+                    let Some(advanced) =
+                        mutate_if_owner_current(state, generation, expected_owner, |s| {
+                            let cleared = recently_cleared(s);
+                            s.db.with_conn(|conn| player::next_track(conn, cleared))
+                        })
+                        .await?
+                    else {
+                        return Ok(());
                     };
-                    let advanced = {
-                        let s = state.read().await;
-                        s.db.with_conn(|conn| player::next_track(conn, cleared))
-                    }?;
                     snapshot = resolve_or_skip_pending_current(
                         state,
                         advanced,
@@ -1529,13 +1527,7 @@ async fn switch_runtime_to_snapshot_current_for_owner(
     }
 }
 
-/// Advance through persisted queue rows after a runtime track completes.
-///
-/// Skip-and-retry advance: a single TIDAL hiccup (especially a 429 rate-limit a
-/// few tracks into a mix) used to nuke the entire remaining queue. 429 is
-/// recoverable (sleep + retry the same track once); any other failure is
-/// track-specific (skip to the next item). Only gives up when the continuation
-/// is exhausted or MAX_CONSEC_FAILURES distinct tracks fail in a row.
+/// Test entry point: the end-of-track advance with no runtime owner.
 #[cfg(test)]
 pub(crate) async fn handle_runtime_finished(
     state: SharedState,
@@ -1551,20 +1543,10 @@ fn runtime_finish_owner_is_current(
     expected_runtime: Option<&playback_runtime::PlaybackRuntimeHandle>,
     expected_source: Option<&Arc<std::sync::atomic::AtomicU64>>,
 ) -> bool {
-    if current_playback_generation(state_guard) != generation {
-        return false;
-    }
-    match (expected_runtime, expected_source) {
-        (None, None) => true,
-        (Some(runtime), Some(source_identity)) => {
-            state_guard
-                .playback_runtime
-                .as_ref()
-                .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                && Arc::ptr_eq(&runtime.lock_playback_source_identity(), source_identity)
-        }
-        _ => false,
-    }
+    debug_assert_eq!(expected_runtime.is_some(), expected_source.is_some());
+    let owner = expected_runtime.zip(expected_source);
+    let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
+    owner_is_current(state_guard, generation, owner, source_guard.as_deref())
 }
 
 async fn handle_runtime_finished_for_owner(
@@ -1627,18 +1609,13 @@ async fn handle_runtime_finished_for_owner(
         // Keep the source lock while the queue row is advanced. A same-runtime
         // decoder restart uses this mutex before replacing its identity.
         let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
-        let owner_is_current = current_playback_generation(&state_guard) == generation
-            && match (expected_runtime, expected_source, source_guard.as_ref()) {
-                (None, None, None) => true,
-                (Some(runtime), Some(expected_source), Some(current_source)) => {
-                    state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                        && Arc::ptr_eq(current_source, expected_source)
-                }
-                _ => false,
-            };
+        debug_assert_eq!(expected_runtime.is_some(), expected_source.is_some());
+        let owner_is_current = owner_is_current(
+            &state_guard,
+            generation,
+            expected_runtime.zip(expected_source),
+            source_guard.as_deref(),
+        );
         if !owner_is_current {
             tracing::warn!(
                 target: "noor.playback.advance",
@@ -1674,18 +1651,13 @@ async fn handle_runtime_finished_for_owner(
         // Mismatch cleanup can wait behind another writer. Revalidate while
         // holding the source identity through the session/history mutation.
         let source_guard = expected_runtime.map(|runtime| runtime.lock_playback_source_identity());
-        let owner_is_current = current_playback_generation(&state_guard) == generation
-            && match (expected_runtime, expected_source, source_guard.as_ref()) {
-                (None, None, None) => true,
-                (Some(runtime), Some(expected_source), Some(current_source)) => {
-                    state_guard
-                        .playback_runtime
-                        .as_ref()
-                        .is_some_and(|current| current.handle.is_same_runtime(runtime))
-                        && Arc::ptr_eq(current_source, expected_source)
-                }
-                _ => false,
-            };
+        debug_assert_eq!(expected_runtime.is_some(), expected_source.is_some());
+        let owner_is_current = owner_is_current(
+            &state_guard,
+            generation,
+            expected_runtime.zip(expected_source),
+            source_guard.as_deref(),
+        );
         if !owner_is_current {
             return Ok(());
         }
