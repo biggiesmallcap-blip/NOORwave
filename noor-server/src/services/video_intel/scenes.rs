@@ -29,6 +29,15 @@ const NEXT_ID_KEY: &str = "video_intel.scene_next_id";
 const EXEMPLARS: usize = 4;
 const STABLE_JACCARD: f64 = 0.5;
 const SECOND_SCENE_SHARE: f64 = 0.3;
+/// After the communities are cut, a node changes scene only when its edges
+/// into another scene weigh this many times its edges at home.
+const MOVE_RATIO: f64 = 2.0;
+/// Bound on the dissolve-and-settle loop; real graphs settle in a few.
+const SETTLE_ROUNDS: usize = 8;
+/// Warm rebuilds need the previous scenes to still cover this share of the
+/// artists with videos in the graph; below it the map is re-cut cold (ids
+/// still carry over by overlap).
+const WARM_MIN_COVERAGE: f64 = 0.5;
 const ROUTE_HOP_TOLL: f64 = 0.05;
 
 /// Tuning for `find_scenes`; the defaults are what the real catalog needs
@@ -164,18 +173,12 @@ pub struct ArtistGraph {
     pub sources: Vec<u8>,
 }
 
-fn source_index(source: &str) -> Option<u8> {
-    EDGE_SOURCES
-        .iter()
-        .position(|known| *known == source)
-        .map(|index| index as u8)
-}
-
 impl ArtistGraph {
     /// Rows of (seed, related, source index, weight) in any direction.
     pub fn from_rows(rows: &[(i64, i64, u8, f64)]) -> Self {
-        // (1 - noisy-OR so far, strongest source, its weight)
-        let mut pairs: BTreeMap<(i64, i64), (f64, u8, f64)> = BTreeMap::new();
+        // (1 - noisy-OR so far, strongest source, its weight); rows fold in
+        // input order, so the products are the same bits every load.
+        let mut pairs: HashMap<(i64, i64), (f64, u8, f64)> = HashMap::with_capacity(rows.len());
         for &(a, b, source, weight) in rows {
             if a <= 0
                 || b <= 0
@@ -201,10 +204,12 @@ impl ArtistGraph {
         ids.sort_unstable();
         ids.dedup();
         let index = |id: i64| ids.binary_search(&id).map(|i| i as u32).unwrap_or(0);
-        let edges: Vec<(u32, u32, f64)> = pairs
+        let mut edges: Vec<(u32, u32, f64)> = pairs
             .iter()
             .map(|((a, b), (rest, _, _))| (index(*a), index(*b), 1.0 - rest))
             .collect();
+        // Hash order is arbitrary; the CSR wants a fixed one.
+        edges.sort_unstable_by_key(|edge| (edge.0, edge.1));
         let csr = Csr::from_edges(ids.len(), &edges);
         let mut sources = Vec::with_capacity(csr.targets.len());
         for node in 0..csr.len() {
@@ -217,8 +222,13 @@ impl ArtistGraph {
     }
 
     pub fn load(conn: &Connection) -> Result<Self> {
+        // Source indices follow EDGE_SOURCES.
         let mut stmt = conn.prepare(
-            "SELECT seed_tidal_id, related_tidal_id, source, weight FROM video_related_artists
+            "SELECT seed_tidal_id, related_tidal_id,
+                    CASE source WHEN 'tidal' THEN 0 WHEN 'lastfm' THEN 1
+                                WHEN 'featured' THEN 2 ELSE 3 END,
+                    weight
+               FROM video_related_artists
               WHERE source IN ('tidal', 'lastfm', 'featured', 'colist')",
         )?;
         let rows = stmt
@@ -226,16 +236,10 @@ impl ArtistGraph {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, u8>(2)?,
                     row.get::<_, f64>(3)?,
                 ))
             })?
-            .filter_map(|row| match row {
-                Ok((a, b, source, weight)) => {
-                    source_index(&source).map(|source| Ok((a, b, source, weight)))
-                }
-                Err(error) => Some(Err(error)),
-            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self::from_rows(&rows))
     }
@@ -433,8 +437,15 @@ pub fn is_various_artists(id: i64, name: &str) -> bool {
 /// left out.
 pub fn load_artist_videos(conn: &Connection) -> Result<BTreeMap<i64, ArtistVideos>> {
     let mut out = BTreeMap::new();
+    let ready = facets_ready(conn)?;
     {
-        let mut stmt = conn.prepare(
+        // Durations live in the JSON; once facets exist they come from
+        // there, and this pass only counts (no JSON parsing).
+        let sql = if ready {
+            "SELECT artist_tidal_id, MAX(artist_name), COUNT(*), 0, 0
+               FROM video_catalog WHERE artist_tidal_id > 0
+              GROUP BY artist_tidal_id"
+        } else {
             "SELECT artist_tidal_id, MAX(artist_name), COUNT(*),
                     SUM(CASE WHEN d IS NULL OR d >= ?1 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN d IS NULL OR d >= ?1 THEN COALESCE(d, 0) ELSE 0 END)
@@ -442,9 +453,11 @@ pub fn load_artist_videos(conn: &Connection) -> Result<BTreeMap<i64, ArtistVideo
                             COALESCE(json_extract(item_json, '$.duration_s'),
                                      json_extract(item_json, '$.duration_ms') / 1000) AS d
                        FROM video_catalog WHERE artist_tidal_id > 0)
-              GROUP BY artist_tidal_id",
-        )?;
-        let rows = stmt.query_map([MIN_PROGRAMMABLE_S], |row| {
+              GROUP BY artist_tidal_id"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let bind: &[&dyn rusqlite::ToSql] = if ready { &[] } else { &[&MIN_PROGRAMMABLE_S] };
+        let rows = stmt.query_map(bind, |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 ArtistVideos {
@@ -462,11 +475,7 @@ pub fn load_artist_videos(conn: &Connection) -> Result<BTreeMap<i64, ArtistVideo
             }
         }
     }
-    if facets_ready(conn)? {
-        for artist in out.values_mut() {
-            artist.programmable = 0;
-            artist.programmable_s = 0;
-        }
+    if ready {
         let mut stmt = conn.prepare(
             "SELECT artist_tidal_id, SUM(programmable),
                     SUM(CASE WHEN programmable = 1 THEN COALESCE(duration_s, 0) ELSE 0 END)
@@ -527,51 +536,87 @@ pub fn exemplar_score(videos: i64, degree: usize, popularity: Option<i64>) -> f6
 
 // --------------------------------------------------------------- scenes
 
-/// Scene label per graph node, None for nodes that belong to no scene.
-/// `videos[i]` is node i's catalog videos. Louvain at the base resolution;
-/// communities over `split_over` videos are re-run alone at the split
-/// resolution and their pieces under `split_piece_min` let go; then every
-/// node in a scene under `dissolve_under` videos (or in none) joins the big
-/// scene its edges point to most, round after round. Whatever cannot join
-/// anything stays out.
-pub fn find_scenes(graph: &Csr, videos: &[i64], params: &SceneParams) -> Vec<Option<u32>> {
-    let n = graph.len();
-    let base = louvain::louvain(graph, params.resolution);
-    let communities = base.iter().map(|c| *c as usize + 1).max().unwrap_or(0);
-    let mut members: Vec<Vec<u32>> = vec![Vec::new(); communities];
-    let mut community_videos = vec![0i64; communities];
-    for (node, community) in base.iter().enumerate() {
-        members[*community as usize].push(node as u32);
-        community_videos[*community as usize] += videos[node];
-    }
-    let mut scene: Vec<Option<u32>> = vec![None; n];
-    let mut next = 0u32;
-    for (community, nodes) in members.iter().enumerate() {
-        if community_videos[community] > params.split_over {
-            let parts = louvain::louvain(&graph.induced(nodes), params.split_resolution);
-            let count = parts.iter().map(|p| *p as usize + 1).max().unwrap_or(0);
-            let mut part_videos = vec![0i64; count];
-            for (local, part) in parts.iter().enumerate() {
-                part_videos[*part as usize] += videos[nodes[local] as usize];
-            }
-            let mut labels = vec![None; count];
-            for (part, label) in labels.iter_mut().enumerate() {
-                if part_videos[part] >= params.split_piece_min {
-                    *label = Some(next);
-                    next += 1;
-                }
-            }
-            for (local, part) in parts.iter().enumerate() {
-                scene[nodes[local] as usize] = labels[*part as usize];
-            }
-        } else {
-            for &node in nodes {
-                scene[node as usize] = Some(next);
-            }
-            next += 1;
+/// Edge weight from `node` to each label its neighbours carry (the node
+/// itself excluded), into `tally`.
+fn pull(graph: &Csr, labels: &[Option<u32>], node: usize, tally: &mut BTreeMap<u32, f64>) {
+    tally.clear();
+    let (targets, weights) = graph.row(node);
+    for (&target, &weight) in targets.iter().zip(weights) {
+        if target as usize != node
+            && let Some(label) = labels[target as usize]
+        {
+            *tally.entry(label).or_default() += weight;
         }
     }
-    let labels = next as usize;
+}
+
+/// The heaviest label `accept` allows; BTreeMap order breaks ties to the
+/// lowest label.
+fn heaviest(tally: &BTreeMap<u32, f64>, accept: impl Fn(u32) -> bool) -> Option<(u32, f64)> {
+    let mut choice: Option<(u32, f64)> = None;
+    for (&label, &weight) in tally {
+        if accept(label) && choice.is_none_or(|(_, best)| weight > best) {
+            choice = Some((label, weight));
+        }
+    }
+    choice
+}
+
+/// Split every scene over `limit` videos with Louvain at the split
+/// resolution; pieces under `split_piece_min` let go of their nodes.
+fn split_giants(
+    graph: &Csr,
+    videos: &[i64],
+    scene: &mut [Option<u32>],
+    next: &mut u32,
+    limit: i64,
+    params: &SceneParams,
+) {
+    let mut members: BTreeMap<u32, (Vec<u32>, i64)> = BTreeMap::new();
+    for (node, label) in scene.iter().enumerate() {
+        if let Some(label) = label {
+            let entry = members.entry(*label).or_default();
+            entry.0.push(node as u32);
+            entry.1 += videos[node];
+        }
+    }
+    for (nodes, total) in members.values() {
+        if *total <= limit {
+            continue;
+        }
+        let parts = louvain::louvain(&graph.induced(nodes), params.split_resolution);
+        let count = parts.iter().map(|p| *p as usize + 1).max().unwrap_or(0);
+        let mut part_videos = vec![0i64; count];
+        for (local, part) in parts.iter().enumerate() {
+            part_videos[*part as usize] += videos[nodes[local] as usize];
+        }
+        let mut pieces = vec![None; count];
+        for (part, piece) in pieces.iter_mut().enumerate() {
+            if part_videos[part] >= params.split_piece_min {
+                *piece = Some(*next);
+                *next += 1;
+            }
+        }
+        for (local, part) in parts.iter().enumerate() {
+            scene[nodes[local] as usize] = pieces[*part as usize];
+        }
+    }
+}
+
+/// Dissolve the small (every node in a scene under `dissolve_under` videos,
+/// or in none, joins the big scene its edges point to most, round after
+/// round), then let clearly misplaced nodes go where their edges are (edges
+/// into another scene weighing `MOVE_RATIO` times those at home), until
+/// nothing moves. Scenes still under the floor are dropped at the end.
+fn settle(
+    graph: &Csr,
+    videos: &[i64],
+    mut scene: Vec<Option<u32>>,
+    labels: usize,
+    params: &SceneParams,
+) -> Vec<Option<u32>> {
+    let n = graph.len();
+    let mut tally: BTreeMap<u32, f64> = BTreeMap::new();
     let scene_videos = |scene: &[Option<u32>]| {
         let mut totals = vec![0i64; labels];
         for (node, label) in scene.iter().enumerate() {
@@ -581,33 +626,39 @@ pub fn find_scenes(graph: &Csr, videos: &[i64], params: &SceneParams) -> Vec<Opt
         }
         totals
     };
-    let mut tally: BTreeMap<u32, f64> = BTreeMap::new();
-    for _ in 0..params.dissolve_rounds {
-        let totals = scene_videos(&scene);
-        let big =
-            |label: Option<u32>| label.is_some_and(|l| totals[l as usize] >= params.dissolve_under);
+    for _ in 0..SETTLE_ROUNDS {
+        for _ in 0..params.dissolve_rounds {
+            let totals = scene_videos(&scene);
+            let big = |label: u32| totals[label as usize] >= params.dissolve_under;
+            let mut moves = Vec::new();
+            for node in 0..n {
+                if scene[node].is_some_and(big) {
+                    continue;
+                }
+                pull(graph, &scene, node, &mut tally);
+                if let Some((label, _)) = heaviest(&tally, big) {
+                    moves.push((node, label));
+                }
+            }
+            if moves.is_empty() {
+                break;
+            }
+            for (node, label) in moves {
+                scene[node] = Some(label);
+            }
+        }
         let mut moves = Vec::new();
         for node in 0..n {
-            if big(scene[node]) {
+            let Some(home) = scene[node] else {
                 continue;
-            }
-            tally.clear();
-            let (targets, weights) = graph.row(node);
-            for (&target, &weight) in targets.iter().zip(weights) {
-                let label = scene[target as usize];
-                if target as usize != node && big(label) {
-                    *tally.entry(label.unwrap_or_default()).or_default() += weight;
-                }
-            }
-            // Strongest pull wins; BTreeMap order breaks ties to the lowest label.
-            let mut choice: Option<(u32, f64)> = None;
-            for (&label, &weight) in &tally {
-                if choice.is_none_or(|(_, best)| weight > best) {
-                    choice = Some((label, weight));
-                }
-            }
-            if let Some((label, _)) = choice {
-                moves.push((node, label));
+            };
+            pull(graph, &scene, node, &mut tally);
+            let at_home = tally.get(&home).copied().unwrap_or(0.0);
+            if let Some((other, weight)) = heaviest(&tally, |label| label != home)
+                && weight > 0.0
+                && weight >= MOVE_RATIO * at_home
+            {
+                moves.push((node, other));
             }
         }
         if moves.is_empty() {
@@ -622,6 +673,120 @@ pub fn find_scenes(graph: &Csr, videos: &[i64], params: &SceneParams) -> Vec<Opt
         if label.is_some_and(|l| totals[l as usize] < params.dissolve_under) {
             *label = None;
         }
+    }
+    scene
+}
+
+/// The cut from scratch: Louvain at the base resolution, communities over
+/// `split_over` videos re-run alone at the split resolution (pieces under
+/// `split_piece_min` let go), then `settle`.
+fn cold_scenes(graph: &Csr, videos: &[i64], params: &SceneParams) -> Vec<Option<u32>> {
+    let base = louvain::louvain(graph, params.resolution);
+    let mut next = base.iter().map(|c| c + 1).max().unwrap_or(0);
+    let mut scene: Vec<Option<u32>> = base.into_iter().map(Some).collect();
+    split_giants(
+        graph,
+        videos,
+        &mut scene,
+        &mut next,
+        params.split_over,
+        params,
+    );
+    settle(graph, videos, scene, next as usize, params)
+}
+
+/// The cut from what is remembered (a scene per artist with videos):
+/// remembered artists are pinned while everyone else (new artists, artists
+/// without videos) runs one Louvain local-moving phase, joining a scene
+/// only when that beats pairing up with other newcomers; newcomers left
+/// outside every old scene get their own Louvain run, so a corner of the
+/// graph the crawler just found becomes a new scene instead of being
+/// swallowed through one weak edge. A scene past twice the giant line
+/// splits; then `settle`.
+fn warm_scenes(
+    graph: &Csr,
+    videos: &[i64],
+    remembered: &[Option<u32>],
+    params: &SceneParams,
+) -> Vec<Option<u32>> {
+    let n = graph.len();
+    let fresh = remembered
+        .iter()
+        .flatten()
+        .map(|l| l + 1)
+        .max()
+        .unwrap_or(0);
+    let start: Vec<u32> = (0..n)
+        .map(|node| remembered[node].unwrap_or(fresh + node as u32))
+        .collect();
+    let pinned: Vec<bool> = remembered.iter().map(Option::is_some).collect();
+    let moved = louvain::local_moves(graph, params.resolution, &start, &pinned);
+    let free: Vec<u32> = (0..n as u32)
+        .filter(|node| moved[*node as usize] >= fresh)
+        .collect();
+    let mut scene: Vec<Option<u32>> = moved
+        .iter()
+        .map(|label| (*label < fresh).then_some(*label))
+        .collect();
+    let mut next = fresh;
+    if !free.is_empty() {
+        let parts = louvain::louvain(&graph.induced(&free), params.resolution);
+        for (local, part) in parts.iter().enumerate() {
+            scene[free[local] as usize] = Some(next + part);
+        }
+        next += parts.iter().map(|p| p + 1).max().unwrap_or(0);
+    }
+    split_giants(
+        graph,
+        videos,
+        &mut scene,
+        &mut next,
+        params.split_over * 2,
+        params,
+    );
+    settle(graph, videos, scene, next as usize, params)
+}
+
+/// Scene label per graph node, None for nodes that belong to no scene.
+/// `videos[i]` is node i's catalog videos; `warm` is the previous build's
+/// scene per artist with videos (None for a first build).
+///
+/// Only artists with videos are remembered between builds, so the result
+/// is iterated to a fixed point: the scenes of artists with videos, fed
+/// back as the memory, give the same scenes again. A first build starts
+/// from the cold cut, a later one from what it remembers; either way the
+/// next build over unchanged data is a no-op, and a build over a slightly
+/// changed graph keeps its scenes.
+pub fn find_scenes(
+    graph: &Csr,
+    videos: &[i64],
+    warm: Option<&[Option<u32>]>,
+    params: &SceneParams,
+) -> Vec<Option<u32>> {
+    let n = graph.len();
+    let remember = |scene: &[Option<u32>]| -> Vec<Option<u32>> {
+        scene
+            .iter()
+            .zip(videos)
+            .map(|(label, v)| label.filter(|_| *v > 0))
+            .collect()
+    };
+    let mut memory: Vec<Option<u32>> = match warm {
+        Some(known) => {
+            let mut known = known.to_vec();
+            known.resize(n, None);
+            known
+        }
+        None => remember(&cold_scenes(graph, videos, params)),
+    };
+    let mut scene = warm_scenes(graph, videos, &memory, params);
+    for _ in 0..SETTLE_ROUNDS {
+        let next = remember(&scene);
+        if next == memory {
+            break;
+        }
+        memory = next;
+        scene = warm_scenes(graph, videos, &memory, params);
     }
     scene
 }
@@ -749,7 +914,21 @@ pub fn plan(
         .iter()
         .map(|id| artists.get(id).map_or(0, |a| a.videos))
         .collect();
-    let labels = find_scenes(&graph.csr, &videos, params);
+    let mut owner: HashMap<i64, u32> = HashMap::new();
+    for (index, scene) in previous.iter().enumerate() {
+        for id in &scene.members {
+            owner.insert(*id, index as u32);
+        }
+    }
+    let known: Vec<Option<u32>> = graph.ids.iter().map(|id| owner.get(id).copied()).collect();
+    let with_videos = videos.iter().filter(|v| **v > 0).count();
+    let remembered = known
+        .iter()
+        .zip(&videos)
+        .filter(|(label, v)| label.is_some() && **v > 0)
+        .count();
+    let warm = with_videos > 0 && remembered as f64 >= WARM_MIN_COVERAGE * with_videos as f64;
+    let labels = find_scenes(&graph.csr, &videos, warm.then_some(&known[..]), params);
 
     let mut groups: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
     for (node, label) in labels.iter().enumerate() {
@@ -1131,11 +1310,69 @@ mod tests {
             dissolve_under: 20,
             ..small_params()
         };
-        let scenes = find_scenes(&csr, &videos, &params);
+        let scenes = find_scenes(&csr, &videos, None, &params);
         assert!(scenes.iter().all(Option::is_some));
         assert_eq!(scenes[12], scenes[7]);
         assert_eq!(scenes[13], scenes[7]);
         assert_ne!(scenes[0], scenes[7]);
+    }
+
+    #[test]
+    fn a_warm_rebuild_keeps_its_scenes() {
+        let mut edges = Vec::new();
+        for ring in 0..6u32 {
+            for a in ring * 6..ring * 6 + 6 {
+                for b in a + 1..ring * 6 + 6 {
+                    edges.push((a, b, 0.9));
+                }
+            }
+            edges.push((ring * 6, ((ring + 1) % 6) * 6 + 1, 0.5));
+        }
+        let csr = Csr::from_edges(36, &edges);
+        let videos = vec![10i64; 36];
+        let params = SceneParams {
+            dissolve_under: 30,
+            ..small_params()
+        };
+        let cold = find_scenes(&csr, &videos, None, &params);
+        assert_eq!(find_scenes(&csr, &videos, Some(&cold), &params), cold);
+        // Remember only every other node: the rest rejoin their scenes.
+        let half: Vec<Option<u32>> = cold
+            .iter()
+            .enumerate()
+            .map(|(node, label)| if node % 2 == 0 { *label } else { None })
+            .collect();
+        assert_eq!(find_scenes(&csr, &videos, Some(&half), &params), cold);
+        // A weakened bridge moves nothing; a node pulled hard elsewhere moves.
+        let mut moved = cold.clone();
+        moved[3] = cold[20];
+        let repaired = find_scenes(&csr, &videos, Some(&moved), &params);
+        assert_eq!(repaired, cold, "a misplaced artist goes home");
+    }
+
+    #[test]
+    fn a_new_corner_of_the_graph_becomes_a_new_scene() {
+        let mut edges = Vec::new();
+        for start in [0u32, 6] {
+            for a in start..start + 6 {
+                for b in a + 1..start + 6 {
+                    edges.push((a, b, 0.9));
+                }
+            }
+        }
+        let csr = Csr::from_edges(12, &edges);
+        let videos = vec![10i64; 12];
+        let params = SceneParams {
+            dissolve_under: 30,
+            ..small_params()
+        };
+        // Only the first clique was known last time.
+        let known: Vec<Option<u32>> = (0..12).map(|n| (n < 6).then_some(0)).collect();
+        let scenes = find_scenes(&csr, &videos, Some(&known), &params);
+        assert!(scenes[..6].iter().all(|s| *s == scenes[0]));
+        assert!(scenes[6..].iter().all(|s| *s == scenes[6]));
+        assert!(scenes[6].is_some());
+        assert_ne!(scenes[0], scenes[6]);
     }
 
     #[test]
@@ -1158,7 +1395,7 @@ mod tests {
             dissolve_under: 300,
             ..SceneParams::default()
         };
-        let merged = find_scenes(&csr, &videos, &whole);
+        let merged = find_scenes(&csr, &videos, None, &whole);
         assert_eq!(merged[0], merged[9], "one community at a tiny resolution");
         assert_eq!(merged[10], None, "a crumb of 200 videos with nowhere to go");
         let split = SceneParams {
@@ -1167,7 +1404,7 @@ mod tests {
             split_piece_min: 300,
             ..whole
         };
-        let scenes = find_scenes(&csr, &videos, &split);
+        let scenes = find_scenes(&csr, &videos, None, &split);
         assert_ne!(
             scenes[0], scenes[9],
             "the giant splits back into its cliques"
@@ -1462,8 +1699,13 @@ mod tests {
                     .map(|b| ((a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt())
             })
             .fold(0.0, f64::max);
+        let moved = first
+            .1
+            .iter()
+            .filter(|(id, a)| second.1.get(id).is_some_and(|b| b.0 != a.0))
+            .count();
         eprintln!(
-            "stable ids: {same_ids}; max scene drift {scene_drift:.6}; max artist drift {artist_drift:.6}"
+            "stable ids: {same_ids}; max scene drift {scene_drift:.6}; max artist drift {artist_drift:.6}; artists that changed scene {moved}"
         );
         let (charted, uncharted, covered_videos): (i64, i64, i64) = conn
             .query_row(

@@ -115,17 +115,24 @@ impl Csr {
 /// Community index per node, dense from 0 in order of each community's
 /// lowest node.
 pub fn louvain(graph: &Csr, resolution: f64) -> Vec<u32> {
-    if graph.is_empty() {
-        return Vec::new();
+    let singletons: Vec<u32> = (0..graph.len() as u32).collect();
+    louvain_from(graph, resolution, &singletons)
+}
+
+/// Louvain warm-started from a partition (any labels, one per node): the
+/// first local-moving phase starts from it instead of singletons, so a
+/// partition that still fits the graph survives with only its boundaries
+/// moved, and a rebuild over a slightly changed graph lands next to the last
+/// one instead of somewhere new.
+pub fn louvain_from(graph: &Csr, resolution: f64, initial: &[u32]) -> Vec<u32> {
+    if graph.is_empty() || initial.len() != graph.len() {
+        return (0..graph.len() as u32).collect();
     }
-    let n = graph.len();
-    let mut membership: Vec<u32> = (0..n as u32).collect();
+    let mut membership: Vec<u32> = (0..graph.len() as u32).collect();
     let mut level = graph.clone();
+    let mut start = renumber(initial);
     for _ in 0..MAX_LEVELS {
-        let (local, moved) = local_moving(&level, resolution);
-        if !moved {
-            break;
-        }
+        let local = local_moving(&level, resolution, &start);
         for community in membership.iter_mut() {
             *community = local[*community as usize];
         }
@@ -134,8 +141,26 @@ pub fn louvain(graph: &Csr, resolution: f64) -> Vec<u32> {
             break;
         }
         level = aggregate(&level, &local, count);
+        start = (0..count as u32).collect();
     }
     renumber(&membership)
+}
+
+/// One local-moving phase from `start` (any labels) in which `pinned` nodes
+/// never move: the rest join whichever neighbouring community gains most,
+/// pinned ones included. Labels come back in `start`'s label space (a node
+/// only ever takes a label some node started with).
+pub fn local_moves(graph: &Csr, resolution: f64, start: &[u32], pinned: &[bool]) -> Vec<u32> {
+    if start.len() != graph.len() || pinned.len() != graph.len() {
+        return start.to_vec();
+    }
+    let dense = renumber(start);
+    let mut original = vec![0u32; graph.len()];
+    for (label, dense_label) in start.iter().zip(&dense) {
+        original[*dense_label as usize] = *label;
+    }
+    let moved = local_moving_with(graph, resolution, &dense, Some(pinned), false);
+    moved.iter().map(|c| original[*c as usize]).collect()
 }
 
 /// Weighted modularity of a partition at a resolution.
@@ -165,24 +190,48 @@ pub fn modularity(graph: &Csr, partition: &[u32], resolution: f64) -> f64 {
         .sum()
 }
 
-/// One phase of greedy moves. Returns the dense partition and whether any
-/// node left its singleton.
-fn local_moving(graph: &Csr, resolution: f64) -> (Vec<u32>, bool) {
+/// One phase of greedy moves from a starting partition (dense labels below
+/// the node count). Returns the dense partition.
+fn local_moving(graph: &Csr, resolution: f64, start: &[u32]) -> Vec<u32> {
+    local_moving_with(graph, resolution, start, None, true)
+}
+
+/// The phase itself. Pinned nodes never move; `dense_out` renumbers the
+/// result, otherwise labels stay in `start`'s (dense) space.
+fn local_moving_with(
+    graph: &Csr,
+    resolution: f64,
+    start: &[u32],
+    pinned: Option<&[bool]>,
+    dense_out: bool,
+) -> Vec<u32> {
     let n = graph.len();
     let degree: Vec<f64> = (0..n).map(|node| graph.degree(node)).collect();
     let two_m: f64 = degree.iter().sum();
-    let mut community: Vec<u32> = (0..n as u32).collect();
+    let mut community: Vec<u32> = start.to_vec();
+    let finish = |community: Vec<u32>| {
+        if dense_out {
+            renumber(&community)
+        } else {
+            community
+        }
+    };
     if two_m <= 0.0 {
-        return (community, false);
+        return finish(community);
     }
-    let mut total = degree.clone();
+    let mut total = vec![0.0f64; n];
+    for (node, c) in community.iter().enumerate() {
+        total[*c as usize] += degree[node];
+    }
     let mut link = vec![0.0f64; n];
     let mut stamp = vec![u32::MAX; n];
     let mut touched: Vec<u32> = Vec::new();
-    let mut moved_any = false;
-    for pass in 0..MAX_PASSES {
+    for _ in 0..MAX_PASSES {
         let mut moves = 0usize;
         for node in 0..n {
+            if pinned.is_some_and(|pinned| pinned[node]) {
+                continue;
+            }
             let current = community[node];
             let k = degree[node];
             touched.clear();
@@ -237,12 +286,8 @@ fn local_moving(graph: &Csr, resolution: f64) -> (Vec<u32>, bool) {
         if moves == 0 {
             break;
         }
-        moved_any = true;
-        if pass + 1 == MAX_PASSES {
-            break;
-        }
     }
-    (renumber(&community), moved_any)
+    finish(community)
 }
 
 /// Collapse each community into one node; the new self-loop holds every
@@ -362,6 +407,45 @@ mod tests {
         assert_eq!(louvain(&csr, 1.0), louvain(&csr, 1.0));
         assert_eq!(louvain(&Csr::from_edges(3, &[]), 1.0), vec![0, 1, 2]);
         assert!(louvain(&Csr::from_edges(0, &[]), 1.0).is_empty());
+    }
+
+    #[test]
+    fn a_warm_start_keeps_a_good_partition_and_repairs_a_bad_one() {
+        // Three loosely bridged cliques. Starting from the right answer
+        // changes nothing; starting with one node misplaced puts it back.
+        let mut edges = clique(0, 5, 1.0);
+        edges.extend(clique(5, 5, 1.0));
+        edges.extend(clique(10, 5, 1.0));
+        edges.extend([(4, 5, 0.2), (9, 10, 0.2)]);
+        let csr = Csr::from_edges(15, &edges);
+        let truth: Vec<u32> = (0..15).map(|node| node / 5).collect();
+        assert_eq!(louvain_from(&csr, 1.0, &truth), truth);
+        let mut wrong = truth.clone();
+        wrong[2] = 2;
+        assert_eq!(louvain_from(&csr, 1.0, &wrong), truth);
+        // Labels are free-form; a short initial partition falls back to
+        // singletons rather than panicking.
+        let shifted: Vec<u32> = truth.iter().map(|c| c + 40).collect();
+        assert_eq!(louvain_from(&csr, 1.0, &shifted), truth);
+        assert_eq!(louvain_from(&csr, 1.0, &[0, 1]).len(), 15);
+    }
+
+    #[test]
+    fn local_moves_keep_pinned_nodes_and_their_labels() {
+        // Clique 0..4 pinned as "70"; clique 5..9 free, bridged weakly.
+        let mut edges = clique(0, 5, 1.0);
+        edges.extend(clique(5, 5, 1.0));
+        edges.push((4, 5, 0.1));
+        let csr = Csr::from_edges(10, &edges);
+        let start: Vec<u32> = (0..10).map(|n| if n < 5 { 70 } else { 100 + n }).collect();
+        let pinned: Vec<bool> = (0..10).map(|n| n < 5).collect();
+        let moved = local_moves(&csr, 1.0, &start, &pinned);
+        assert!(moved[..5].iter().all(|l| *l == 70));
+        assert!(moved[5..].iter().all(|l| *l == moved[5] && *l >= 100));
+        // A pinned node stays even when everything pulls it away.
+        let mut lonely = start.clone();
+        lonely[2] = 71;
+        assert_eq!(local_moves(&csr, 1.0, &lonely, &pinned)[2], 71);
     }
 
     #[test]
