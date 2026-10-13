@@ -42,7 +42,8 @@
 	let activeIndex = $state(-1);
 	let trigger = $state<HTMLButtonElement>();
 	let menu = $state<HTMLElement>();
-	let place = $state({ top: 0, left: 0, width: 0, maxHeight: 320, up: false });
+	const MAX_LIST_PX = 480;
+	let place = $state({ top: 0, left: 0, width: 0, maxHeight: MAX_LIST_PX, up: false });
 	let closeTimer: ReturnType<typeof setTimeout> | undefined;
 
 	let selectedIndex = $derived(options.findIndex((option) => option.value === value));
@@ -54,7 +55,9 @@
 		const above = rect.top - GAP - MARGIN;
 		const natural = menu?.scrollHeight ?? 0;
 		const up = natural > below && above > below;
-		const maxHeight = Math.min(320, up ? above : below);
+		// Tall enough for a dozen options without a scrollbar; longer lists
+		// (or a short window) scroll.
+		const maxHeight = Math.min(MAX_LIST_PX, up ? above : below);
 		const height = Math.min(natural, maxHeight);
 		const width = Math.max(rect.width, menu?.offsetWidth ?? 0);
 		place = {

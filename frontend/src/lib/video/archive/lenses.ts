@@ -64,16 +64,20 @@ export const CUT_LABELS: Record<VideoCut, string> = {
 	longform: 'Long form',
 };
 
-export const DEPTHS: readonly { value: ArchiveDepth; label: string }[] = [
-	{ value: 'big', label: 'Big ones' },
-	{ value: 'mid', label: 'Middle' },
-	{ value: 'deep', label: 'Deep cuts' },
+/** Depth is how well known a song is: the TIDAL popularity (0-100) of its
+ *  best cut. Big is 15 and up (about the top sixth), deep is under 4
+ *  (about three in five songs); the server's archive.rs owns the cutoffs. */
+export const DEPTHS: readonly { value: ArchiveDepth; label: string; hint: string }[] = [
+	{ value: 'big', label: 'Big ones', hint: 'The hits: the best-known sixth' },
+	{ value: 'mid', label: 'Middle', hint: 'Known, not huge' },
+	{ value: 'deep', label: 'Deep cuts', hint: 'The long tail few have heard' },
 ];
 
-export const LENGTHS: readonly { value: ArchiveLength; label: string }[] = [
-	{ value: 'clip', label: 'Clips' },
-	{ value: 'song', label: 'Songs' },
-	{ value: 'long', label: 'Long form' },
+/** Length is the best cut's runtime: clips under 90 s, long form 10 min up. */
+export const LENGTHS: readonly { value: ArchiveLength; label: string; hint: string }[] = [
+	{ value: 'clip', label: 'Clips', hint: 'Under 90 seconds' },
+	{ value: 'song', label: 'Songs', hint: '90 seconds to 10 minutes' },
+	{ value: 'long', label: 'Long form', hint: 'Concerts, films, 10 minutes and up' },
 ];
 
 export const SOURCES: readonly { value: ArchiveSource; label: string }[] = [
@@ -82,12 +86,20 @@ export const SOURCES: readonly { value: ArchiveSource; label: string }[] = [
 	{ value: 'saved', label: 'Saved' },
 ];
 
+/** Best first: artists you watch, then your library's, then charted ones,
+ *  by popularity within, spaced so no artist fills a screen. Most popular:
+ *  TIDAL popularity, spaced the same. Most versions: songs with the most
+ *  cuts. A-Z by folded title or artist. Newest / Oldest songs: song year,
+ *  unknown last. Newest on TIDAL: the latest video ids. */
 export const SORTS: readonly { value: ArchiveSort; label: string }[] = [
 	{ value: 'relevance', label: 'Best first' },
 	{ value: 'popular', label: 'Most popular' },
 	{ value: 'versions', label: 'Most versions' },
-	{ value: 'year', label: 'Song year' },
-	{ value: 'newest', label: 'Newest uploads' },
+	{ value: 'title', label: 'Title A-Z' },
+	{ value: 'artist', label: 'Artist A-Z' },
+	{ value: 'year_desc', label: 'Newest songs' },
+	{ value: 'year', label: 'Oldest songs' },
+	{ value: 'newest', label: 'Newest on TIDAL' },
 ];
 
 const MIN_YEAR = 1900;

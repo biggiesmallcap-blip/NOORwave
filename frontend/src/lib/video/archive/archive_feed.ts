@@ -2,8 +2,13 @@
 // then pages appended on scroll. A newer lens state aborts whatever is in
 // flight (first page or a page of more), and a late answer for an old state
 // is dropped by sequence number even if the abort came too late.
+//
+// The loaded window need not start at the top: a jump (the scrubber's letter
+// or decade) loads the page at that offset, and the window then grows both
+// ways, later pages appended and earlier ones prepended. `base` is the
+// offset of the first loaded item.
 
-import type { ArchiveQuery, ArchiveResponse, ArchiveSong } from '$lib/api/video_explore_types';
+import type { ArchiveJump, ArchiveQuery, ArchiveResponse, ArchiveSong } from '$lib/api/video_explore_types';
 import { lensKey, lensesToQuery, type ArchiveLenses } from './lenses';
 
 export type ArchiveFetch = (query: ArchiveQuery, signal: AbortSignal) => Promise<ArchiveResponse>;
@@ -28,6 +33,11 @@ export interface FeedState {
 	facets: ArchiveResponse['facets'] | null;
 	loadingMore: boolean;
 	error: unknown;
+	/** Offset of items[0] in the whole result. */
+	base: number;
+	/** Sections of the whole result (A-Z and year sorts). */
+	jumps: ArchiveJump[];
+	loadingEarlier: boolean;
 }
 
 export const EMPTY_FEED: FeedState = {
@@ -38,6 +48,9 @@ export const EMPTY_FEED: FeedState = {
 	facets: null,
 	loadingMore: false,
 	error: null,
+	base: 0,
+	jumps: [],
+	loadingEarlier: false,
 };
 
 export interface ArchiveFeedOptions {
@@ -52,6 +65,12 @@ export interface ArchiveFeed {
 	request(lenses: ArchiveLenses, opts?: { immediate?: boolean }): void;
 	/** Append the next page, if there is one and nothing else is loading. */
 	loadMore(): void;
+	/** Prepend the page before the loaded window, after a jump. */
+	loadEarlier(): void;
+	/** Show the result from `offset`: the index of that item in `items`
+	 *  once it is there (no request when it is already loaded), or null
+	 *  when the feed moved on meanwhile. */
+	jumpTo(offset: number): Promise<number | null>;
 	/** Ask again for the current lens state (Retry, or a building poll). */
 	retry(): void;
 	readonly state: FeedState;
@@ -121,7 +140,10 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 				total: response.total,
 				facets: response.facets,
 				loadingMore: false,
+				loadingEarlier: false,
 				error: null,
+				base: 0,
+				jumps: response.jumps ?? [],
 			});
 		} catch (error) {
 			if (mySeq !== seq || isAbort(error)) return;
@@ -160,14 +182,14 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 		},
 		loadMore() {
 			if (disposed || !lenses || state.phase !== 'ready' || state.loadingMore) return;
-			if (state.items.length >= state.total) return;
+			if (state.base + state.items.length >= state.total) return;
 			const mySeq = seq;
 			const target = lenses;
 			const ctrl = new AbortController();
 			controller = ctrl;
 			set({ loadingMore: true });
 			void options
-				.fetch(lensesToQuery(target, state.items.length, pageSize), ctrl.signal)
+				.fetch(lensesToQuery(target, state.base + state.items.length, pageSize), ctrl.signal)
 				.then((response) => {
 					if (mySeq !== seq) return;
 					controller = null;
@@ -175,7 +197,7 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 					const fresh = response.items.filter((item) => !seen.has(item.song_key));
 					set({
 						items: [...state.items, ...fresh],
-						total: fresh.length === 0 ? state.items.length : response.total,
+						total: fresh.length === 0 ? state.base + state.items.length : response.total,
 						loadingMore: false,
 					});
 				})
@@ -183,8 +205,56 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 					if (mySeq !== seq || isAbort(error)) return;
 					controller = null;
 					// A failed page ends the scroll quietly; the rows already shown stay.
-					set({ loadingMore: false, total: state.items.length });
+					set({ loadingMore: false, total: state.base + state.items.length });
 				});
+		},
+		loadEarlier() {
+			if (disposed || !lenses || state.phase !== 'ready' || state.loadingEarlier || state.base <= 0) return;
+			const mySeq = seq;
+			const target = lenses;
+			const from = Math.max(0, state.base - pageSize);
+			const limit = state.base - from;
+			set({ loadingEarlier: true });
+			void options
+				.fetch(lensesToQuery(target, from, limit), new AbortController().signal)
+				.then((response) => {
+					if (mySeq !== seq) return;
+					const seen = new Set(state.items.map((item) => item.song_key));
+					const fresh = response.items.filter((item) => !seen.has(item.song_key));
+					set({ items: [...fresh, ...state.items], base: from, loadingEarlier: false });
+				})
+				.catch(() => {
+					if (mySeq !== seq) return;
+					set({ loadingEarlier: false });
+				});
+		},
+		async jumpTo(offset) {
+			if (disposed || !lenses || state.phase !== 'ready') return null;
+			const target = Math.max(0, Math.min(offset, Math.max(0, state.total - 1)));
+			if (target >= state.base && target < state.base + state.items.length) return target - state.base;
+			// A window of its own: whatever was loading for the old one stops.
+			controller?.abort();
+			controller = null;
+			const mySeq = ++seq;
+			const ctrl = new AbortController();
+			controller = ctrl;
+			set({ loadingMore: false, loadingEarlier: false });
+			try {
+				const response = await options.fetch(lensesToQuery(lenses, target, pageSize), ctrl.signal);
+				if (mySeq !== seq) return null;
+				controller = null;
+				set({
+					items: uniqueSongs(response.items),
+					total: response.total,
+					base: target,
+					jumps: response.jumps ?? state.jumps,
+				});
+				return 0;
+			} catch (error) {
+				if (mySeq !== seq || isAbort(error)) return null;
+				controller = null;
+				return null;
+			}
 		},
 		retry() {
 			if (disposed || !lenses) return;
@@ -194,7 +264,7 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 			return state;
 		},
 		get hasMore() {
-			return state.phase === 'ready' && state.items.length < state.total;
+			return state.phase === 'ready' && state.base + state.items.length < state.total;
 		},
 		dispose() {
 			disposed = true;

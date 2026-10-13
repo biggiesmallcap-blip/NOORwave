@@ -171,3 +171,53 @@ describe('archive feed', () => {
 		expect(feed.state.phase).toBe('error');
 	});
 });
+
+describe('jumping deep into a sorted list', () => {
+	test('a jump loads the window at that offset; it then grows both ways', async () => {
+		const { feed, calls } = harness(0);
+		feed.request({ ...DEFAULT_LENSES, sort: 'title' });
+		calls[0].resolve({ ...response([song(1), song(2)], 10), jumps: [{ label: 'A', offset: 0 }, { label: 'M', offset: 6 }] });
+		await flush();
+		expect(feed.state.jumps.map((j) => j.label)).toEqual(['A', 'M']);
+
+		// Already loaded: no request, just where it is.
+		expect(await feed.jumpTo(1)).toBe(1);
+		expect(calls).toHaveLength(1);
+
+		const jumped = feed.jumpTo(6);
+		expect(calls[1].query).toMatchObject({ sort: 'title', offset: 6, limit: 2 });
+		calls[1].resolve(response([song(7), song(8)], 10));
+		expect(await jumped).toBe(0);
+		expect(feed.state.base).toBe(6);
+		expect(feed.hasMore).toBe(true);
+
+		feed.loadMore();
+		expect(calls[2].query).toMatchObject({ offset: 8, limit: 2 });
+		calls[2].resolve(response([song(9), song(10)], 10));
+		await flush();
+		expect(feed.hasMore).toBe(false);
+
+		feed.loadEarlier();
+		expect(calls[3].query).toMatchObject({ offset: 4, limit: 2 });
+		calls[3].resolve(response([song(5), song(6)], 10));
+		await flush();
+		expect(feed.state.base).toBe(4);
+		expect(feed.state.items.map((s) => s.title)).toEqual(['Song 5', 'Song 6', 'Song 7', 'Song 8', 'Song 9', 'Song 10']);
+	});
+
+	test('a new lens state starts again at the top', async () => {
+		const { feed, calls } = harness(0);
+		feed.request({ ...DEFAULT_LENSES, sort: 'title' });
+		calls[0].resolve(response([song(1), song(2)], 10));
+		await flush();
+		const jumped = feed.jumpTo(6);
+		calls[1].resolve(response([song(7), song(8)], 10));
+		await jumped;
+		feed.request({ ...DEFAULT_LENSES, sort: 'artist' });
+		expect(calls[2].query).toMatchObject({ sort: 'artist', offset: 0 });
+		calls[2].resolve(response([song(3)], 1));
+		await flush();
+		expect(feed.state.base).toBe(0);
+		expect(feed.state.jumps).toEqual([]);
+	});
+});

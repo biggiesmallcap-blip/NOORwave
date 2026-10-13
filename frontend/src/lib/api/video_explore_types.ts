@@ -179,7 +179,7 @@ export interface VideoCensus {
 	scene_rows: CensusScene[];
 }
 
-export type ArchiveSort = 'relevance' | 'newest' | 'year' | 'popular' | 'versions';
+export type ArchiveSort = 'relevance' | 'popular' | 'versions' | 'title' | 'artist' | 'year_desc' | 'year' | 'newest';
 export type ArchiveDepth = 'big' | 'mid' | 'deep';
 export type ArchiveLength = 'clip' | 'song' | 'long';
 export type ArchiveSource = 'catalog' | 'liked' | 'saved';
@@ -226,6 +226,15 @@ export interface ArchiveResponse {
 		depth: { depth: ArchiveDepth; count: number }[];
 		length: { length: ArchiveLength; count: number }[];
 	};
+	/** Where each letter (A-Z sorts) or decade (year sorts) starts in the
+	 *  whole sorted result; empty for the other sorts. */
+	jumps?: ArchiveJump[];
+}
+
+export interface ArchiveJump {
+	/** "A", "#", "1980s", "?" (unknown year). */
+	label: string;
+	offset: number;
 }
 
 export interface VideoVersion {

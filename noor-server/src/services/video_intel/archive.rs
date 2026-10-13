@@ -107,10 +107,19 @@ pub enum Source {
 pub enum Sort {
     #[default]
     Relevance,
+    /// Newest on TIDAL: the highest video id (TIDAL numbers videos as they
+    /// are published), so roughly the latest uploads.
     Newest,
+    /// Song year, oldest first; unknown years last.
     Year,
+    /// Song year, newest first; unknown years last.
+    YearDesc,
     Popular,
     Versions,
+    /// Title A-Z (folded: no case, accents or punctuation), then artist.
+    Title,
+    /// Artist A-Z, then title.
+    Artist,
 }
 
 /// `ArchiveQuery` from the client. Unknown values are ignored, never errors.
@@ -151,6 +160,9 @@ impl Query {
             sort: match get("sort") {
                 Some("newest") => Sort::Newest,
                 Some("year") => Sort::Year,
+                Some("year_desc") => Sort::YearDesc,
+                Some("title") => Sort::Title,
+                Some("artist") => Sort::Artist,
                 Some("popular") => Sort::Popular,
                 Some("versions") => Sort::Versions,
                 _ => Sort::Relevance,
@@ -388,6 +400,14 @@ pub struct Facets {
     pub length: Vec<LengthFacet>,
 }
 
+/// Where a section of a sorted list starts: a letter for the A-Z sorts, a
+/// decade for the year sorts. The client's scrubber jumps to `offset`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Jump {
+    pub label: String,
+    pub offset: usize,
+}
+
 /// `ArchiveResponse` on the wire.
 #[derive(Debug, Clone, Serialize)]
 pub struct Response {
@@ -396,6 +416,9 @@ pub struct Response {
     pub total: usize,
     pub items: Vec<ArchiveSong>,
     pub facets: Facets,
+    /// Sections of the whole sorted result (not just this page); empty for
+    /// sorts without a natural index (best first, popular, versions, newest).
+    pub jumps: Vec<Jump>,
 }
 
 // ---------------------------------------------------------------- query
@@ -462,13 +485,131 @@ fn source_rowids(conn: &Connection, source: Source) -> Result<Option<HashSet<i64
     Ok(Some(rows.collect::<Result<_, _>>()?))
 }
 
-/// The filter, facets and ordered page of rowids. Pure over the index.
+fn folded_title(row: &Row) -> &str {
+    &row.text[..row.title_len]
+}
+
+fn folded_artist(row: &Row) -> &str {
+    row.text[row.title_len..].trim_start()
+}
+
+/// The A-Z section of a folded string: 1..=26 for a to z, 0 ("#") for
+/// digits, other scripts and empty strings. Sections sort in this order.
+fn letter_section(text: &str) -> u8 {
+    match text.bytes().next() {
+        Some(byte @ b'a'..=b'z') => byte - b'a' + 1,
+        _ => 0,
+    }
+}
+
+fn letter_label(section: u8) -> String {
+    if section == 0 {
+        "#".to_string()
+    } else {
+        char::from(b'a' + section - 1)
+            .to_ascii_uppercase()
+            .to_string()
+    }
+}
+
+/// Where each letter (A-Z sorts) or decade (year sorts) starts in the full
+/// sorted result. Counted, not sorted: a section starts after every row in
+/// an earlier section, whatever order the rows inside take.
+fn jumps(matched: &[&Row], sort: Sort) -> Vec<Jump> {
+    match sort {
+        Sort::Title | Sort::Artist => {
+            let mut counts = [0usize; 27];
+            for row in matched {
+                let text = if sort == Sort::Title {
+                    folded_title(row)
+                } else {
+                    folded_artist(row)
+                };
+                counts[usize::from(letter_section(text))] += 1;
+            }
+            let mut offset = 0;
+            let mut out = Vec::new();
+            for (section, count) in counts.iter().enumerate() {
+                if *count > 0 {
+                    out.push(Jump {
+                        label: letter_label(section as u8),
+                        offset,
+                    });
+                }
+                offset += count;
+            }
+            out
+        }
+        Sort::Year | Sort::YearDesc => {
+            let mut decades: std::collections::BTreeMap<i64, usize> =
+                std::collections::BTreeMap::new();
+            let mut unknown = 0usize;
+            for row in matched {
+                match row.year {
+                    Some(year) => *decades.entry(year.div_euclid(10) * 10).or_default() += 1,
+                    None => unknown += 1,
+                }
+            }
+            let ordered: Vec<(i64, usize)> = if sort == Sort::Year {
+                decades.into_iter().collect()
+            } else {
+                decades.into_iter().rev().collect()
+            };
+            let mut offset = 0;
+            let mut out = Vec::new();
+            for (decade, count) in ordered {
+                out.push(Jump {
+                    label: format!("{decade}s"),
+                    offset,
+                });
+                offset += count;
+            }
+            if unknown > 0 {
+                out.push(Jump {
+                    label: "?".to_string(),
+                    offset,
+                });
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Text order for the A-Z sorts: section first (so "#" leads and each
+/// letter's rows sit together), then the folded text, then the other
+/// field, then rowid so the order never shuffles.
+fn text_order(sort: Sort, a: &Row, b: &Row) -> std::cmp::Ordering {
+    let (a1, a2, b1, b2) = if sort == Sort::Title {
+        (
+            folded_title(a),
+            folded_artist(a),
+            folded_title(b),
+            folded_artist(b),
+        )
+    } else {
+        (
+            folded_artist(a),
+            folded_title(a),
+            folded_artist(b),
+            folded_title(b),
+        )
+    };
+    letter_section(a1)
+        .cmp(&letter_section(b1))
+        .then_with(|| a1.cmp(b1))
+        .then_with(|| a2.cmp(b2))
+        .then(a.rowid.cmp(&b.rowid))
+}
+
+/// The filter, facets, ordered page of rowids and section jumps. Pure over
+/// the index.
 pub fn select(
     index: &Index,
     query: &Query,
     allowed: Option<&HashSet<i64>>,
     lights: &Lights,
-) -> (usize, Vec<i64>, Facets, HashMap<i64, u8>) {
+) -> (usize, Vec<i64>, Facets, HashMap<i64, u8>, Vec<Jump>) {
     let needle = query.q.as_deref().map(squash).filter(|q| !q.is_empty());
     let mut matched: Vec<&Row> = Vec::new();
     let mut scene_counts: HashMap<i64, usize> = HashMap::new();
@@ -554,14 +695,25 @@ pub fn select(
                 0,
                 row.rowid,
             ],
+            Sort::YearDesc => [
+                i64::from(row.year.is_none()),
+                -row.year.unwrap_or(0),
+                -popularity,
+                0,
+                row.rowid,
+            ],
+            // Ordered by text_order below; the key is unused.
+            Sort::Title | Sort::Artist => [0, 0, 0, 0, row.rowid],
             Sort::Popular => [-popularity, -row.cut_count, 0, 0, row.rowid],
             Sort::Versions => [-row.cut_count, -popularity, 0, 0, row.rowid],
         }
     };
+    let jumps = jumps(&matched, query.sort);
     let mut keyed: Vec<([i64; 5], &Row)> = matched.iter().map(|row| (key(row), *row)).collect();
     let total = keyed.len();
     let start = query.offset.min(total);
     let end = (start + query.limit).min(total);
+    let by_text = matches!(query.sort, Sort::Title | Sort::Artist);
     // Best-first and popular lists space artists out (one artist's catalog
     // would otherwise fill the first screen); an artist scope needs none.
     let spaced = matches!(query.sort, Sort::Relevance | Sort::Popular) && query.artist.is_none();
@@ -569,6 +721,18 @@ pub fn select(
         keyed.sort_unstable_by_key(|(key, _)| *key);
         let ranked: Vec<&Row> = keyed.iter().map(|(_, row)| *row).collect();
         space_artists(&ranked, end).split_off(start)
+    } else if by_text {
+        // Only the rows up to the page end are ordered, and of those only
+        // the page itself: a jump deep into the list stays cheap.
+        let order = |a: &([i64; 5], &Row), b: &([i64; 5], &Row)| text_order(query.sort, a.1, b.1);
+        if end > 0 && end < total {
+            keyed.select_nth_unstable_by(end - 1, order);
+        }
+        if start > 0 && start < end {
+            keyed[..end].select_nth_unstable_by(start, order);
+        }
+        keyed[start..end].sort_unstable_by(order);
+        keyed[start..end].iter().map(|(_, row)| *row).collect()
     } else {
         if end > 0 && end < total {
             keyed.select_nth_unstable_by_key(end - 1, |(key, _)| *key);
@@ -626,7 +790,7 @@ pub fn select(
     facets
         .scene
         .sort_by(|a, b| b.count.cmp(&a.count).then(a.id.cmp(&b.id)));
-    (total, page, facets, lights_by_row)
+    (total, page, facets, lights_by_row, jumps)
 }
 
 /// No artist twice within this many consecutive results.
@@ -731,7 +895,8 @@ fn best_of_cut(conn: &Connection, song_key: &str, cut: Cut) -> Result<Option<i64
 /// Answer one Archive request.
 pub fn query(conn: &Connection, index: &Index, query: &Query, lights: &Lights) -> Result<Response> {
     let allowed = source_rowids(conn, query.source)?;
-    let (total, page, mut facets, lights_by_row) = select(index, query, allowed.as_ref(), lights);
+    let (total, page, mut facets, lights_by_row, jumps) =
+        select(index, query, allowed.as_ref(), lights);
     // Scene names and hues for the scene chips.
     {
         let mut stmt = conn.prepare("SELECT scene_id, name, hue FROM video_scenes")?;
@@ -827,6 +992,7 @@ pub fn query(conn: &Connection, index: &Index, query: &Query, lights: &Lights) -
         total,
         items,
         facets,
+        jumps,
     })
 }
 
@@ -976,6 +1142,78 @@ mod tests {
             .map(|d| (d.decade, d.count))
             .collect();
         assert_eq!(decades, vec![(1990, 1), (2010, 2), (2020, 1)]);
+    }
+
+    #[test]
+    fn a_to_z_sorts_with_letter_jumps() {
+        let conn = seeded();
+        let all = run(&conn, &[("sort", "title")]);
+        assert_eq!(
+            titles(&all),
+            vec!["Acustico Total", "Alpha", "Beta", "Gamma"]
+        );
+        let jumps: Vec<(String, usize)> = all
+            .jumps
+            .iter()
+            .map(|j| (j.label.clone(), j.offset))
+            .collect();
+        assert_eq!(
+            jumps,
+            vec![("A".into(), 0), ("B".into(), 2), ("G".into(), 3)]
+        );
+        // A page deep in the list is that slice of the same order.
+        let page = run(&conn, &[("sort", "title"), ("offset", "2"), ("limit", "2")]);
+        assert_eq!(titles(&page), vec!["Beta", "Gamma"]);
+        assert_eq!(page.jumps, all.jumps);
+        // Artist A-Z keeps an artist's songs together, by title.
+        let by_artist = run(&conn, &[("sort", "artist")]);
+        assert_eq!(by_artist.jumps.len(), 1);
+        assert_eq!(by_artist.items[0].title, "Alpha");
+        assert_eq!(by_artist.items[1].title, "Beta");
+        // Best first has no index to jump through.
+        assert!(run(&conn, &[]).jumps.is_empty());
+    }
+
+    #[test]
+    fn year_sorts_run_both_ways_with_decade_jumps() {
+        let conn = seeded();
+        let newest = run(&conn, &[("sort", "year_desc")]);
+        assert_eq!(
+            titles(&newest),
+            vec!["Gamma", "Acustico Total", "Beta", "Alpha"]
+        );
+        let jumps: Vec<(String, usize)> = newest
+            .jumps
+            .iter()
+            .map(|j| (j.label.clone(), j.offset))
+            .collect();
+        assert_eq!(
+            jumps,
+            vec![
+                ("2020s".into(), 0),
+                ("2010s".into(), 1),
+                ("1990s".into(), 3)
+            ]
+        );
+        let oldest = run(&conn, &[("sort", "year")]);
+        assert_eq!(
+            oldest.jumps[0],
+            Jump {
+                label: "1990s".into(),
+                offset: 0
+            }
+        );
+    }
+
+    #[test]
+    fn letter_sections_put_digits_and_other_scripts_first() {
+        assert_eq!(letter_section("abba"), 1);
+        assert_eq!(letter_section("zz top"), 26);
+        assert_eq!(letter_section("2pac"), 0);
+        assert_eq!(letter_section("\u{43a}\u{438}\u{43d}\u{43e}"), 0);
+        assert_eq!(letter_section(""), 0);
+        assert_eq!(letter_label(0), "#");
+        assert_eq!(letter_label(13), "M");
     }
 
     #[test]

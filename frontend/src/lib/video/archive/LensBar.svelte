@@ -177,7 +177,7 @@
 		<LensPopover
 			label="Depth"
 			value={lenses.depth ? (DEPTHS.find((d) => d.value === lenses.depth)?.label ?? null) : null}
-			width={240}
+			width={300}
 			onclear={() => onchange({ ...lenses, depth: null })}
 		>
 			{#snippet panel(close)}
@@ -193,7 +193,10 @@
 								close();
 							}}
 						>
-							<span class="name">{option.label}</span>
+							<span class="name">
+								{option.label}
+								<span class="hint">{option.hint}</span>
+							</span>
 							<span class="count">{count(depthCounts, option.value)}</span>
 						</button>
 					{/each}
@@ -204,7 +207,7 @@
 		<LensPopover
 			label="Length"
 			value={lenses.length ? (LENGTHS.find((l) => l.value === lenses.length)?.label ?? null) : null}
-			width={240}
+			width={300}
 			onclear={() => onchange({ ...lenses, length: null })}
 		>
 			{#snippet panel(close)}
@@ -220,7 +223,10 @@
 								close();
 							}}
 						>
-							<span class="name">{option.label}</span>
+							<span class="name">
+								{option.label}
+								<span class="hint">{option.hint}</span>
+							</span>
 							<span class="count">{count(lengthCounts, option.value)}</span>
 						</button>
 					{/each}
@@ -377,6 +383,20 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.hint {
+		display: block;
+		margin-top: 2px;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-regular, 400);
+		white-space: normal;
+	}
+
+	.option[aria-pressed='true'] .hint {
+		color: inherit;
+		opacity: 0.75;
 	}
 
 	.count {
