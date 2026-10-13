@@ -218,8 +218,7 @@
 	     While digits are typed it shows them instead. -->
 	<div class="bug" class:typing={digits.length > 0} class:hidden={guideOpen} aria-live="polite">
 		{#if digits}
-			<span class="bug-no">{digits.padEnd(2, '_')}</span>
-			<span class="bug-name">Channel</span>
+			<span class="bug-no" aria-label={`Channel ${digits}`}>{digits.padEnd(2, '_')}</span>
 		{:else}
 			<span class="bug-no">{channelNumber(channel.no)}</span>
 			<span class="bug-name">{channel.title}</span>
@@ -318,8 +317,10 @@
 		font-variant-numeric: tabular-nums;
 		color: var(--ch-ink);
 	}
+	/* Typed digits take the bug's whole height (number and name), so the
+	   fullscreen pills under it never move. */
 	.bug.typing .bug-no {
-		font-size: var(--font-size-3xl);
+		font-size: var(--font-size-2xl);
 		color: #fff;
 	}
 	.bug-name {
