@@ -189,6 +189,7 @@ mod real_data {
             &[("q", "swear it again"), ("sort", "versions")],
             &[("source", "liked")],
             &[("sort", "newest"), ("offset", "600")],
+            &[("sort", "popular"), ("offset", "600")],
             &[("scene", "1"), ("cut", "official"), ("sort", "popular")],
         ];
         for case in cases {
@@ -217,6 +218,15 @@ mod real_data {
                     s.cut_count
                 ))
             );
+            if case.is_empty() || case == &[("sort", "popular"), ("offset", "600")] {
+                let artists: Vec<&str> = response
+                    .items
+                    .iter()
+                    .take(12)
+                    .map(|s| s.artist_name.as_deref().unwrap_or("?"))
+                    .collect();
+                eprintln!("  first artists: {artists:?}");
+            }
         }
         let top: Vec<(String, i64)> = db
             .with_conn(|c| {

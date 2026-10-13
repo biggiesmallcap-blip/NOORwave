@@ -12,7 +12,7 @@
 //! 2 library artist, 1 charted, 0 uncharted. The atlas's light.rs is the
 //! canonical one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::Result;
@@ -562,11 +562,20 @@ pub fn select(
     let total = keyed.len();
     let start = query.offset.min(total);
     let end = (start + query.limit).min(total);
-    if end > 0 && end < total {
-        keyed.select_nth_unstable_by_key(end - 1, |(key, _)| *key);
-    }
-    keyed[..end].sort_unstable_by_key(|(key, _)| *key);
-    let page_rows: Vec<&Row> = keyed[start..end].iter().map(|(_, row)| *row).collect();
+    // Best-first and popular lists space artists out (one artist's catalog
+    // would otherwise fill the first screen); an artist scope needs none.
+    let spaced = matches!(query.sort, Sort::Relevance | Sort::Popular) && query.artist.is_none();
+    let page_rows: Vec<&Row> = if spaced {
+        keyed.sort_unstable_by_key(|(key, _)| *key);
+        let ranked: Vec<&Row> = keyed.iter().map(|(_, row)| *row).collect();
+        space_artists(&ranked, end).split_off(start)
+    } else {
+        if end > 0 && end < total {
+            keyed.select_nth_unstable_by_key(end - 1, |(key, _)| *key);
+        }
+        keyed[..end].sort_unstable_by_key(|(key, _)| *key);
+        keyed[start..end].iter().map(|(_, row)| *row).collect()
+    };
     let page: Vec<i64> = page_rows.iter().map(|row| row.rowid).collect();
     let lights_by_row: HashMap<i64, u8> = page_rows
         .iter()
@@ -618,6 +627,76 @@ pub fn select(
         .scene
         .sort_by(|a, b| b.count.cmp(&a.count).then(a.id.cmp(&b.id)));
     (total, page, facets, lights_by_row)
+}
+
+/// No artist twice within this many consecutive results.
+pub const SPACING_WINDOW: usize = 6;
+
+/// The first `end` rows of a ranked list with artists spaced out: each slot
+/// takes the best-ranked remaining row whose artist is not among the last
+/// `SPACING_WINDOW - 1` taken. Later rows by a repeated artist move down,
+/// never out; when only blocked artists remain the best-ranked row goes
+/// anyway. Deterministic and prefix-stable, so every page is a slice of one
+/// spaced order.
+fn space_artists<'a>(ranked: &[&'a Row], end: usize) -> Vec<&'a Row> {
+    // Songs without an artist count as their own artist.
+    let artist = |row: &Row| {
+        if row.artist > 0 {
+            row.artist
+        } else {
+            -row.rowid
+        }
+    };
+    let mut out: Vec<&Row> = Vec::with_capacity(end);
+    let mut recent: VecDeque<i64> = VecDeque::with_capacity(SPACING_WINDOW);
+    // Deferred rows per artist (in rank order) and each artist's first
+    // deferred rank, so the best allowed deferred row is found in a few steps.
+    let mut waiting: HashMap<i64, VecDeque<usize>> = HashMap::new();
+    let mut heads: BTreeSet<(usize, i64)> = BTreeSet::new();
+    let mut next = 0usize;
+    while out.len() < end {
+        let blocked = |id: i64| recent.contains(&id);
+        let mut pick = heads
+            .iter()
+            .find(|(_, id)| !blocked(*id))
+            .map(|&(rank, id)| (rank, id));
+        if pick.is_none() {
+            while next < ranked.len() {
+                let rank = next;
+                next += 1;
+                let id = artist(ranked[rank]);
+                if !blocked(id) {
+                    pick = Some((rank, id));
+                    break;
+                }
+                let queue = waiting.entry(id).or_default();
+                if queue.is_empty() {
+                    heads.insert((rank, id));
+                }
+                queue.push_back(rank);
+            }
+        }
+        // Only blocked artists left: the best-ranked one goes anyway.
+        if pick.is_none() {
+            pick = heads.iter().next().copied();
+        }
+        let Some((rank, id)) = pick else {
+            break;
+        };
+        if heads.remove(&(rank, id)) {
+            let queue = waiting.entry(id).or_default();
+            queue.pop_front();
+            if let Some(&head) = queue.front() {
+                heads.insert((head, id));
+            }
+        }
+        out.push(ranked[rank]);
+        if recent.len() == SPACING_WINDOW - 1 {
+            recent.pop_front();
+        }
+        recent.push_back(id);
+    }
+    out
 }
 
 /// The best cut of one kind for a song, when a cut lens is on.
@@ -906,7 +985,9 @@ mod tests {
             &[("sort", "popular"), ("offset", "1"), ("limit", "2")],
         );
         assert_eq!(page.total, 4);
-        assert_eq!(titles(&page), vec!["Acustico Total", "Beta"]);
+        // Popular is Alpha, Acustico, Beta, Gamma; Beta shares Alpha's artist,
+        // so spacing moves Gamma ahead of it.
+        assert_eq!(titles(&page), vec!["Acustico Total", "Gamma"]);
         assert_eq!(
             titles(&run(&conn, &[("sort", "versions"), ("limit", "1")])),
             vec!["Alpha"]
@@ -938,6 +1019,127 @@ mod tests {
         assert!(seven.building, "stages ran by hand: no finished build");
         crate::services::video_intel::build::build_all(&conn).unwrap();
         assert!(!run(&conn, &[]).building);
+    }
+
+    fn row(rowid: i64, artist: i64) -> Row {
+        Row {
+            rowid,
+            artist,
+            scene: -1,
+            mask: Cut::Official.bit(),
+            programmable: true,
+            year: None,
+            popularity: 0,
+            length: Length::Song,
+            cut_count: 1,
+            newest: 0,
+            charted: false,
+            text: "".into(),
+            title_len: 0,
+        }
+    }
+
+    fn artists_of(rows: &[&Row]) -> Vec<i64> {
+        rows.iter().map(|r| r.artist).collect()
+    }
+
+    #[test]
+    fn spacing_keeps_an_artist_out_of_any_six_in_a_row() {
+        // Seven songs by artist 1 lead the ranking, then six other artists.
+        let rows: Vec<Row> = (0..7)
+            .map(|i| row(i, 1))
+            .chain((7..13).map(|i| row(i, i)))
+            .collect();
+        let ranked: Vec<&Row> = rows.iter().collect();
+        let spaced = space_artists(&ranked, rows.len());
+        assert_eq!(spaced.len(), rows.len(), "nothing is dropped");
+        assert_eq!(
+            artists_of(&spaced),
+            vec![1, 7, 8, 9, 10, 11, 1, 12, 1, 1, 1, 1, 1],
+            "spaced while others remain, then the rest in rank order"
+        );
+        for window in spaced[..8].windows(SPACING_WINDOW) {
+            let mut ids: Vec<i64> = window.iter().map(|r| r.artist).collect();
+            ids.sort();
+            ids.dedup();
+            assert_eq!(ids.len(), SPACING_WINDOW);
+        }
+        // Artist 1's songs keep their own order.
+        let ones: Vec<i64> = spaced
+            .iter()
+            .filter(|r| r.artist == 1)
+            .map(|r| r.rowid)
+            .collect();
+        assert_eq!(ones, (0..7).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn spacing_is_stable_and_pages_are_slices_of_one_order() {
+        let distinct: Vec<Row> = (0..10).map(|i| row(i, 100 + i)).collect();
+        let ranked: Vec<&Row> = distinct.iter().collect();
+        assert_eq!(
+            space_artists(&ranked, 10)
+                .iter()
+                .map(|r| r.rowid)
+                .collect::<Vec<_>>(),
+            (0..10).collect::<Vec<_>>(),
+            "no conflicts, no change"
+        );
+        let mixed: Vec<Row> = (0..40)
+            .map(|i| row(i, [1, 1, 2, 1, 3, 2, 4][i as usize % 7]))
+            .collect();
+        let ranked: Vec<&Row> = mixed.iter().collect();
+        let full: Vec<i64> = space_artists(&ranked, 40).iter().map(|r| r.rowid).collect();
+        let first: Vec<i64> = space_artists(&ranked, 12).iter().map(|r| r.rowid).collect();
+        assert_eq!(first, full[..12].to_vec());
+        let unknown = [row(1, 0), row(2, 0)];
+        let ranked: Vec<&Row> = unknown.iter().collect();
+        assert_eq!(space_artists(&ranked, 2).len(), 2, "no artist is no clash");
+    }
+
+    #[test]
+    fn best_first_spaces_a_prolific_artist_and_an_artist_scope_does_not() {
+        let conn = conn();
+        for id in 0..8 {
+            add(
+                &conn,
+                100 + id,
+                7,
+                &format!("Hit {id}"),
+                200,
+                Some(90 - id as i32),
+                None,
+            );
+        }
+        for artist in 0..6 {
+            add(
+                &conn,
+                200 + artist,
+                20 + artist,
+                "Other",
+                200,
+                Some(10),
+                None,
+            );
+        }
+        cuts::build(&conn).unwrap();
+        songs::build(&conn).unwrap();
+        for sort in ["relevance", "popular"] {
+            let page = run(&conn, &[("sort", sort), ("limit", "8")]);
+            let sevens = page
+                .items
+                .iter()
+                .take(SPACING_WINDOW)
+                .filter(|s| s.artist_id == Some(7))
+                .count();
+            assert_eq!(sevens, 1, "{sort}");
+            let next = run(&conn, &[("sort", sort), ("offset", "4"), ("limit", "4")]);
+            assert_eq!(titles(&next), titles(&page)[4..].to_vec(), "{sort} paging");
+        }
+        let scoped = run(&conn, &[("artist", "7"), ("limit", "3")]);
+        assert_eq!(titles(&scoped), vec!["Hit 0", "Hit 1", "Hit 2"]);
+        let newest = run(&conn, &[("sort", "versions"), ("limit", "3")]);
+        assert_eq!(newest.items.len(), 3);
     }
 
     #[test]
