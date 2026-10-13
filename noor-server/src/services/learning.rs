@@ -2099,7 +2099,12 @@ pub async fn start_training(
             None,
             0,
         )?;
-        queries::update_embedding_model_metrics(conn, model.id, "ready", Some(&metrics_json))?;
+        queries::update_embedding_model_metrics(
+            conn,
+            model.id,
+            evaluated_model_status(should_activate),
+            Some(&metrics_json),
+        )?;
         if should_activate {
             queries::activate_embedding_model(conn, model.id)?;
         }
@@ -3015,6 +3020,14 @@ pub(crate) fn trainer_config_version_from_json(config_json: Option<&str>) -> i64
 /// only to a first activation, where there is nothing to compare against; a
 /// fixed floor mostly measured the trainer's own bugs (model 17 beat the active
 /// model 0.131 to 0.116 and was still held back).
+/// Status a trained model is saved with. Selection serves the newest `ready`
+/// model of the selected engine's family even when inactive (switching engines
+/// relies on that), so a model the activation gate turned down is kept for
+/// inspection as `rejected` and never served.
+fn evaluated_model_status(should_activate: bool) -> &'static str {
+    if should_activate { "ready" } else { "rejected" }
+}
+
 fn should_activate_model(metrics: &HashMap<String, f64>) -> bool {
     let get = |key: &str| metrics.get(key).copied();
     let coverage = get("coverage_ratio").unwrap_or(0.0);

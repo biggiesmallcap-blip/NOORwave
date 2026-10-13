@@ -908,3 +908,29 @@ fn liked_tracks_are_not_fed_to_training_as_a_sequence() {
         .find(|(_, sequence)| sequence.contains(&1) && sequence.contains(&2));
     assert_eq!(liked_pair.map(|(label, _)| label), None);
 }
+
+#[test]
+fn a_model_the_gate_rejects_is_never_served() {
+    assert_eq!(evaluated_model_status(true), "ready");
+    assert_eq!(evaluated_model_status(false), "rejected");
+
+    // Selection serves the newest ready model of the engine's family even when
+    // inactive (switching engines relies on that), so "ready" must only ever
+    // mean approved.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::db::schema::run_migrations(&conn).unwrap();
+    queries::create_embedding_model(
+        &conn,
+        "discovery-fusion-v2:rejected",
+        queries::DISCOVERY_ENGINE_V2_FAMILY,
+        8,
+        evaluated_model_status(false),
+        None,
+    )
+    .unwrap();
+    assert!(
+        queries::get_selected_discovery_embedding_model(&conn)
+            .unwrap()
+            .is_none()
+    );
+}
