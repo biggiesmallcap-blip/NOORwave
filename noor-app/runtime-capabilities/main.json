@@ -20,6 +20,7 @@
     "allow-get-startup-state",
     "allow-set-start-at-login",
     "allow-set-video-fullscreen",
+    "allow-set-video-media-active",
     "core:app:allow-version",
     "core:webview:allow-set-webview-zoom",
     "core:event:default",

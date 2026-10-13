@@ -1140,3 +1140,19 @@ Spawned by: v1.0.6 audit
   the v2 create-playlist call and the add ETag have only fixture coverage.
 Spawned by: v1.0.6 audit (PR #357 review); files owned by open PR #360
 
+### artwork: artist pictures requested at sizes TIDAL does not have
+
+Source: Library landing load investigation on 2026-10-13. TIDAL serves artist
+pictures at 160/320/480/750 only (640, 1080 and 1280 return 403); covers come
+at 80/160/320/640/750/1080/1280. The Library hero now asks for 750, the one
+large size both share. Other surfaces still ask for a portrait at 640 or 1280,
+so each pays a failed CDN round trip (about 650ms from the Sydney edge) before
+its fallback, the server's disk cache can never store it, and the failure
+counts against the session's artwork-cache kill switch in `utils/artwork.ts`.
+
+Affected surfaces: `routes/artists/ArtistDetail.svelte` (portrait at 640,
+backdrop at 1280), the artist top hero in `routes/search/+page.svelte`
+(backdrop at 1280), and `routes/remote/artists/[id]` and
+`routes/remote/tidal/artists/[id]` (portrait at 640). The AGENTS.md "TIDAL
+artwork sizing" section still blames these 403s on stale records; it should
+list the artist-picture sizes instead.

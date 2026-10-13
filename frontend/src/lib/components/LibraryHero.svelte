@@ -130,10 +130,12 @@
           oncontextmenu={(event) => openArtistContextMenu(event, artist.id)}
           aria-label={`Select ${artist.name}`}
         >
+          <!-- 750, not 640: TIDAL has artist pictures at 160/320/480/750
+               only, and 750 is the one large size covers share. -->
           <ArtworkImage
             className="mural-panel-art"
             src={artistArtworkSources(artist)}
-            size={640}
+            size={750}
             loading="eager"
             fetchPriority={artist.id === current.id ? 'high' : 'auto'}
             fallbackOrder="size"
