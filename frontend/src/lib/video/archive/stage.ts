@@ -8,8 +8,6 @@ import type {
 	AtlasNeighbor,
 	AtlasScene,
 	AtlasSceneCard,
-	ArchiveQuery,
-	ArchiveResponse,
 	ExploreVideo,
 	SongVersionsResponse,
 	VideoConcert,
@@ -25,11 +23,10 @@ export interface StageVideo {
 }
 
 export interface StageClient {
-	getVideoSongVersions(songKey: string): Promise<SongVersionsResponse>;
+	getVideoSongByVideo(videoId: number): Promise<SongVersionsResponse>;
 	getVideoConcert(id: number): Promise<VideoConcert>;
 	getVideoAtlasArtist(id: number): Promise<AtlasArtistCard>;
 	getVideoAtlasScene(id: number): Promise<AtlasSceneCard>;
-	getVideoArchive(query: ArchiveQuery, signal?: AbortSignal): Promise<ArchiveResponse>;
 }
 
 /** One card in a Stage row. */
@@ -59,33 +56,6 @@ export const EMPTY_STAGE: StageRows = { concert: null, scene: null, stepOut: [],
 
 export const STEP_OUT_LIMIT = 8;
 export const SCENE_SAMPLE_LIMIT = 12;
-
-/** The server's song key (video_radio::video_song_key): artist id (or
- *  lowercased name), then the title before any bracket, lowercased, every
- *  non letter or digit a space, whitespace collapsed. Mirrored here so the
- *  Stage can ask for a song's versions without a lookup round trip. */
-export function songKeyFor(video: Pick<StageVideo, 'title' | 'artist_id' | 'artist_name'>): string {
-	const artist = video.artist_id != null
-		? `id:${video.artist_id}`
-		: `name:${(video.artist_name ?? '').trim().toLowerCase()}`;
-	const normalize = (text: string) =>
-		text
-			.toLowerCase()
-			.replace(/[^\p{L}\p{N}]+/gu, ' ')
-			.trim()
-			.split(/\s+/)
-			.filter(Boolean)
-			.join(' ');
-	const base = video.title.split(/[([]/)[0] ?? video.title;
-	const title = normalize(base) || normalize(video.title);
-	return `${artist}:${title}`;
-}
-
-/** The title without its bracketed suffix, for the archive search fallback. */
-export function baseTitle(title: string): string {
-	const base = (title.split(/[([]/)[0] ?? title).trim();
-	return base || title.trim();
-}
 
 /** Neighbours worth a step: not yet lit or warm (light <= 1), strongest edge
  *  first, one per artist, never the current artist. */
@@ -117,25 +87,13 @@ function hasVideo(song: SongVersionsResponse, videoId: number): boolean {
 	return song.versions.some((version) => version.video.tidal_id === videoId);
 }
 
-/** The playing video's song: by the mirrored key first; when that misses
- *  (key drift, an unknown title), an archive search on the bare title
- *  narrowed to the same artist. Null when neither finds it. */
+/** The playing video's song, looked up by the video itself on the server
+ *  (one source of truth for song keys). Null when the catalog has not been
+ *  built yet or the video is unknown. */
 export async function findSong(client: StageClient, video: StageVideo): Promise<SongVersionsResponse | null> {
 	try {
-		const song = await client.getVideoSongVersions(songKeyFor(video));
-		if (hasVideo(song, video.tidal_id)) return song;
-	} catch (error) {
-		if (status(error) === 501) return null;
-	}
-	try {
-		const result = await client.getVideoArchive({ q: baseTitle(video.title), limit: 24 });
-		const match = result.items.find((item) =>
-			item.best.tidal_id === video.tidal_id
-			|| (video.artist_id != null && item.artist_id === video.artist_id && songKeyFor({ ...video, title: item.title }) === songKeyFor(video))
-		) ?? result.items.find((item) => video.artist_id != null && item.artist_id === video.artist_id);
-		if (!match) return null;
-		const song = await client.getVideoSongVersions(match.song_key);
-		return hasVideo(song, video.tidal_id) || match.best.tidal_id === video.tidal_id ? song : null;
+		const song = await client.getVideoSongByVideo(video.tidal_id);
+		return hasVideo(song, video.tidal_id) ? song : null;
 	} catch {
 		return null;
 	}

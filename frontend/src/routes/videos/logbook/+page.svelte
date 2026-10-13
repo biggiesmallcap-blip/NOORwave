@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, type TidalSearchVideo, type VideoHistoryEntry } from '$lib/api/client';
-	import type { AtlasScene, VideoCensus } from '$lib/api/video_explore_types';
+	import type { VideoCensus } from '$lib/api/video_explore_types';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
@@ -23,7 +23,6 @@
 
 	let census = $state<VideoCensus | null>(null);
 	let censusState = $state<'loading' | 'ready' | 'unavailable'>('loading');
-	let scenes = $state<AtlasScene[]>([]);
 	let saved = $state<TidalSearchVideo[] | null>(null);
 	let lastWatched = $state<VideoHistoryEntry | null>(null);
 	let historyLoaded = $state(false);
@@ -32,7 +31,8 @@
 	let figures = $derived(census ? censusFigures(census) : []);
 	let coverage = $derived(census ? coverageFigures(census) : []);
 	let cuts = $derived(census ? cutShares(census) : []);
-	let sceneRows = $derived(sceneCoverage(scenes));
+	// Per-scene rows ride on the census, so the Logbook never loads the map.
+	let sceneRows = $derived(sceneCoverage(census?.scene_rows ?? []));
 	let shownScenes = $derived(allScenes ? sceneRows : sceneRows.slice(0, SCENES_SHOWN));
 	let visited = $derived(sceneRows.filter((row) => row.seen > 0).length);
 
@@ -47,7 +47,6 @@
 
 	onMount(() => {
 		void loadCensus();
-		api.getVideoAtlas().then((atlas) => (scenes = atlas.scenes)).catch(() => {});
 		api.getSavedVideos().then((res) => (saved = res.items)).catch(() => {});
 		api.getVideoHistory(1)
 			.then((res) => (lastWatched = res.items[0] ?? null))

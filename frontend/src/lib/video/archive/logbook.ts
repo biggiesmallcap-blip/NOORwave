@@ -71,7 +71,9 @@ export interface SceneCoverage {
 
 /** Scenes you have been to first (most of them seen), then the rest by size.
  *  `seen` never exceeds `videos`, so a bar never overflows. */
-export function sceneCoverage(scenes: readonly AtlasScene[]): SceneCoverage[] {
+export function sceneCoverage(
+	scenes: readonly Pick<AtlasScene, 'id' | 'name' | 'hue' | 'videos' | 'seen_videos'>[]
+): SceneCoverage[] {
 	return scenes
 		.map((scene) => {
 			const videos = Math.max(0, scene.videos);

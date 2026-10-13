@@ -8,11 +8,9 @@ import type {
 } from '$lib/api/video_explore_types';
 import {
 	EMPTY_STAGE,
-	baseTitle,
 	clearStageCache,
 	loadStage,
 	needsFallback,
-	songKeyFor,
 	stepOutNeighbors,
 	type StageClient,
 	type StageRows,
@@ -55,21 +53,6 @@ function card(id: number, extra: Partial<AtlasArtistCard> = {}): AtlasArtistCard
 
 beforeEach(() => clearStageCache());
 
-describe('song key mirror', () => {
-	test('matches the server rule: artist id, bare title, normalized', () => {
-		expect(songKeyFor({ title: 'Swear It Again (Live at Croke Park)', artist_id: 5, artist_name: 'Westlife' })).toBe('id:5:swear it again');
-		expect(songKeyFor({ title: "Don't Stop Me Now [Official Video]", artist_id: 2, artist_name: null })).toBe('id:2:don t stop me now');
-		expect(songKeyFor({ title: 'Despacito', artist_id: null, artist_name: ' Luis Fonsi ' })).toBe('name:luis fonsi:despacito');
-		expect(songKeyFor({ title: '(Intro)', artist_id: 1, artist_name: null })).toBe('id:1:intro');
-		expect(songKeyFor({ title: 'Ao Vivo - Garota', artist_id: 3, artist_name: null })).toBe('id:3:ao vivo garota');
-	});
-
-	test('base title drops the bracketed suffix', () => {
-		expect(baseTitle('Swear It Again (Live)')).toBe('Swear It Again');
-		expect(baseTitle('(Intro)')).toBe('(Intro)');
-	});
-});
-
 describe('one step out', () => {
 	test('keeps unlit neighbours, strongest first, never the artist itself', () => {
 		const picked = stepOutNeighbors(card(1, {
@@ -90,11 +73,10 @@ describe('stage rows', () => {
 
 	function client(overrides: Partial<StageClient>): StageClient {
 		return {
-			getVideoSongVersions: notImplemented,
+			getVideoSongByVideo: notImplemented,
 			getVideoConcert: notImplemented,
 			getVideoAtlasArtist: notImplemented,
 			getVideoAtlasScene: notImplemented,
-			getVideoArchive: notImplemented,
 			...overrides,
 		};
 	}
@@ -132,16 +114,16 @@ describe('stage rows', () => {
 			top_artists: [],
 			sample: [current, video(600, 6), video(601, 7)],
 		};
-		const asked: string[] = [];
+		const asked: number[] = [];
 		const rows = await run(client({
-			getVideoSongVersions: async (key) => { asked.push(key); return song; },
+			getVideoSongByVideo: async (id) => { asked.push(id); return song; },
 			getVideoConcert: async () => concert,
 			getVideoAtlasScene: async () => scene,
 			getVideoAtlasArtist: async (id) => id === 5
 				? card(5, { neighbors: [{ id: 8, name: 'Boyzone', source: 'lastfm', weight: 0.8, light: 1 }] })
 				: card(id),
 		}));
-		expect(asked).toEqual(['id:5:swear it again']);
+		expect(asked).toEqual([500]);
 		expect(rows.versions?.others.map((v) => v.video.tidal_id)).toEqual([501]);
 		expect(rows.concert?.id).toBe(77);
 		expect(rows.scene?.videos.map((v) => v.tidal_id)).toEqual([600, 601]);
@@ -149,32 +131,11 @@ describe('stage rows', () => {
 		expect(needsFallback(rows)).toBe(false);
 	});
 
-	test('falls back to an archive search when the mirrored key misses', async () => {
-		const song: SongVersionsResponse = {
-			song_key: 'server-key', title: 'Swear It Again', artist_id: 5, artist_name: 'Westlife', song_year: null,
-			versions: [
-				{ video: current, cut: 'live', cut_year: null, label: 'Live', concert: null, best: true },
-				{ video: video(9), cut: 'official', cut_year: null, label: 'Official', concert: null, best: false },
-			],
-		};
-		const queries: unknown[] = [];
+	test('an unknown video (404) leaves the versions row empty', async () => {
 		const rows = await run(client({
-			getVideoSongVersions: async (key) => {
-				if (key !== 'server-key') throw Object.assign(new Error('missing'), { status: 404 });
-				return song;
-			},
-			getVideoArchive: async (query) => {
-				queries.push(query);
-				return {
-					building: false,
-					total: 1,
-					items: [{ song_key: 'server-key', title: 'Swear It Again', artist_id: 5, artist_name: 'Westlife', best: current, cut_count: 2, cuts: ['live'], song_year: null, scene_id: null, light: 2 }],
-					facets: { scene: [], cut: [], decade: [], depth: [], length: [] },
-				};
-			},
+			getVideoSongByVideo: async () => { throw Object.assign(new Error('song not found'), { status: 404 }); },
 		}));
-		expect(queries).toEqual([{ q: 'Swear It Again', limit: 24 }]);
-		expect(rows.versions?.others.map((v) => v.video.tidal_id)).toEqual([9]);
+		expect(rows.versions).toBeNull();
 	});
 
 	test('a stale video never writes rows', async () => {

@@ -109,6 +109,12 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 			const response = await options.fetch(lensesToQuery(target, 0, pageSize), ctrl.signal);
 			if (mySeq !== seq) return;
 			controller = null;
+			// The server says when no catalog build has finished yet; an empty
+			// answer then means "not catalogued", not "no matches".
+			if (response.building && response.total === 0) {
+				set({ phase: 'unavailable', loadingMore: false, error: null });
+				return;
+			}
 			set({
 				phase: 'ready',
 				items: uniqueSongs(response.items),

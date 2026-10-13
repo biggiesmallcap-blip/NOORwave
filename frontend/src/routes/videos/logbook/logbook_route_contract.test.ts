@@ -24,8 +24,9 @@ describe('logbook route contract', () => {
 	test('the census is plain numbers and per-scene coverage', () => {
 		expect(page).toContain('api.getVideoCensus()');
 		expect(page).toContain('censusFigures(census)');
-		expect(page).toContain('api.getVideoAtlas()');
-		expect(page).toContain('sceneCoverage(scenes)');
+		// Scene rows ride on the census; the 1 MB map payload is not loaded here.
+		expect(page).not.toContain('api.getVideoAtlas()');
+		expect(page).toContain('sceneCoverage(census?.scene_rows ?? [])');
 		expect(page).toContain('seenLabel(row)');
 		expect(page).toContain('href={`/videos/archive?scene=${row.id}`}');
 	});
