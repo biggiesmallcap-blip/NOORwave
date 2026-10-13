@@ -93,6 +93,14 @@ pub fn apply_quality_defaults_once(conn: &Connection) -> Result<()> {
 }
 
 pub fn load_radio_flags(conn: &Connection) -> RadioFlags {
+    // The rollback switch means every newer behavior off at once, whatever the
+    // individual rows say. It used to only suppress diagnostics.
+    if read_bool_flag(conn, "radio_use_legacy_pipeline") {
+        return RadioFlags {
+            use_legacy_pipeline: true,
+            ..RadioFlags::all_off()
+        };
+    }
     RadioFlags {
         use_legacy_pipeline: read_bool_flag(conn, "radio_use_legacy_pipeline"),
         score_normalization_enabled: read_bool_flag(conn, "radio_score_normalization_enabled"),
@@ -338,6 +346,27 @@ mod tests {
         schema::run_migrations(&conn).expect("migrations");
         let flags = load_radio_flags(&conn);
         assert!(!flags.use_legacy_pipeline);
+        assert!(!flags.score_normalization_enabled);
+        assert!(!flags.confidence_penalty_enabled);
+        assert!(!flags.hub_penalty_enabled);
+        assert!(!flags.diversity_rerank_enabled);
+        assert!(!flags.source_quota_bonus_enabled);
+    }
+
+    #[test]
+    fn legacy_switch_turns_every_newer_behavior_off() {
+        // The rollback switch used to only hide diagnostics while the newer
+        // processing kept running under it.
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        apply_quality_defaults_once(&conn).expect("apply");
+        conn.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES ('radio_use_legacy_pipeline', 'true')",
+            [],
+        )
+        .expect("legacy on");
+        let flags = load_radio_flags(&conn);
+        assert!(flags.use_legacy_pipeline);
         assert!(!flags.score_normalization_enabled);
         assert!(!flags.confidence_penalty_enabled);
         assert!(!flags.hub_penalty_enabled);
