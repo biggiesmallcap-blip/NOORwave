@@ -31,12 +31,32 @@
 		radioExclusions,
 		trimToRows,
 	} from '$lib/video/related_feed';
+	import type { ExploreVideo } from '$lib/api/video_explore_types';
+	import StageRow from '$lib/video/archive/StageRow.svelte';
+	import VersionsDrawer from '$lib/video/archive/VersionsDrawer.svelte';
+	import { CUT_LABELS, hueColor } from '$lib/video/archive/lenses';
+	import { concertLength, versionCaption } from '$lib/video/archive/versions';
+	import { playConcert, playFromList, playVersion } from '$lib/video/archive/play';
+	import {
+		EMPTY_STAGE,
+		loadStage,
+		needsFallback,
+		viaLabel,
+		type StageItem,
+		type StageRows,
+	} from '$lib/video/archive/stage';
 
 	// The watch page: the one place the big player lives. The persistent dock
 	// positions the live <video> over this page's stage; everything else here
 	// is about what is playing - who it is and where to go from it. What comes
 	// next is the app's video queue panel, not a second list here. Back
 	// returns to the tab the video was picked on.
+	//
+	// Under the player, the Stage rows: This concert, Same scene, One step
+	// out, Other cuts of this song (lib/video/archive/stage.ts). When the
+	// exploring rows come back empty (the Atlas endpoints answer 501 before
+	// their build ships, or the artist is uncharted) the older related grid
+	// below takes over, with its radio-fed extension.
 
 	let stageAnchor = $state<HTMLDivElement | null>(null);
 	let relatedVideos = $state<(TidalSearchVideo & { why?: string })[]>([]);
@@ -59,6 +79,12 @@
 
 	let shownRelated = $derived(feedDone ? trimToRows(relatedVideos, columns) : relatedVideos);
 	let placeholders = $derived(placeholderCount(shownRelated.length, columns, feedLoading || feedWaiting));
+
+	let stageRows = $state<StageRows>(EMPTY_STAGE);
+	let stageSettled = $state(false);
+	let stageRequest = 0;
+	let versionsOpen = $state(false);
+	let useFallback = $derived(stageSettled && needsFallback(stageRows));
 
 	let current = $derived($videoSession.current);
 	let streamUrl = $derived($videoSession.streamUrl);
@@ -147,6 +173,37 @@
 		clearVideoSession();
 	}
 
+	function stagePlay(video: ExploreVideo, list: ExploreVideo[], label: string) {
+		if (!assertOnline()) {
+			showToast('Server is reconnecting.', 'error', 3200);
+			return;
+		}
+		void playFromList(video, list, label);
+	}
+
+	let concertItems = $derived<StageItem[]>(
+		stageRows.concert?.videos.map((video, index) => ({
+			video,
+			index: index + 1,
+			current: video.tidal_id === current?.tidal_id,
+		})) ?? []
+	);
+	let sceneItems = $derived<StageItem[]>(
+		stageRows.scene?.videos.map((video) => ({ video, caption: video.why || null })) ?? []
+	);
+	let stepOutItems = $derived<StageItem[]>(
+		stageRows.stepOut.map(({ video, neighbor }) => ({ video, caption: viaLabel(neighbor.source) }))
+	);
+	let versionItems = $derived<StageItem[]>(
+		stageRows.versions?.others.map((version) => ({
+			video: version.video,
+			caption: versionCaption(version, CUT_LABELS[version.cut]),
+		})) ?? []
+	);
+	let stageEmpty = $derived(
+		!stageRows.concert && !stageRows.scene && stageRows.stepOut.length === 0 && !stageRows.versions
+	);
+
 	/** Cold open (reload, copied link, a link from outside the section): play
 	 *  the video in the URL unless it is already the one playing. */
 	function openFromUrl() {
@@ -200,15 +257,39 @@
 		return () => videoStageAnchor.set(null);
 	});
 
-	// Related row: waits for a real selection, and a response for a previous
-	// video never overwrites the new one.
+	// Stage rows: rebuilt per video, filled in as each endpoint answers; a
+	// late answer for a previous video is dropped.
 	$effect(() => {
 		const item = current;
+		const seq = ++stageRequest;
+		stageRows = EMPTY_STAGE;
+		stageSettled = false;
+		versionsOpen = false;
+		if (!item) return;
+		const timer = setTimeout(() => {
+			void loadStage(
+				api,
+				item,
+				(patch) => (stageRows = { ...stageRows, ...patch }),
+				() => seq === stageRequest
+			).then(() => {
+				if (seq === stageRequest) stageSettled = true;
+			});
+		}, 250);
+		return () => clearTimeout(timer);
+	});
+
+	// Related row (the fallback): waits for a real selection and for the
+	// Stage to come back empty, and a response for a previous video never
+	// overwrites the new one.
+	$effect(() => {
+		const item = current;
+		const fallback = useFallback;
 		const seq = ++relatedRequest;
 		relatedVideos = [];
 		resetFeed();
-		relatedLoading = Boolean(item?.artist_id || item?.artist_name);
-		if (!item || (!item.artist_id && !item.artist_name)) return;
+		relatedLoading = fallback && Boolean(item?.artist_id || item?.artist_name);
+		if (!fallback || !item || (!item.artist_id && !item.artist_name)) return;
 		const controller = new AbortController();
 		let attempts = 0;
 		let timer: ReturnType<typeof setTimeout>;
@@ -285,7 +366,7 @@
 
 	// Fill the sharp rows first, then keep going while the end is near.
 	$effect(() => {
-		if (!current || relatedLoading || feedLoading || feedDone || feedWaiting) return;
+		if (!useFallback || !current || relatedLoading || feedLoading || feedDone || feedWaiting) return;
 		if (needsMore(relatedVideos.length, columns) || nearEnd) void loadMoreRelated();
 	});
 </script>
@@ -360,7 +441,79 @@
 		</div>
 	</div>
 
-	{#if current && (relatedLoading || feedLoading || relatedVideos.length > 0)}
+	{#if current}
+		<div class="stage" class:quiet={stageSettled && stageEmpty}>
+			<div class="stage-rows">
+				{#if stageRows.concert}
+					{@const concert = stageRows.concert}
+					<StageRow
+						title="This concert"
+						meta={`${concert.label}, ${concert.video_count} songs${concert.total_s > 0 ? `, ${concertLength(concert.total_s)}` : ''}`}
+						items={concertItems}
+						onplay={(video) => void playConcert(concert, video.tidal_id)}
+					>
+						{#snippet actions()}
+							<button type="button" class="pill-btn" onclick={() => void playConcert(concert)}>Play concert</button>
+						{/snippet}
+					</StageRow>
+				{/if}
+
+				{#if stageRows.scene}
+					{@const scene = stageRows.scene.scene}
+					<StageRow
+						title={`Same scene: ${scene.name}`}
+						meta={scene.channel_no != null ? `Channel ${scene.channel_no}` : ''}
+						hue={hueColor(scene.hue)}
+						items={sceneItems}
+						onplay={(video) => stagePlay(video, stageRows.scene?.videos ?? [], scene.name)}
+					>
+						{#snippet actions()}
+							<a class="pill-btn" href={`/videos/archive?scene=${scene.id}`}>Open in Archive</a>
+						{/snippet}
+					</StageRow>
+				{/if}
+
+				{#if stepOutItems.length > 0}
+					<StageRow
+						title="One step out"
+						meta={`Next to ${current.artist_name ?? 'this artist'}, new to you`}
+						items={stepOutItems}
+						onplay={(video) => stagePlay(video, stageRows.stepOut.map((pick) => pick.video), 'One step out')}
+					/>
+				{/if}
+
+				{#if stageRows.versions}
+					{@const song = stageRows.versions.song}
+					<StageRow
+						title="Other cuts of this song"
+						meta={song.song_year ? `${song.title}, ${song.song_year}` : song.title}
+						items={versionItems}
+						onplay={(video) => {
+							const version = song.versions.find((item) => item.video.tidal_id === video.tidal_id);
+							if (version) void playVersion(version, stageRows.versions?.others ?? [], song.title);
+						}}
+					>
+						{#snippet actions()}
+							<button type="button" class="pill-btn" onclick={() => (versionsOpen = true)}>All {song.versions.length} cuts</button>
+						{/snippet}
+					</StageRow>
+				{/if}
+
+				{#if !stageSettled && stageEmpty}
+					<div class="stage-skeleton" aria-hidden="true">
+						<div class="sk-heading"></div>
+						<div class="sk-cards">
+							{#each Array(4) as _, i (i)}<div class="sk-card"></div>{/each}
+						</div>
+					</div>
+				{/if}
+			</div>
+			<!-- The Atlas mini map mounts here. Empty, it takes no space. -->
+			<div class="atlas-minimap-slot"></div>
+		</div>
+	{/if}
+
+	{#if current && useFallback && (relatedLoading || feedLoading || relatedVideos.length > 0)}
 		<section class="related" aria-label="Related videos">
 			<div class="section-heading">
 				<h2>Related to {current.artist_name ?? 'this video'}</h2>
@@ -388,6 +541,21 @@
 				<p class="related-loading">Finding a few connected videos...</p>
 			{/if}
 		</section>
+	{/if}
+
+	{#if versionsOpen && stageRows.versions}
+		{@const song = stageRows.versions.song}
+		<VersionsDrawer
+			song={{
+				song_key: song.song_key,
+				title: song.title,
+				artist_id: song.artist_id,
+				artist_name: song.artist_name,
+				artwork_url: song.versions[0]?.video.artwork_url ?? null,
+				cut_count: song.versions.length,
+			}}
+			onclose={() => (versionsOpen = false)}
+		/>
 	{/if}
 {/if}
 
@@ -509,6 +677,67 @@
 		opacity: 0.6;
 	}
 
+	/* The Stage rows: full content width under the player, each row a rail.
+	   The mini map slot sits beside them on wide windows once it has content. */
+	.stage {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
+		margin-top: 28px;
+	}
+
+	.stage.quiet {
+		margin-top: 0;
+	}
+
+	.stage-rows {
+		display: grid;
+		gap: var(--space-6);
+		min-width: 0;
+	}
+
+	.atlas-minimap-slot:not(:empty) {
+		position: sticky;
+		top: var(--space-4);
+		width: 240px;
+		margin-left: var(--space-6);
+	}
+
+	a.pill-btn {
+		text-decoration: none;
+	}
+
+	.stage-skeleton {
+		display: grid;
+		gap: var(--group-gap);
+		animation: stage-skeleton-in var(--motion-fast) 150ms both;
+	}
+
+	.sk-heading {
+		width: 180px;
+		height: 18px;
+		border-radius: 6px;
+		background: var(--bg-surface);
+	}
+
+	.sk-cards {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 14px;
+	}
+
+	.sk-card {
+		aspect-ratio: 16 / 9;
+		border-radius: var(--radius-md);
+		background: var(--bg-surface);
+		animation: placeholder-pulse 1.4s ease-in-out infinite;
+	}
+
+	@keyframes stage-skeleton-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+
 	.related {
 		display: grid;
 		gap: 14px;
@@ -584,9 +813,25 @@
 		margin: 0;
 	}
 
+	@media (max-width: 1100px) {
+		.stage {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.atlas-minimap-slot:not(:empty) {
+			position: static;
+			width: auto;
+			margin: var(--space-5) 0 0;
+		}
+	}
+
 	@media (max-width: 620px) {
 		.now-playing {
 			flex-direction: column;
+		}
+
+		.sk-cards {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 
 		.video-grid {
