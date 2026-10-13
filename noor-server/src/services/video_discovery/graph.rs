@@ -51,6 +51,8 @@ pub struct Relevance {
 #[derive(Debug, Default)]
 pub struct Graph {
     adj: HashMap<i64, Vec<(i64, f64)>>,
+    /// The same edges seen from the other end, for `related`.
+    rev: HashMap<i64, Vec<(i64, f64)>>,
 }
 
 impl Graph {
@@ -62,13 +64,16 @@ impl Graph {
             }
         }
         let mut adj: HashMap<i64, Vec<(i64, f64)>> = HashMap::new();
+        let mut rev: HashMap<i64, Vec<(i64, f64)>> = HashMap::new();
         for ((from, to), weights) in combined {
-            adj.entry(from).or_default().push((to, noisy_or(weights)));
+            let weight = noisy_or(weights);
+            adj.entry(from).or_default().push((to, weight));
+            rev.entry(to).or_default().push((from, weight));
         }
-        for list in adj.values_mut() {
+        for list in adj.values_mut().chain(rev.values_mut()) {
             list.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         }
-        Self { adj }
+        Self { adj, rev }
     }
 
     pub fn load(conn: &Connection) -> Result<Self> {
@@ -84,6 +89,25 @@ impl Graph {
 
     pub fn neighbors(&self, artist_id: i64) -> &[(i64, f64)] {
         self.adj.get(&artist_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Artists linked to this one either way, strongest first. Many artists
+    /// were only ever reached from someone else's page, so their own
+    /// outgoing list is empty while others point at them; similarity reads
+    /// both. An edge both ways counts once, at its stronger weight.
+    pub fn related(&self, artist_id: i64) -> Vec<(i64, f64)> {
+        let mut best: HashMap<i64, f64> = HashMap::new();
+        for (to, weight) in self
+            .neighbors(artist_id)
+            .iter()
+            .chain(self.rev.get(&artist_id).map(Vec::as_slice).unwrap_or(&[]))
+        {
+            let entry = best.entry(*to).or_insert(0.0);
+            *entry = entry.max(*weight);
+        }
+        let mut out: Vec<(i64, f64)> = best.into_iter().collect();
+        out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
     }
 
     /// Spread relevance from weighted roots, layer by layer, up to `max_hops`.

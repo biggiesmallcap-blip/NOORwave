@@ -9,6 +9,8 @@ import type {
 	ArchiveResponse,
 	ChannelGuideResponse,
 	ChannelNextResponse,
+	ChannelSteerResponse,
+	VideoSteer,
 	ChannelTuneResponse,
 	ExploreMode,
 	SongVersionsResponse,
@@ -2534,6 +2536,28 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify(body),
 		});
+	},
+
+	/** More / Less like this for the artist on screen. Remembered as a small
+	 *  fading lean; More also answers with what to line up next. */
+	steerVideoChannel(id: string, body: {
+		artist_id: number;
+		artist_name: string | null;
+		more: boolean;
+		exclude_video_ids: number[];
+	}): Promise<ChannelSteerResponse> {
+		return fetchApi<ChannelSteerResponse>(`/api/videos/channels/${encodeURIComponent(id)}/steer`, undefined, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	},
+
+	getVideoSteers(): Promise<{ items: VideoSteer[] }> {
+		return fetchApi<{ items: VideoSteer[] }>('/api/videos/steers');
+	},
+
+	forgetVideoSteer(artistId: number): Promise<{ forgotten: boolean }> {
+		return fetchApi<{ forgotten: boolean }>(`/api/videos/steers/${artistId}`, undefined, { method: 'DELETE' });
 	},
 
 	getVideoExplore(): Promise<{ explore: ExploreMode }> {

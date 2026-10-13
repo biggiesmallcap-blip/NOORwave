@@ -811,6 +811,18 @@ pub fn api_routes(state: SharedState) -> Router {
             post(video_channel_routes::post_video_channel_next),
         )
         .route(
+            "/api/videos/channels/{id}/steer",
+            post(video_channel_routes::post_video_channel_steer),
+        )
+        .route(
+            "/api/videos/steers",
+            get(video_channel_routes::get_video_steers),
+        )
+        .route(
+            "/api/videos/steers/{artist_id}",
+            axum::routing::delete(video_channel_routes::delete_video_steer),
+        )
+        .route(
             "/api/videos/explore",
             get(video_channel_routes::get_video_explore)
                 .put(video_channel_routes::put_video_explore),

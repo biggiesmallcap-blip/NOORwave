@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import type { AtlasScene, VideoCensus } from '$lib/api/video_explore_types';
-import { censusFigures, coverageFigures, cutShares, sceneCoverage, seenLabel } from './logbook';
+import { censusFigures, coverageFigures, cutShares, sceneCoverage, seenLabel, steerAge } from './logbook';
 
 const census: VideoCensus = {
 	building: false,
@@ -60,5 +60,18 @@ describe('scene coverage', () => {
 		expect(rows.map((r) => r.id)).toEqual([5, 2, 3, 4, 1]);
 		expect(rows[0]).toMatchObject({ seen: 10, videos: 10, ratio: 1 });
 		expect(seenLabel(rows[2])).toBe('seen 20 of 1,000');
+	});
+});
+
+describe('channel steering', () => {
+	test('a press reads as how long ago it was', () => {
+		const now = Date.UTC(2026, 9, 14, 12);
+		const at = (daysAgo: number) => (now - daysAgo * 86_400_000) / 1000;
+		expect(steerAge(at(0), now)).toBe('today');
+		expect(steerAge(at(1), now)).toBe('yesterday');
+		expect(steerAge(at(5), now)).toBe('5 days ago');
+		expect(steerAge(at(20), now)).toBe('2 weeks ago');
+		// A clock that runs behind never reads as the future.
+		expect(steerAge(at(-1), now)).toBe('today');
 	});
 });

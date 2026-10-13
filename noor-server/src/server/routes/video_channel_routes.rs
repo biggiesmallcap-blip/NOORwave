@@ -14,9 +14,12 @@ use serde_json::{Value, json};
 use crate::SharedState;
 use crate::db::Database;
 use crate::services::video_air::{
-    self, ExploreMode, clock,
+    self, ExploreMode,
+    channels::ChannelId,
+    clock,
     day::{self, Tune},
     session::{self, NextRequest},
+    steer,
 };
 
 type Reply = (StatusCode, Json<Value>);
@@ -191,6 +194,117 @@ pub(super) async fn post_video_channel_next(
     match result {
         Ok(items) => ok(json!({ "exhausted": items.is_empty(), "items": items })),
         Err(error) => failed(error, "refill"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SteerBody {
+    artist_id: i64,
+    #[serde(default)]
+    artist_name: Option<String>,
+    more: bool,
+    /// Everything the session has queued or played, so More lines up
+    /// nothing it already has.
+    #[serde(default)]
+    exclude_video_ids: Vec<i64>,
+}
+
+/// POST /api/videos/channels/{id}/steer. More or Less like the artist on
+/// screen. Remembered as a small lean that fades within four weeks
+/// (steer.rs); for More, also the videos to line up right after the playing
+/// one: a neighbour, the artist, another neighbour. Less lines up nothing:
+/// the client takes the artist's videos out of its queue.
+pub(super) async fn post_video_channel_steer(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<SteerBody>,
+) -> Reply {
+    if body.artist_id <= 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "artist_id must be a TIDAL artist id" })),
+        );
+    }
+    if ChannelId::parse(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "unknown channel" })),
+        );
+    }
+    let db = { state.read().await.db.clone() };
+    let now = chrono::Utc::now().timestamp();
+    let result = blocking(db, move |conn| {
+        steer::record(
+            conn,
+            body.artist_id,
+            body.artist_name.as_deref(),
+            body.more,
+            now,
+        )?;
+        if !body.more {
+            return Ok(Vec::new());
+        }
+        let (universe, taste) = day::shared(conn)?;
+        let queued: Vec<i64> = body
+            .exclude_video_ids
+            .iter()
+            .copied()
+            .filter(|id| *id > 0)
+            .take(512)
+            .collect();
+        let name = body
+            .artist_name
+            .clone()
+            .or_else(|| taste.names.get(&body.artist_id).cloned())
+            .unwrap_or_default();
+        let picks = steer::more_picks(&universe, &taste.graph, body.artist_id, &name, &queued);
+        let ids: Vec<i64> = picks.iter().map(|(id, _)| *id).collect();
+        let videos = day::catalog_videos(conn, &ids)?;
+        Ok(picks
+            .iter()
+            .filter_map(|(id, why)| videos.get(id).map(|video| day::item(video, why)))
+            .collect::<Vec<_>>())
+    })
+    .await;
+    match result {
+        Ok(items) => ok(json!({ "items": items, "remembered": true })),
+        Err(error) => failed(error, "steer"),
+    }
+}
+
+/// GET /api/videos/steers. Every remembered More and Less still in force,
+/// newest first, with how strong it still is and when it will be gone.
+pub(super) async fn get_video_steers(State(state): State<SharedState>) -> Reply {
+    let db = { state.read().await.db.clone() };
+    let now = chrono::Utc::now().timestamp();
+    match db.with_conn(|conn| steer::load(conn, now)) {
+        Ok(steers) => ok(json!({
+            "items": steers
+                .iter()
+                .map(|steer| json!({
+                    "artist_id": steer.artist,
+                    "name": steer.name,
+                    "more": steer.more,
+                    "at": steer.at,
+                    "strength": (steer.strength(now) * 100.0).round() / 100.0,
+                    "forgotten_at": steer.forgotten_at(),
+                }))
+                .collect::<Vec<_>>(),
+        })),
+        Err(error) => failed(error, "steers"),
+    }
+}
+
+/// DELETE /api/videos/steers/{artist_id}. Undo a remembered press.
+pub(super) async fn delete_video_steer(
+    State(state): State<SharedState>,
+    Path(artist_id): Path<i64>,
+) -> Reply {
+    let db = { state.read().await.db.clone() };
+    let now = chrono::Utc::now().timestamp();
+    match db.with_conn(|conn| steer::forget(conn, artist_id, now)) {
+        Ok(forgotten) => ok(json!({ "forgotten": forgotten })),
+        Err(error) => failed(error, "steer undo"),
     }
 }
 
@@ -385,6 +499,61 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn steering_lines_up_more_remembers_and_undoes() {
+        let db = seeded();
+        let shared = state(db);
+        let body = |artist_id: i64, more: bool| SteerBody {
+            artist_id,
+            artist_name: Some("Five Hundred".into()),
+            more,
+            exclude_video_ids: vec![10_000],
+        };
+        let (status, Json(out)) = post_video_channel_steer(
+            State(shared.clone()),
+            Path("wild".into()),
+            Json(body(500, true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let items = out["items"].as_array().unwrap();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|v| v["tidal_id"].as_i64() != Some(10_000)));
+        assert_eq!(items[0]["why"], "More Five Hundred");
+
+        let (status, Json(out)) = post_video_channel_steer(
+            State(shared.clone()),
+            Path("wild".into()),
+            Json(body(501, false)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(out["items"].as_array().unwrap().is_empty());
+
+        let (_, Json(list)) = get_video_steers(State(shared.clone())).await;
+        let rows = list["items"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["artist_id"], 501);
+        assert_eq!(rows[0]["more"], false);
+        assert_eq!(rows[1]["name"], "Five Hundred");
+
+        let (_, Json(out)) = delete_video_steer(State(shared.clone()), Path(501)).await;
+        assert_eq!(out["forgotten"], true);
+        let (_, Json(list)) = get_video_steers(State(shared.clone())).await;
+        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+
+        let (status, _) = post_video_channel_steer(
+            State(shared.clone()),
+            Path("nowhere".into()),
+            Json(body(500, true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) =
+            post_video_channel_steer(State(shared), Path("wild".into()), Json(body(0, true))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

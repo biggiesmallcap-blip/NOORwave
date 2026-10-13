@@ -90,3 +90,15 @@ export function sceneCoverage(
 export function seenLabel(row: Pick<SceneCoverage, 'seen' | 'videos'>): string {
 	return `seen ${n(row.seen)} of ${n(row.videos)}`;
 }
+
+const DAY_MS = 86_400_000;
+
+/** When a More / Less press was made: "today", "yesterday", "3 days ago",
+ *  "2 weeks ago". */
+export function steerAge(atS: number, nowMs = Date.now()): string {
+	const days = Math.max(0, Math.floor((nowMs - atS * 1000) / DAY_MS));
+	if (days === 0) return 'today';
+	if (days === 1) return 'yesterday';
+	if (days < 14) return `${days} days ago`;
+	return `${Math.floor(days / 7)} weeks ago`;
+}

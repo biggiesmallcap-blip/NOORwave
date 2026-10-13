@@ -1,10 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, type TidalSearchVideo, type VideoHistoryEntry } from '$lib/api/client';
-	import type { VideoCensus } from '$lib/api/video_explore_types';
+	import type { VideoCensus, VideoSteer } from '$lib/api/video_explore_types';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
+	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { formatDateShort } from '$lib/utils/format';
 	import { hueColor } from '$lib/video/archive/lenses';
 	import {
@@ -13,11 +14,14 @@
 		cutShares,
 		sceneCoverage,
 		seenLabel,
+		steerAge,
 	} from '$lib/video/archive/logbook';
 
 	// Logbook: yours. The three ways back to what you have touched (Liked,
-	// Saved, History), then the catalog as a calm page of numbers and how much
-	// of each scene you have seen. Plain counts only: no badges, no streaks.
+	// Saved, History), the More and Less like this presses On Air still
+	// remembers (each with an undo), then the catalog as a calm page of
+	// numbers and how much of each scene you have seen. Plain counts only: no
+	// badges, no streaks.
 
 	const SCENES_SHOWN = 16;
 
@@ -27,6 +31,7 @@
 	let lastWatched = $state<VideoHistoryEntry | null>(null);
 	let historyLoaded = $state(false);
 	let allScenes = $state(false);
+	let steers = $state<VideoSteer[]>([]);
 
 	let figures = $derived(census ? censusFigures(census) : []);
 	let coverage = $derived(census ? coverageFigures(census) : []);
@@ -48,11 +53,34 @@
 	onMount(() => {
 		void loadCensus();
 		api.getSavedVideos().then((res) => (saved = res.items)).catch(() => {});
+		api.getVideoSteers().then((res) => (steers = res.items)).catch(() => {});
 		api.getVideoHistory(1)
 			.then((res) => (lastWatched = res.items[0] ?? null))
 			.catch(() => {})
 			.finally(() => (historyLoaded = true));
 	});
+
+	/** Undo a remembered press; it comes back if the server says no. */
+	async function undoSteer(steer: VideoSteer) {
+		const before = steers;
+		steers = steers.filter((item) => item.artist_id !== steer.artist_id);
+		try {
+			await api.forgetVideoSteer(steer.artist_id);
+		} catch {
+			steers = before;
+		}
+	}
+
+	function fadeDate(atS: number): string {
+		return new Date(atS * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+	}
+
+	function artistMenu(event: MouseEvent, steer: VideoSteer) {
+		event.preventDefault();
+		event.stopPropagation();
+		const name = steer.name ?? 'Artist';
+		openContextMenu(event, buildArtistMenu({ tidal_id: steer.artist_id, name }, { isLocal: false }), name);
+	}
 
 	function videoMenu(event: MouseEvent, video: TidalSearchVideo) {
 		event.preventDefault();
@@ -121,6 +149,37 @@
 			<span class="chevron" aria-hidden="true"></span>
 		</a>
 	</section>
+
+	{#if steers.length > 0}
+		<section class="steers" aria-labelledby="steers-title">
+			<div class="scenes-head">
+				<h2 id="steers-title" class="t-section">Channel steering</h2>
+				<span class="t-meta">More and Less like this lean On Air a little, then fade out within four weeks</span>
+			</div>
+			<ul class="steer-rows">
+				{#each steers as steer (steer.artist_id)}
+					<li class="steer-row">
+						<span class="steer-tag" class:less={!steer.more}>{steer.more ? 'More' : 'Less'}</span>
+						<a
+							class="steer-name"
+							href={`/tidal/artists/${steer.artist_id}`}
+							oncontextmenu={(event) => artistMenu(event, steer)}
+						>{steer.name ?? `Artist ${steer.artist_id}`}</a>
+						<span class="bar" title={`${Math.round(steer.strength * 100)}% of its first strength`}>
+							<span class="fill" style:width={`${Math.max(steer.strength * 100, 2)}%`}></span>
+						</span>
+						<span class="seen">{steerAge(steer.at)}, gone by {fadeDate(steer.forgotten_at)}</span>
+						<button
+							type="button"
+							class="undo"
+							aria-label={`Undo ${steer.more ? 'more' : 'less'} like ${steer.name ?? 'this artist'}`}
+							onclick={() => void undoSteer(steer)}
+						>Undo</button>
+					</li>
+				{/each}
+			</ul>
+		</section>
+	{/if}
 
 	<section class="census" aria-labelledby="census-title">
 		<h2 id="census-title" class="t-section">The catalog</h2>
@@ -487,9 +546,90 @@
 		white-space: nowrap;
 	}
 
-	.scenes {
+	.scenes,
+	.steers {
 		display: grid;
 		gap: var(--space-4);
+	}
+
+	.steers h2 {
+		margin: 0;
+	}
+
+	/* One remembered press per row: the lean, the artist, how much of it is
+	   left, when it goes, and the undo. */
+	.steer-rows {
+		display: grid;
+		gap: 2px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.steer-row {
+		display: grid;
+		grid-template-columns: 52px minmax(120px, 240px) minmax(0, 1fr) 190px auto;
+		align-items: center;
+		gap: var(--space-4);
+		padding: 6px 8px;
+		border-radius: var(--radius-sm);
+	}
+
+	.steer-row:hover {
+		background: var(--bg-hover);
+	}
+
+	.steer-tag {
+		justify-self: start;
+		padding: 2px 8px;
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.steer-tag.less {
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+	}
+
+	.steer-name {
+		min-width: 0;
+		overflow: hidden;
+		color: var(--text-primary);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		text-decoration: none;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.steer-name:hover {
+		text-decoration: underline;
+	}
+
+	.undo {
+		height: 28px;
+		padding: 0 12px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: none;
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		cursor: pointer;
+	}
+
+	.undo:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.steer-name:focus-visible,
+	.undo:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
 	}
 
 	.scenes-head {
@@ -572,6 +712,15 @@
 
 		.scene-row {
 			grid-template-columns: minmax(0, 1fr) 96px;
+		}
+
+		.steer-row {
+			grid-template-columns: 52px minmax(0, 1fr) auto;
+		}
+
+		.steer-row .bar,
+		.steer-row .seen {
+			display: none;
 		}
 
 		.scene-row .bar {

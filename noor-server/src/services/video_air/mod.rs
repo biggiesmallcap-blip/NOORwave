@@ -16,12 +16,15 @@
 //! - `clock`: four 6-hour blocks a day, seeds, and where "now" falls.
 //! - `day`: builds, stores and serves a day of every channel.
 //! - `session`: refills past the schedule from the session's signals.
+//! - `steer`: More and Less like this, now, for the sitting, and as a small
+//!   remembered lean that fades within four weeks.
 
 pub mod channels;
 pub mod clock;
 pub mod day;
 pub mod programmer;
 pub mod session;
+pub mod steer;
 pub mod taste;
 pub mod universe;
 

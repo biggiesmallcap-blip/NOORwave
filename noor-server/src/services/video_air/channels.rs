@@ -425,8 +425,11 @@ fn bucket(
     boosts: &Boosts,
 ) -> Bucket {
     let ring = ring_of(taste.relevance_of(artist));
-    let weight =
-        (units.len() as f64).sqrt() * fit * history_fit(taste, artist) * boosts.of(artist, scene);
+    let weight = (units.len() as f64).sqrt()
+        * fit
+        * history_fit(taste, artist)
+        * taste.steer_of(artist)
+        * boosts.of(artist, scene);
     Bucket {
         artist,
         ring,

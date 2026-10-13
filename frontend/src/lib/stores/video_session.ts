@@ -669,6 +669,66 @@ export function noteChannelTaste(artistId: number, more: boolean): number {
 	return dropped.length;
 }
 
+/** More / Less like this on the channel that is on air (the panel's
+ *  buttons, + and - on the stage). Less drops the artist's upcoming videos
+ *  now; More lines up a neighbour, the artist and another neighbour right
+ *  after the playing video. Both lean this sitting's refills (the artist
+ *  and, a little, its nearest neighbours) and are remembered on the server
+ *  as a small lean that fades within four weeks; the Logbook can undo it.
+ *  Without a channel, or when the server cannot be reached, only the local
+ *  part happens. */
+export async function steerChannel(
+	artistId: number,
+	artistName: string | null,
+	more: boolean,
+): Promise<{ dropped: number; added: number }> {
+	const dropped = noteChannelTaste(artistId, more);
+	const channel = radioChannelId;
+	if (!channel) return { dropped, added: 0 };
+	const generation = radioGeneration;
+	const before = get(session);
+	let items: VideoSessionItem[] = [];
+	try {
+		({ items } = await api.steerVideoChannel(channel, {
+			artist_id: artistId,
+			artist_name: artistName,
+			more,
+			exclude_video_ids: [...new Set([...before.queue.map((v) => v.tidal_id), ...radioSeenIds.slice(-256)])],
+		}));
+	} catch {
+		return { dropped, added: 0 };
+	}
+	if (!more || generation !== radioGeneration || radioChannelId !== channel) return { dropped, added: 0 };
+	const state = get(session);
+	const existing = new Set(state.queue.map((v) => v.tidal_id));
+	const songs = new Set([...state.queue, ...radioSeenSongs].map(videoSongKey));
+	const fresh = items.filter((item) => {
+		const key = videoSongKey(item);
+		if (existing.has(item.tidal_id) || songs.has(key)) return false;
+		songs.add(key);
+		return true;
+	});
+	if (fresh.length === 0) return { dropped, added: 0 };
+	const queue = [...state.queue];
+	queue.splice(state.currentIndex + 1, 0, ...fresh);
+	update({ queue });
+	radioSeenIds = [...radioSeenIds, ...fresh.map((item) => item.tidal_id)].slice(-256);
+	radioSeenSongs = [...radioSeenSongs, ...fresh].slice(-128);
+	return { dropped, added: fresh.length };
+}
+
+/** What a steer did, in a short line for the stage and the panel. */
+export function steerMessage(name: string, more: boolean, result: { dropped: number; added: number }): string {
+	if (more) {
+		return result.added > 0
+			? `More like ${name}: ${result.added} lined up next`
+			: `More like ${name} from here on`;
+	}
+	return result.dropped > 0
+		? `Less like ${name}: ${result.dropped} fewer coming up`
+		: `Less like ${name} from here on`;
+}
+
 /** Re-fetch the current video's stream (expiry / network recovery). */
 export async function refreshVideoStream(): Promise<string> {
 	const current = get(session).current;

@@ -9,7 +9,8 @@
 	import type { EffectivePlayerLayout } from '$lib/stores/playerLayout';
 	import {
 		clearVideoSession,
-		noteChannelTaste,
+		steerChannel,
+		steerMessage,
 		videoChannelOnAir,
 		videoPanelAnchor,
 		videoSession,
@@ -37,26 +38,26 @@
 		return 'Video session';
 	}
 
-	// On a channel, More and Less like this teach it about the artist on
-	// screen (the same as + and - on the stage): more of them, or fewer, with
-	// their upcoming videos dropped. The line under the buttons says what
-	// happened for a few seconds.
+	// On a channel, More and Less like this steer it by the artist on screen
+	// (the same as + and - on the stage; see steerChannel): More lines up the
+	// artist and its nearest neighbours next, Less drops the artist's
+	// upcoming videos. The line under the buttons says what happened for a
+	// few seconds.
 	const STEER_NOTE_MS = 4000;
 	let steerNote = $state<string | null>(null);
 	let steerTimer: ReturnType<typeof setTimeout> | null = null;
 
-	function steer(more: boolean) {
+	let steering = $state(false);
+
+	async function steer(more: boolean) {
 		const current = $videoSession.current;
-		const name = current?.artist_name ?? 'this artist';
-		if (current?.artist_id == null) {
-			steerNote = 'Nothing to learn from this one.';
-		} else {
-			const dropped = noteChannelTaste(current.artist_id, more);
-			steerNote = more
-				? `More like ${name} from here on.`
-				: dropped > 0
-					? `Less like ${name}: ${dropped} fewer coming up.`
-					: `Less like ${name} from here on.`;
+		if (current?.artist_id == null || steering) return;
+		const name = current.artist_name ?? 'this artist';
+		steering = true;
+		try {
+			steerNote = `${steerMessage(name, more, await steerChannel(current.artist_id, current.artist_name ?? null, more))}.`;
+		} finally {
+			steering = false;
 		}
 		if (steerTimer) clearTimeout(steerTimer);
 		steerTimer = setTimeout(() => (steerNote = null), STEER_NOTE_MS);
@@ -121,16 +122,16 @@
 			<button
 				class="video-panel-chip"
 				type="button"
-				title="More like this artist (+ on the stage)"
-				disabled={$videoSession.current?.artist_id == null}
-				onclick={() => steer(true)}
+				title="Line up this artist and its neighbours next (+ on the stage)"
+				disabled={$videoSession.current?.artist_id == null || steering}
+				onclick={() => void steer(true)}
 			>More like this</button>
 			<button
 				class="video-panel-chip"
 				type="button"
-				title="Less like this artist (- on the stage)"
-				disabled={$videoSession.current?.artist_id == null}
-				onclick={() => steer(false)}
+				title="Drop this artist's upcoming videos (- on the stage)"
+				disabled={$videoSession.current?.artist_id == null || steering}
+				onclick={() => void steer(false)}
 			>Less like this</button>
 		{/if}
 	</div>

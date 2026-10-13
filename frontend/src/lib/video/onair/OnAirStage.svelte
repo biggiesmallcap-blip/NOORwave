@@ -6,7 +6,7 @@
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { contextMenu, openContextMenu } from '$lib/stores/context_menu';
 	import { reduceMotion } from '$lib/stores/motion';
-	import { noteChannelTaste, type VideoSessionItem } from '$lib/stores/video_session';
+	import { steerChannel, steerMessage, type VideoSessionItem } from '$lib/stores/video_session';
 	import { dispatchVideoControl } from '$lib/video/controls';
 	import { channelNumber, liveSlot, secondsSinceMidnight } from './clock';
 	import { createFlipper, DIGIT_WAIT_MS, digitVerdict } from './flip';
@@ -139,9 +139,9 @@
 			say('Nothing to learn from this one');
 			return;
 		}
-		const dropped = noteChannelTaste(artistId, more);
-		if (more) say(`More like ${name}`, '+');
-		else say(dropped > 0 ? `Less like ${name}, ${dropped} fewer coming up` : `Less like ${name}`, '-');
+		void steerChannel(artistId, current?.artist_name ?? null, more).then((result) =>
+			say(steerMessage(name, more, result), more ? '+' : '-')
+		);
 	}
 
 	function run(action: OnAirAction) {

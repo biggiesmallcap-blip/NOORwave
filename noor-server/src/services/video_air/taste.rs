@@ -59,6 +59,9 @@ pub struct Taste {
     /// Old-style skip counts (roots::is_skip), for the station Listener.
     pub skips: HashMap<i64, u32>,
     pub graph: Arc<Graph>,
+    /// Remembered More and Less presses: artist -> pool weight lean,
+    /// 0.75..1.25 and fading (steer.rs). On Air pools only.
+    pub steer: HashMap<i64, f64>,
 }
 
 /// A play stopped inside 15 s or under 10% of the video.
@@ -340,6 +343,8 @@ impl Taste {
             }
         }
         taste.graph = graph::cached(conn)?;
+        let now = chrono::Utc::now().timestamp();
+        taste.steer = super::steer::leans(&super::steer::load(conn, now)?, now);
         taste.spread();
         let played: HashSet<i64> = watched_recently.union(&recent_listeners).copied().collect();
         taste.appetite = taste.scene_appetite(universe, &played);
@@ -398,6 +403,11 @@ impl Taste {
         }
         let scenes: Vec<i64> = universe.scenes.iter().map(|scene| scene.id).collect();
         appetite(&weight, &universe.scene_artists, &scenes, &played_scenes)
+    }
+
+    /// The remembered More/Less lean on an artist; 1 when none.
+    pub fn steer_of(&self, artist: i64) -> f64 {
+        self.steer.get(&artist).copied().unwrap_or(1.0)
     }
 
     pub fn relevance_of(&self, artist: i64) -> f64 {

@@ -322,3 +322,25 @@ export interface ChannelNextResponse {
 	items: ExploreVideo[];
 	exhausted: boolean;
 }
+
+/** More / Less like this on a channel. For More, `items` is what to line
+ *  up right after the playing video (a neighbour, the artist, another
+ *  neighbour); Less lines up nothing. */
+export interface ChannelSteerResponse {
+	items: ExploreVideo[];
+	remembered: boolean;
+}
+
+/** A remembered More / Less press: a small lean on the artist in On Air
+ *  programming that halves every week and is gone after four. */
+export interface VideoSteer {
+	artist_id: number;
+	name: string | null;
+	more: boolean;
+	/** Unix seconds of the press. */
+	at: number;
+	/** 1 at the press, fading to 0. */
+	strength: number;
+	/** Unix seconds when it is gone. */
+	forgotten_at: number;
+}

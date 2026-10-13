@@ -10,6 +10,8 @@ import {
 	playVideo,
 	playVideoChannel,
 	refillVideoRadio,
+	steerChannel,
+	steerMessage,
 	videoChannelOnAir,
 	videoSession,
 } from './video_session';
@@ -18,6 +20,7 @@ vi.mock('$lib/api/client', () => ({
 	api: {
 		tuneVideoChannel: vi.fn(),
 		getVideoChannelNext: vi.fn(),
+		steerVideoChannel: vi.fn(),
 		getVideoRadioNext: vi.fn(),
 		getVideoStationNext: vi.fn(),
 		getTidalVideoStream: vi.fn(),
@@ -154,4 +157,40 @@ test('ending the session clears the channel and the taste presses', async () => 
 	await vi.waitFor(() => expect(api.getVideoChannelNext).toHaveBeenCalled());
 	const call = vi.mocked(api.getVideoChannelNext).mock.calls.at(-1)!;
 	expect(call[1].more_artist_ids).toEqual([]);
+});
+
+test('"more like this" lines its picks up right after the playing video', async () => {
+	vi.mocked(api.tuneVideoChannel).mockResolvedValueOnce(fixtureTune(95));
+	await playVideoChannel('scene:7');
+	await vi.waitFor(() => expect(get(videoSession).radioSearching).toBe(false));
+	vi.mocked(api.steerVideoChannel).mockResolvedValueOnce({
+		items: [
+			fixtureVideo(301, 31, 'Neighbour', 'Next Door', 200),
+			// Already queued: never twice.
+			fixtureVideo(203, 23, 'Already', 'Queued', 200),
+			fixtureVideo(302, 21, 'Mac Dre', 'Another One', 200),
+		],
+		remembered: true,
+	});
+	const result = await steerChannel(21, 'Mac Dre', true);
+	expect(result).toEqual({ dropped: 0, added: 2 });
+	expect(api.steerVideoChannel).toHaveBeenCalledWith('scene:7', expect.objectContaining({
+		artist_id: 21, artist_name: 'Mac Dre', more: true,
+		exclude_video_ids: expect.arrayContaining([201, 202, 203, 204]),
+	}));
+	const state = get(videoSession);
+	expect(state.current?.tidal_id).toBe(201);
+	expect(state.queue.map((video) => video.tidal_id)).toEqual([201, 301, 302, 202, 203, 204]);
+	expect(steerMessage('Mac Dre', true, result)).toBe('More like Mac Dre: 2 lined up next');
+});
+
+test('"less like this" still drops at once when the server cannot be reached', async () => {
+	vi.mocked(api.tuneVideoChannel).mockResolvedValueOnce(fixtureTune(95));
+	await playVideoChannel('scene:7');
+	await vi.waitFor(() => expect(get(videoSession).radioSearching).toBe(false));
+	vi.mocked(api.steerVideoChannel).mockRejectedValueOnce(new Error('offline'));
+	const result = await steerChannel(21, 'Mac Dre', false);
+	expect(result).toEqual({ dropped: 1, added: 0 });
+	expect(get(videoSession).queue.map((video) => video.tidal_id)).toEqual([201, 202, 203]);
+	expect(steerMessage('Mac Dre', false, result)).toBe('Less like Mac Dre: 1 fewer coming up');
 });

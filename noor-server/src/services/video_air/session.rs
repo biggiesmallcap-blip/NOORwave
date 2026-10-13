@@ -1,8 +1,9 @@
 //! Refills after the schedule: once a tuned-in session has played through
 //! what the clock queued, the channel keeps going live from the same pool,
 //! shaped by what this session did (zaps, holds, saves in the last hours of
-//! video_history) and the +/- presses the client sends. Never repeats a
-//! video or song the session already has; concerts finish before new ones.
+//! video_history) and the More/Less presses the client sends (steer.rs).
+//! Never repeats a video or song the session already has; concerts finish
+//! before new ones.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,8 +17,10 @@ use super::ExploreMode;
 use super::channels::{self, Boosts, ChannelId};
 use super::day::{self, QUEUE};
 use super::programmer::{self, Picker, SPACING};
+use super::steer;
 use super::taste::{Taste, is_hold, is_zap};
 use super::universe::Universe;
+use crate::services::video_discovery::graph::Graph;
 use crate::services::video_sets::{VideoSetItem, build_seed};
 
 /// How far back video_history counts as this session.
@@ -97,8 +100,15 @@ impl SessionSignals {
 }
 
 /// Zap -0.2 and hold +0.5 on the artist, save +1; the scene moves by a
-/// fifth as much (-0.05, +0.1, +0.2). More doubles an artist, less halves.
-pub fn boosts(signals: &SessionSignals, universe: &Universe, more: &[i64], less: &[i64]) -> Boosts {
+/// fifth as much (-0.05, +0.1, +0.2). More doubles an artist, less halves,
+/// and their nearest neighbours lean the same way a little (steer.rs).
+pub fn boosts(
+    signals: &SessionSignals,
+    universe: &Universe,
+    graph: &Graph,
+    more: &[i64],
+    less: &[i64],
+) -> Boosts {
     let mut out = Boosts {
         skip_videos: signals.zapped.clone(),
         ..Default::default()
@@ -128,10 +138,15 @@ pub fn boosts(signals: &SessionSignals, universe: &Universe, more: &[i64], less:
         .into_iter()
         .map(|(scene, delta)| (scene, (1.0 + delta).clamp(0.5, 2.0)))
         .collect();
-    for artist in more.iter().take(MAX_ARTIST_IDS) {
+    let more = &more[..more.len().min(MAX_ARTIST_IDS)];
+    let less = &less[..less.len().min(MAX_ARTIST_IDS)];
+    for (artist, lean) in steer::session_boosts(graph, universe, more, less) {
+        *out.artist.entry(artist).or_insert(1.0) *= lean;
+    }
+    for artist in more {
         *out.artist.entry(*artist).or_insert(1.0) *= 2.0;
     }
-    for artist in less.iter().take(MAX_ARTIST_IDS) {
+    for artist in less {
         *out.artist.entry(*artist).or_insert(1.0) *= 0.5;
     }
     out
@@ -167,6 +182,7 @@ pub fn refill(
     let mut shaping = boosts(
         &signals,
         universe,
+        &taste.graph,
         &request.more_artist_ids,
         &request.less_artist_ids,
     );
@@ -336,7 +352,7 @@ mod tests {
         let signals = SessionSignals::load(&conn).unwrap();
         assert!(signals.zapped.contains(&10_000));
         let universe = Universe::load(&conn).unwrap();
-        let shaping = boosts(&signals, &universe, &[], &[502]);
+        let shaping = boosts(&signals, &universe, &Graph::default(), &[], &[502]);
         assert!(shaping.artist[&500] < 1.0);
         assert!(shaping.artist[&501] > 1.0);
         assert_eq!(shaping.artist[&502], 0.5);
