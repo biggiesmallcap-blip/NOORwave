@@ -35,11 +35,15 @@ mod tests {
     #[tauri::command]
     fn set_video_fullscreen() {}
 
+    #[tauri::command]
+    fn set_video_media_active() {}
+
     fn app(base: &str) -> tauri::App<MockRuntime> {
         let app = mock_builder()
             .invoke_handler(tauri::generate_handler![
                 get_install_mode,
-                set_video_fullscreen
+                set_video_fullscreen,
+                set_video_media_active
             ])
             .build(tauri::generate_context!())
             .unwrap();
@@ -76,6 +80,7 @@ mod tests {
                 let origin = format!("{base}{path}");
                 assert!(invoke(&window, &origin, "get_install_mode"));
                 assert!(invoke(&window, &origin, "set_video_fullscreen"));
+                assert!(invoke(&window, &origin, "set_video_media_active"));
                 assert!(invoke(&window, &origin, "plugin:app|version"));
                 assert!(invoke(&window, &origin, "plugin:webview|set_webview_zoom"));
             }
@@ -101,6 +106,7 @@ mod tests {
             for command in [
                 "get_install_mode",
                 "set_video_fullscreen",
+                "set_video_media_active",
                 "plugin:app|version",
                 "plugin:webview|set_webview_zoom",
             ] {
