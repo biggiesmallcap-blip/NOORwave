@@ -17,8 +17,11 @@
 //! - `day`: builds, stores and serves a day of every channel.
 //! - `session`: refills past the schedule from the session's signals.
 
+pub mod channels;
 pub mod clock;
+pub mod day;
 pub mod programmer;
+pub mod session;
 pub mod taste;
 pub mod universe;
 

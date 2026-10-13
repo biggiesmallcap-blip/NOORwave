@@ -158,7 +158,9 @@ fn near_liked(conn: &Connection, listener: &Listener, artist: i64) -> Result<Vec
     Ok(names)
 }
 
-fn spotlight(conn: &Connection, listener: &Listener, day: &str) -> Result<Option<StationCard>> {
+/// The day's spotlight (one artist, remembered per day). Shared with On Air's
+/// Spotlight channel so both surfaces feature the same artist.
+pub fn spotlight(conn: &Connection, listener: &Listener, day: &str) -> Result<Option<StationCard>> {
     let history = spotlight_history(conn)?;
     let todays = history
         .iter()
