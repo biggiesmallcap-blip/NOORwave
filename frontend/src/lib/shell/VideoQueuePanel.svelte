@@ -9,6 +9,7 @@
 	import type { EffectivePlayerLayout } from '$lib/stores/playerLayout';
 	import {
 		clearVideoSession,
+		noteChannelTaste,
 		videoChannelOnAir,
 		videoPanelAnchor,
 		videoSession,
@@ -35,6 +36,35 @@
 		if (source === 'direct') return 'Direct video';
 		return 'Video session';
 	}
+
+	// On a channel, More and Less like this teach it about the artist on
+	// screen (the same as + and - on the stage): more of them, or fewer, with
+	// their upcoming videos dropped. The line under the buttons says what
+	// happened for a few seconds.
+	const STEER_NOTE_MS = 4000;
+	let steerNote = $state<string | null>(null);
+	let steerTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function steer(more: boolean) {
+		const current = $videoSession.current;
+		const name = current?.artist_name ?? 'this artist';
+		if (current?.artist_id == null) {
+			steerNote = 'Nothing to learn from this one.';
+		} else {
+			const dropped = noteChannelTaste(current.artist_id, more);
+			steerNote = more
+				? `More like ${name} from here on.`
+				: dropped > 0
+					? `Less like ${name}: ${dropped} fewer coming up.`
+					: `Less like ${name} from here on.`;
+		}
+		if (steerTimer) clearTimeout(steerTimer);
+		steerTimer = setTimeout(() => (steerNote = null), STEER_NOTE_MS);
+	}
+
+	$effect(() => () => {
+		if (steerTimer) clearTimeout(steerTimer);
+	});
 
 	// The panel's artwork slot doubles as a stage: the video dock plays there
 	// while the panel is open (see VideoDock). Cleared when the panel unmounts.
@@ -85,10 +115,28 @@
 		>
 			› {$videoSession.autoplay ? 'On' : 'Autoplay'}
 		</button>
+		{#if $videoChannelOnAir}
+			<!-- The steer pair starts its own line in the side panel. -->
+			<span class="video-panel-break" aria-hidden="true"></span>
+			<button
+				class="video-panel-chip"
+				type="button"
+				title="More like this artist (+ on the stage)"
+				disabled={$videoSession.current?.artist_id == null}
+				onclick={() => steer(true)}
+			>More like this</button>
+			<button
+				class="video-panel-chip"
+				type="button"
+				title="Less like this artist (- on the stage)"
+				disabled={$videoSession.current?.artist_id == null}
+				onclick={() => steer(false)}
+			>Less like this</button>
+		{/if}
 	</div>
 	<p class="video-panel-source" aria-live="polite">
 		{$videoChannelOnAir
-			? `On air: ${String($videoChannelOnAir.no).padStart(2, '0')} ${$videoChannelOnAir.title}. The channel's schedule plays on; +/- on the stage steer it.`
+			? (steerNote ?? `On air: ${String($videoChannelOnAir.no).padStart(2, '0')} ${$videoChannelOnAir.title}. More or less like this steers what airs next.`)
 			: $videoSession.radioIssue ?? ($videoSession.continuous
 			? (!$videoSession.autoplay ? 'Radio paused. Turn on autoplay to resume.'
 				: $videoSession.radioSearching ? `Checking ${$videoSession.radioSeedArtistName ?? 'this artist'} and related artists…`
@@ -260,6 +308,9 @@
 		flex-wrap: wrap;
 		gap: 10px;
 	}
+
+	.video-panel-break { flex-basis: 100%; height: 0; }
+	:global(.app-shell[data-player-layout='bottom']) .video-panel-break { display: none; }
 
 	.video-panel-source { margin: -4px 0 0; line-height: var(--line-height-normal); }
 	.video-radio-hits {
