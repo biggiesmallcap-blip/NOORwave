@@ -5,21 +5,22 @@
 	// page; it draws once per change and never animates.
 	import { onDestroy, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { cachedAtlas, loadAtlas, type LoadedAtlas } from './atlas_data';
+	import { atlasPictures, atlasYou, cachedAtlas, loadAtlas, type LoadedAtlas } from './atlas_data';
+	import type { AtlasLook } from './style';
 	import { atlasUrl } from './links';
 	import { AtlasRenderer } from './renderer';
 
 	let {
 		artistId,
 		trail = [],
-		look = 'place',
+		look = 'picture',
 		caption = true,
 	}: {
 		/** TIDAL id of the artist on stage. */
 		artistId: number | null;
 		/** Recent artist ids, oldest first (the current one may be last). */
 		trail?: number[];
-		look?: 'light' | 'place';
+		look?: AtlasLook;
 		/** The scene name and "Open Atlas" over the map; off where the
 		 *  surrounding card already says where it is. */
 		caption?: boolean;
@@ -85,6 +86,13 @@
 		const rect = canvasEl.getBoundingClientRect();
 		renderer.resize(rect.width, rect.height, window.devicePixelRatio || 1);
 		renderer.setLook(look);
+		renderer.setPictures(atlasPictures.cached());
+		renderer.setYou(atlasYou.cached());
+		void (look === 'picture' ? atlasPictures.load() : atlasYou.load()).then((value) => {
+			if (!renderer || !value) return;
+			if ('rgb' in value) renderer.setPictures(value);
+			else renderer.setYou(value);
+		});
 		observer = new ResizeObserver(() => {
 			if (!canvasEl || !renderer) return;
 			const r = canvasEl.getBoundingClientRect();

@@ -104,7 +104,7 @@
 			Play best cuts
 		</button>
 		<button type="button" class="btn stage-secondary" disabled={best.length === 0} onclick={() => best[0] && void playAtlasRadio(best[0], displayName)}>Radio</button>
-		<button type="button" class="btn stage-ghost" onclick={onroute} title="Plot a route from this artist (R)">Route from here</button>
+		<button type="button" class="btn stage-ghost" onclick={onroute} title="Start a journey from this artist (J)">Journey from here</button>
 	</div>
 
 	{#if uncharted}

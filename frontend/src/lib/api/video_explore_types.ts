@@ -137,6 +137,50 @@ export interface AtlasRouteResponse {
 	stops: AtlasRouteStop[];
 }
 
+/** Picture: each artist's dominant artwork colour, for the artists whose
+ *  thumbnail has been read so far. Parallel arrays, by artist id. */
+export interface AtlasPicturesResponse {
+	ready: number;
+	total: number;
+	ids: number[];
+	/** 0xRRGGBB. */
+	rgb: number[];
+	/** Image path of the picked thumbnail
+	 *  (resources.tidal.com/images/{art}/640x640.jpg). */
+	art: string[];
+}
+
+/** You: where you have been and where you could go next. */
+export interface AtlasYouResponse {
+	footprints: { artist_id: number; last_at: number; plays: number }[];
+	/** Artists watched in a row (gaps under 45 minutes), newest last. */
+	trails: { ended_at: number; artists: number[] }[];
+	/** Unwatched artists right next to ones you watch. */
+	frontier: { artist_id: number; score: number; via: number }[];
+}
+
+export type JourneyKind = 'collab' | 'new';
+
+export interface AtlasJourneyStop {
+	artist_id: number;
+	name: string;
+	light: Light;
+	video: ExploreVideo | null;
+	why: string;
+}
+
+/** A journey across the map: a collab chain (every step a video both
+ *  artists are on) or somewhere new (to a scene you have barely touched,
+ *  through artists new to you). */
+export interface AtlasJourneyResponse {
+	found: boolean;
+	kind: JourneyKind;
+	title: string;
+	destination: { scene_id: number; name: string } | null;
+	stops: AtlasJourneyStop[];
+	reason: string | null;
+}
+
 // ---------------------------------------------------------------- Catalog
 
 /** One scene's coverage for the Logbook: "seen N of M" without the atlas. */

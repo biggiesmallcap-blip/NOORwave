@@ -3,34 +3,50 @@
 	// in every theme (like the video stage); the chrome on it uses stage-local
 	// colours. Interactions: drag to pan (with a fling), wheel and pinch to zoom
 	// around the pointer, hover for a name, click a scene or an artist for its
-	// card, the section search field to fly to an artist, Route mode to plot a
-	// path between two artists. Keys: arrows pan, +/- zoom, F fits, R toggles
-	// Route mode, Esc closes.
-	import { onDestroy, onMount, tick } from 'svelte';
+	// card, the section search field to fly to an artist, Journeys to travel
+	// across the map (somewhere new, or a collab chain), and the two looks:
+	// Picture (artists in the colours of their own videos) and You (your
+	// footprints and the frontier next to them). Keys: arrows pan, +/- zoom,
+	// F fits, J opens Journeys, Esc closes.
+	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api } from '$lib/api/client';
 	import type {
 		AtlasArtistCard as ArtistCardData,
-		AtlasRouteResponse,
+		AtlasJourneyResponse,
+		AtlasPicturesResponse,
 		AtlasSceneCard as SceneCardData,
+		AtlasYouResponse,
+		ExploreVideo,
+		JourneyKind,
 		Light,
 	} from '$lib/api/video_explore_types';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { reduceMotion } from '$lib/stores/motion';
+	import { videoSession } from '$lib/stores/video_session';
 	import { videoSectionQuery } from '$lib/video/section';
 	import AtlasArtistCard from './AtlasArtistCard.svelte';
-	import AtlasRouteCard from './AtlasRouteCard.svelte';
+	import AtlasJourneyCard from './AtlasJourneyCard.svelte';
 	import AtlasSceneCard from './AtlasSceneCard.svelte';
-	import { atlasLook, rememberName, type LoadedAtlas } from './atlas_data';
+	import { atlasLook, atlasPictures, atlasYou, rememberName, type LoadedAtlas } from './atlas_data';
 	import type { AtlasData } from './decode';
 	import { ATLAS_SEARCH_LABEL, atlasUrl } from './links';
-	import { probeMessage } from './play';
+	import { playAtlasQueue, probeMessage } from './play';
 	import { AtlasRenderer } from './renderer';
 	import { buildNameIndex, searchArtists, type AtlasSearchHit } from './search';
 	import { sceneAt } from './spatial';
-	import { ATLAS_LOOKS, LIGHT_HELP, LIGHT_NAMES, formatCount, lightSwatch, type AtlasLook } from './style';
+	import {
+		ATLAS_LOOKS,
+		FOOTPRINT_COLORS,
+		FRONTIER_COLORS,
+		LIGHT_HELP,
+		footprintStep,
+		formatCount,
+		lightSwatch,
+		type AtlasLook,
+	} from './style';
 
 	let {
 		loaded,
@@ -60,7 +76,7 @@
 	let compact = $state(false);
 	let legendOpen = $state(true);
 
-	type Card = { kind: 'scene'; index: number } | { kind: 'artist'; index: number } | { kind: 'route' };
+	type Card = { kind: 'scene'; index: number } | { kind: 'artist'; index: number } | { kind: 'journey' };
 	let card = $state<Card | null>(null);
 	let sceneCard = $state<SceneCardData | null>(null);
 	let sceneLoading = $state(false);
@@ -70,12 +86,23 @@
 	let artistError = $state<string | null>(null);
 	let probe = $state({ busy: false, message: null as string | null, sent: false });
 
-	let routeMode = $state(false);
-	let routeFrom = $state(-1);
-	let routeTo = $state(-1);
-	let route = $state<AtlasRouteResponse | null>(null);
-	let routeLoading = $state(false);
-	let routeError = $state<string | null>(null);
+	// Journeys: where from, which kind, the answer, and whether a map click
+	// is being waited for (the start, or a collab chain's destination).
+	let journeyFrom = $state(-1);
+	let journeyKind = $state<JourneyKind | null>(null);
+	let journeyTo = $state(-1);
+	let journey = $state<AtlasJourneyResponse | null>(null);
+	let journeyLoading = $state(false);
+	let journeyError = $state<string | null>(null);
+	let picking = $state<'from' | 'to' | null>(null);
+	/** The journey playing, followed on the map while its label is what
+	 *  the session says is playing. */
+	let following = $state<{ label: string; ids: number[] } | null>(null);
+	let followedArtist = -1;
+
+	// The looks' own data (shared with the mini map).
+	let pictures = $state<AtlasPicturesResponse | null>(atlasPictures.cached());
+	let you = $state<AtlasYouResponse | null>(atlasYou.cached());
 
 	let tip = $state<{ x: number; y: number; title: string; meta: string; hint: string } | null>(null);
 	let hereScene = $state(-1);
@@ -85,7 +112,7 @@
 	const artistCache = new Map<number, ArtistCardData>();
 	let sceneSeq = 0;
 	let artistSeq = 0;
-	let routeSeq = 0;
+	let journeySeq = 0;
 	let dwellTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// ------------------------------------------------------------ helpers
@@ -198,8 +225,8 @@
 	}
 
 	function closeCard() {
-		if (card?.kind === 'route') {
-			clearRoute();
+		if (card?.kind === 'journey') {
+			closeJourneys();
 			return;
 		}
 		card = null;
@@ -222,80 +249,137 @@
 		}
 	}
 
-	// ------------------------------------------------------------ route
+	// ------------------------------------------------------------ journeys
 
-	function enterRoute(from = -1) {
-		routeMode = true;
-		routeFrom = from;
-		routeTo = -1;
-		route = null;
-		routeError = null;
-		renderer?.setRoute(null);
+	/** Where a journey starts by default: the artist playing, if it is on
+	 *  the map, else the artist whose card is open. */
+	function defaultFrom(): number {
+		const playing = $videoSession.current?.artist_id;
+		if (playing != null) {
+			const index = data.indexById.get(playing);
+			if (index !== undefined) return index;
+		}
+		return card?.kind === 'artist' ? card.index : -1;
+	}
+
+	function openJourneys(from = defaultFrom()) {
+		journeySeq += 1;
+		card = { kind: 'journey' };
+		journeyFrom = from;
+		journeyKind = null;
+		journeyTo = -1;
+		journey = null;
+		journeyError = null;
+		journeyLoading = false;
+		picking = from < 0 ? 'from' : null;
+		if (!following) renderer?.setRoute(null);
 		renderer?.setSelection(from, -1);
 	}
 
-	function clearRoute() {
-		routeSeq += 1;
-		routeMode = false;
-		routeFrom = -1;
-		routeTo = -1;
-		route = null;
-		routeLoading = false;
-		routeError = null;
-		renderer?.setRoute(null);
-		if (card?.kind === 'route') card = null;
-		renderer?.setSelection(card?.kind === 'artist' ? card.index : -1, card?.kind === 'scene' ? card.index : -1);
+	function closeJourneys() {
+		journeySeq += 1;
+		picking = null;
+		journey = null;
+		journeyKind = null;
+		journeyLoading = false;
+		journeyError = null;
+		if (!following) renderer?.setRoute(null);
+		if (card?.kind === 'journey') card = null;
+		renderer?.setSelection(-1, -1);
 	}
 
-	function toggleRoute() {
-		if (routeMode || route) clearRoute();
-		else enterRoute(card?.kind === 'artist' ? card.index : -1);
+	function toggleJourneys() {
+		if (card?.kind === 'journey') closeJourneys();
+		else openJourneys();
 	}
 
-	function routePick(index: number) {
-		if (routeFrom < 0) {
-			routeFrom = index;
+	/** A map (or search) pick while Journeys waits for one. */
+	function journeyPick(index: number) {
+		if (picking === 'from') {
+			journeyFrom = index;
+			picking = null;
 			renderer?.setSelection(index, -1);
 			return;
 		}
-		if (index === routeFrom) return;
-		routeTo = index;
-		void findRoute();
+		if (picking === 'to' && index !== journeyFrom) {
+			journeyTo = index;
+			picking = null;
+			void runJourney('collab');
+		}
 	}
 
-	async function findRoute() {
-		if (routeFrom < 0 || routeTo < 0) return;
-		const seq = ++routeSeq;
-		card = { kind: 'route' };
-		routeLoading = true;
-		routeError = null;
-		route = null;
-		renderer?.setSelection(routeTo, -1);
+	function stopIndex(id: number): number {
+		return data.indexById.get(id) ?? -1;
+	}
+
+	async function runJourney(kind: JourneyKind, scene: number | null = null) {
+		if (journeyFrom < 0) return;
+		const seq = ++journeySeq;
+		journeyKind = kind;
+		journeyLoading = true;
+		journeyError = null;
+		journey = null;
 		try {
-			const result = await api.getVideoAtlasRoute(data.ids[routeFrom], data.ids[routeTo]);
-			if (seq !== routeSeq) return;
-			route = result;
+			const result = await api.getVideoAtlasJourney({
+				kind,
+				from: data.ids[journeyFrom],
+				to: kind === 'collab' && journeyTo >= 0 ? data.ids[journeyTo] : undefined,
+				scene: scene != null ? data.scenes[scene].id : undefined,
+			});
+			if (seq !== journeySeq) return;
+			journey = result;
 			for (const stop of result.stops) if (stop.name) rememberName(stop.artist_id, stop.name);
-			const indices = result.found
-				? result.stops.map((stop) => data.indexById.get(stop.artist_id) ?? -1).filter((i) => i >= 0)
-				: [];
+			const indices = result.found ? result.stops.map((stop) => stopIndex(stop.artist_id)).filter((i) => i >= 0) : [];
 			renderer?.setSelection(-1, -1);
 			renderer?.setRoute(indices.length > 1 ? indices : null);
 			const [ox, oy] = offsets();
 			if (indices.length > 1) renderer?.flyToIndices(indices, ox, oy);
-			routeMode = false;
 		} catch {
-			if (seq === routeSeq) routeError = 'Could not plot that route.';
+			if (seq === journeySeq) journeyError = 'Could not plan that journey.';
 		} finally {
-			if (seq === routeSeq) routeLoading = false;
+			if (seq === journeySeq) journeyLoading = false;
 		}
 	}
+
+	function playJourney(queue: ExploreVideo[], label: string, start?: ExploreVideo) {
+		if (!journey) return;
+		following = { label, ids: journey.stops.map((stop) => stop.artist_id) };
+		followedArtist = -1;
+		renderer?.setTrail(null);
+		void playAtlasQueue(start ?? queue[0], queue, label);
+	}
+
+	// While a journey plays, the map follows it: the camera goes to each
+	// stop's artist as its video starts and the trail lights up behind it.
+	// Picking anything else to play ends the following.
+	$effect(() => {
+		const session = $videoSession;
+		const journeyPlaying = following;
+		if (!journeyPlaying || !renderer) return;
+		if (session.sourceLabel !== journeyPlaying.label) {
+			if (session.current) untrack(() => (following = null));
+			return;
+		}
+		const artist = session.current?.artist_id ?? null;
+		const k = artist != null ? journeyPlaying.ids.indexOf(artist) : -1;
+		if (k < 0 || artist === followedArtist) return;
+		followedArtist = artist ?? -1;
+		untrack(() => {
+			const trail = journeyPlaying.ids.slice(0, k + 1).map(stopIndex).filter((i) => i >= 0);
+			renderer?.setTrail(trail.length ? trail : null);
+			const index = stopIndex(journeyPlaying.ids[k]);
+			if (index >= 0) {
+				const [ox, oy] = offsets();
+				renderer?.flyToArtist(index, compact ? 6 : 7, ox, oy);
+			}
+		});
+	});
 
 	// ------------------------------------------------------------ search
 
 	function pickHit(hit: AtlasSearchHit) {
 		videoSectionQuery.set('');
-		if (routeMode) routePick(hit.index);
+		if (picking) journeyPick(hit.index);
 		else selectArtist(hit.index);
 		// Leave the field so the map keys (arrows, +/-, Esc) work at once.
 		if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
@@ -400,11 +484,13 @@
 		if (!renderer) return;
 		const hit = renderer.hitTest(x, y, compact ? 9 : 5);
 		if (hit.kind === 'artist') {
-			if (routeMode) routePick(hit.index);
+			if (picking) journeyPick(hit.index);
 			else selectArtist(hit.index);
-		} else if (hit.kind === 'scene' && !routeMode) {
-			selectScene(hit.index);
-		} else if (hit.kind === 'none' && card && card.kind !== 'route' && !routeMode) {
+		} else if (hit.kind === 'scene' && !picking) {
+			// With Journeys open and a start chosen, a scene is a destination.
+			if (card?.kind === 'journey' && journeyFrom >= 0 && !journeyLoading) void runJourney('new', hit.index);
+			else selectScene(hit.index);
+		} else if (hit.kind === 'none' && card && card.kind !== 'journey' && !picking) {
 			closeCard();
 		}
 	}
@@ -426,7 +512,7 @@
 				y,
 				title: nameOf(i) ?? 'Unnamed artist',
 				meta: `${formatCount(data.videos[i])} ${data.videos[i] === 1 ? 'video' : 'videos'} in ${scene}`,
-				hint: routeMode ? (routeFrom < 0 ? 'Click to start the route here' : 'Click to route here') : LIGHT_NAMES[light],
+				hint: picking === 'from' ? 'Click to start from here' : picking === 'to' ? 'Click to travel here' : lookHint(i, light),
 			};
 			if (!nameOf(i)) {
 				// Names may be partial: learn this one after a short dwell.
@@ -447,12 +533,35 @@
 				y,
 				title: scene.name,
 				meta: `${formatCount(scene.artists)} artists, ${formatCount(scene.videos)} videos`,
-				hint: routeMode ? 'Pick an artist' : scene.channel_no != null ? `Channel ${scene.channel_no}` : 'Open the scene',
+				hint: picking
+					? 'Pick an artist'
+					: card?.kind === 'journey' && journeyFrom >= 0
+						? 'Click to travel here'
+						: scene.channel_no != null
+							? `Channel ${scene.channel_no}`
+							: 'Open the scene',
 			};
 		} else {
 			renderer.setHover(-1, -1);
 			tip = null;
 		}
+	}
+
+	/** What the tooltip adds about an artist in the look on show. */
+	function lookHint(index: number, light: Light): string {
+		if ($atlasLook === 'picture') return light === 0 ? LIGHT_HELP[0] : '';
+		const id = data.ids[index];
+		const foot = you?.footprints.find((f) => f.artist_id === id);
+		if (foot) {
+			const days = Math.floor((Date.now() / 1000 - foot.last_at) / 86_400);
+			return days < 1 ? 'Watched today' : days < 2 ? 'Watched yesterday' : `Watched ${days} days ago`;
+		}
+		const edge = you?.frontier.find((f) => f.artist_id === id);
+		if (edge) {
+			const via = names.get(edge.via);
+			return via ? `Frontier: next to ${via}` : 'Frontier: not watched yet';
+		}
+		return '';
 	}
 
 	function onContextMenu(event: MouseEvent) {
@@ -494,8 +603,12 @@
 			videoSectionQuery.set('');
 			return true;
 		}
-		if (routeMode || route || card?.kind === 'route') {
-			clearRoute();
+		if (picking) {
+			picking = null;
+			return true;
+		}
+		if (card?.kind === 'journey') {
+			closeJourneys();
 			return true;
 		}
 		if (card) {
@@ -552,9 +665,9 @@
 			case 'F':
 				renderer.fit();
 				break;
-			case 'r':
-			case 'R':
-				toggleRoute();
+			case 'j':
+			case 'J':
+				toggleJourneys();
 				break;
 			case 'Escape':
 				handled = escape();
@@ -637,7 +750,7 @@
 		void card;
 		void legendOpen;
 		void compact;
-		void routeMode;
+		void picking;
 		if (!ready || !stageEl) return;
 		void tick().then(() => {
 			overlayObserver?.disconnect();
@@ -659,6 +772,8 @@
 		compact = rect.width < 640;
 		renderer.resize(rect.width, rect.height, window.devicePixelRatio || 1);
 		renderer.setLook($atlasLook);
+		renderer.setPictures(pictures);
+		renderer.setYou(you);
 		const hasFocus = focus.artist != null || focus.scene != null || focus.trail.length > 0;
 		renderer.setData(data, names, { intro: !hasFocus });
 		drawnData = data;
@@ -718,17 +833,65 @@
 		renderer?.setLook($atlasLook);
 	});
 
+	// Each look loads its own data when shown (and again after a minute:
+	// Picture fills in as the artwork is read, You changes with every
+	// watch). A fresh atlas asks for fresh You.
+	async function loadLookData(look: AtlasLook, fresh = false) {
+		if (look === 'picture') {
+			const next = await atlasPictures.load(fresh);
+			if (next) {
+				pictures = next;
+				renderer?.setPictures(next);
+			}
+		} else {
+			const next = await atlasYou.load(fresh);
+			if (next) {
+				you = next;
+				renderer?.setYou(next);
+			}
+		}
+	}
+
+	$effect(() => {
+		const look = $atlasLook;
+		void data;
+		if (!ready) return;
+		void untrack(() => loadLookData(look));
+	});
+
+	$effect(() => {
+		const look = $atlasLook;
+		if (!ready) return;
+		const timer = setInterval(() => {
+			if (look === 'picture' && pictures && pictures.ready >= pictures.total) return;
+			void loadLookData(look, true);
+		}, 60_000);
+		return () => clearInterval(timer);
+	});
+
 	function setLook(look: AtlasLook) {
 		atlasLook.set(look);
 	}
 
+	let footCounts = $derived.by(() => {
+		const counts = [0, 0, 0];
+		const now = Date.now() / 1000;
+		for (const f of you?.footprints ?? []) {
+			if (!data.indexById.has(f.artist_id)) continue;
+			counts[footprintStep(Math.max(0, (now - f.last_at) / 86_400))] += 1;
+		}
+		return counts;
+	});
+	let frontierCount = $derived((you?.frontier ?? []).filter((f) => data.indexById.has(f.artist_id)).length);
+
 	let selectedIndex = $derived(card?.kind === 'artist' ? card.index : -1);
 	let selectedScene = $derived(card?.kind === 'scene' ? data.scenes[card.index] : null);
-	let routeBanner = $derived.by(() => {
-		if (!routeMode) return null;
-		if (routeFrom < 0) return 'Route: pick a start artist';
-		return `From ${nameOf(routeFrom) ?? 'this artist'}: now pick a destination`;
+	let pickBanner = $derived.by(() => {
+		if (picking === 'from') return 'Journeys: click the artist to start from';
+		if (picking === 'to') return `Collab chain from ${nameOf(journeyFrom) ?? 'this artist'}: click where to go`;
+		return null;
 	});
+	let journeyPlaying = $derived(following !== null && journey !== null && $videoSession.sourceLabel === following.label);
 </script>
 
 <div
@@ -736,13 +899,13 @@
 	class:ready
 	class:compact
 	class:dragging
-	class:route-mode={routeMode}
+	class:route-mode={picking !== null}
 	class:has-card={card !== null}
 	bind:this={stageEl}
 	tabindex="-1"
 	role="application"
 	aria-roledescription="map"
-	aria-label="Atlas of video artists. Drag to pan, scroll to zoom, arrows pan, plus and minus zoom, F fits, R plots a route."
+	aria-label="Atlas of video artists. Drag to pan, scroll to zoom, arrows pan, plus and minus zoom, F fits, J opens Journeys."
 >
 	<canvas
 		bind:this={canvasEl}
@@ -767,9 +930,9 @@
 					aria-checked={$atlasLook === look.value}
 					class:active={$atlasLook === look.value}
 					onclick={() => setLook(look.value)}
-					title={look.value === 'light' ? 'Bright where you have been, faint where you have not' : 'Every artist in the colour of its scene'}
+					title={look.help}
 				>
-					{compact ? (look.value === 'light' ? 'Light' : 'Color') : look.label}
+					{look.label}
 				</button>
 			{/each}
 		</div>
@@ -782,9 +945,9 @@
 
 	<!-- HUD: tools -->
 	<div class="hud hud-right" role="toolbar" aria-label="Map tools">
-		<button type="button" class="tool" class:on={routeMode || route !== null} onclick={toggleRoute} aria-pressed={routeMode || route !== null} title="Route mode (R)">
+		<button type="button" class="tool" class:on={card?.kind === 'journey'} onclick={toggleJourneys} aria-pressed={card?.kind === 'journey'} title="Journeys (J)">
 			<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="18" r="2.2" /><circle cx="19" cy="6" r="2.2" /><path d="M7 17c5-1 3-9 10-10" /></svg>
-			{#if !compact}<span>Route</span>{/if}
+			{#if !compact}<span>Journeys</span>{/if}
 		</button>
 		<div class="zoom">
 			<button type="button" class="tool icon" onclick={() => renderer?.zoomAt(renderer.viewport.width / 2, renderer.viewport.height / 2, 1.6)} title="Zoom in (+)" aria-label="Zoom in">
@@ -824,27 +987,44 @@
 	<!-- Legend -->
 	<div class="legend" class:closed={!legendOpen}>
 		<button type="button" class="legend-toggle" onclick={() => (legendOpen = !legendOpen)} aria-expanded={legendOpen}>
-			{$atlasLook === 'light' ? 'Light is knowledge' : 'Color is place'}
+			{$atlasLook === 'picture' ? 'Picture' : 'You'}
 			<svg viewBox="0 0 24 24" aria-hidden="true"><path d={legendOpen ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6'} /></svg>
 		</button>
 		{#if legendOpen}
-			{#if $atlasLook === 'light'}
+			{#if $atlasLook === 'picture'}
+				<p class="legend-copy">Every artist in the colour of its own videos' artwork. Zoom in close and the dots become the pictures.</p>
 				<ul class="legend-rows">
-					{#each [3, 2, 1, 0] as level (level)}
-						{@const light = level as Light}
-						<li title={LIGHT_HELP[light]}>
-							<span class="swatch l{light}" aria-hidden="true"></span>
-							<span class="l-name">{LIGHT_NAMES[light]}</span>
-							<span class="l-help">{LIGHT_HELP[light]}</span>
-							<span class="l-count">{formatCount(data.lightCounts[light])}</span>
-						</li>
-					{/each}
+					<li>
+						<span class="swatch picture" aria-hidden="true"></span>
+						<span class="l-name">Artwork</span>
+						<span class="l-help">{pictures && pictures.ready < pictures.total ? 'Reading in the background' : 'Read for every artist on the map'}</span>
+						<span class="l-count">{pictures ? `${formatCount(pictures.ready)}` : '...'}</span>
+					</li>
+					<li><span class="swatch l0" aria-hidden="true"></span><span class="l-name">Uncharted</span><span class="l-help">{LIGHT_HELP[0]}</span><span class="l-count">{formatCount(data.lightCounts[0])}</span></li>
 				</ul>
 			{:else}
-				<p class="legend-copy">Every artist in the hue of its scene. Hue follows a scene's place around the map, here and on its On Air channel.</p>
+				<p class="legend-copy">What you watch leaves footprints that fade over weeks, and trails join what you watched in a row. The frontier is next door: artists beside yours you have not tried.</p>
 				<ul class="legend-rows">
-					<li><span class="swatch rainbow" aria-hidden="true"></span><span class="l-name">Scenes</span><span class="l-help">{data.scenes.length} on the map</span><span class="l-count">{formatCount(data.count - data.lightCounts[0])}</span></li>
-					<li><span class="swatch l0" aria-hidden="true"></span><span class="l-name">Uncharted</span><span class="l-help">{LIGHT_HELP[0]}</span><span class="l-count">{formatCount(data.lightCounts[0])}</span></li>
+					{#each ['This week', 'This month', 'Earlier'] as label, step (label)}
+						<li>
+							<span class="swatch" style:background={FOOTPRINT_COLORS[step]} aria-hidden="true"></span>
+							<span class="l-name">{label}</span>
+							<span class="l-help">{step === 0 ? 'Watched in the last 7 days' : step === 1 ? 'In the last 30 days' : 'Up to six months ago'}</span>
+							<span class="l-count">{formatCount(footCounts[step])}</span>
+						</li>
+					{/each}
+					<li>
+						<span class="swatch frontier" style:background={FRONTIER_COLORS[0]} aria-hidden="true"></span>
+						<span class="l-name">Frontier</span>
+						<span class="l-help">Next to what you watch, not watched yet</span>
+						<span class="l-count">{formatCount(frontierCount)}</span>
+					</li>
+					<li>
+						<span class="swatch trail" aria-hidden="true"></span>
+						<span class="l-name">Trails</span>
+						<span class="l-help">Watched in a row</span>
+						<span class="l-count">{formatCount(you?.trails.length ?? 0)}</span>
+					</li>
 				</ul>
 			{/if}
 			{#if data.recent.length > 0}
@@ -856,11 +1036,11 @@
 		{/if}
 	</div>
 
-	{#if routeBanner}
+	{#if pickBanner}
 		<div class="banner" role="status">
 			<span class="route-line" aria-hidden="true"></span>
-			{routeBanner}
-			<button type="button" class="link" onclick={clearRoute}>Cancel</button>
+			{pickBanner}
+			<button type="button" class="link" onclick={() => (picking = null)}>Cancel</button>
 		</div>
 	{/if}
 
@@ -874,7 +1054,7 @@
 
 	{#if card}
 		<aside class="panel" class:sheet={compact} aria-label="Details">
-			{#key card.kind === 'route' ? 'route' : `${card.kind}:${card.index}`}
+			{#key card.kind === 'journey' ? 'journey' : `${card.kind}:${card.index}`}
 				<div class="panel-inner">
 					{#if card.kind === 'scene' && selectedScene}
 						<AtlasSceneCard
@@ -903,18 +1083,25 @@
 							onretry={() => void loadArtist(selectedIndex)}
 							onscene={s >= 0 ? () => selectScene(s) : null}
 							onneighbor={selectArtistById}
-							onroute={() => enterRoute(selectedIndex)}
+							onroute={() => openJourneys(selectedIndex)}
 							onprobe={() => void sendProbe()}
 						/>
-					{:else if card.kind === 'route'}
-						<AtlasRouteCard
-							fromName={nameOf(routeFrom) ?? route?.stops[0]?.name ?? 'Start'}
-							toName={nameOf(routeTo) ?? route?.stops.at(-1)?.name ?? 'Destination'}
-							{route}
-							loading={routeLoading}
-							error={routeError}
-							onclose={clearRoute}
-							onretry={() => void findRoute()}
+					{:else if card.kind === 'journey'}
+						<AtlasJourneyCard
+							fromName={journeyFrom >= 0 ? (nameOf(journeyFrom) ?? 'This artist') : null}
+							{picking}
+							{journey}
+							kind={journeyKind}
+							loading={journeyLoading}
+							error={journeyError}
+							playing={journeyPlaying}
+							onnew={() => void runJourney('new')}
+							oncollab={() => (picking = picking === 'to' ? null : 'to')}
+							onpickfrom={() => (picking = 'from')}
+							onplay={playJourney}
+							onagain={() => openJourneys(journeyFrom)}
+							onclose={closeJourneys}
+							onretry={() => journeyKind && void runJourney(journeyKind)}
 							onstop={(id) => {
 								const index = data.indexById.get(id);
 								if (index !== undefined) {
@@ -1272,21 +1459,8 @@
 		justify-self: center;
 	}
 
-	.swatch.l3 {
-		background: #fff6e6;
-		box-shadow: 0 0 8px 2px rgba(255, 226, 170, 0.75);
-	}
 
-	.swatch.l2 {
-		background: hsl(330, 86%, 64%);
-		box-shadow: 0 0 6px rgba(255, 110, 190, 0.5);
-	}
 
-	.swatch.l1 {
-		width: 6px;
-		height: 6px;
-		background: hsla(260, 20%, 64%, 0.6);
-	}
 
 	.swatch.l0 {
 		width: 5px;
@@ -1294,8 +1468,21 @@
 		background: hsla(222, 12%, 66%, 0.6);
 	}
 
-	.swatch.rainbow {
-		background: conic-gradient(hsl(0, 85%, 62%), hsl(60, 85%, 62%), hsl(120, 85%, 62%), hsl(180, 85%, 62%), hsl(240, 85%, 62%), hsl(300, 85%, 62%), hsl(360, 85%, 62%));
+	/* Picture: a small mosaic of artwork colours. */
+	.swatch.picture {
+		border-radius: 3px;
+		background: conic-gradient(hsl(14, 64%, 66%), hsl(48, 52%, 70%), hsl(150, 40%, 62%), hsl(205, 58%, 68%), hsl(290, 40%, 66%), hsl(220, 6%, 66%), hsl(14, 64%, 66%));
+	}
+
+	.swatch.frontier {
+		box-shadow: 0 0 0 2px rgba(120, 220, 230, 0.25);
+	}
+
+	.swatch.trail {
+		width: 14px;
+		height: 2px;
+		border-radius: 2px;
+		background: hsla(38, 80%, 76%, 0.7);
 	}
 
 	.legend-copy {

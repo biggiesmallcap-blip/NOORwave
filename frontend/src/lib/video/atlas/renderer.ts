@@ -28,15 +28,27 @@ import {
 	type Viewport,
 } from './camera';
 import type { AtlasData } from './decode';
+import type { AtlasPicturesResponse, AtlasYouResponse } from '$lib/api/video_explore_types';
+import { upscaleTidalArtwork } from '$lib/utils/artwork';
 import { planLabels, sceneFontSize, zoomLevel, type PlannedLabel, type ScreenBox } from './labels';
 import { SpatialGrid, sceneAt } from './spatial';
 import {
 	STAGE,
 	baseRadius,
-	glowColor,
-	glowStrength,
 	isHub,
-	pointColor,
+	FOOTPRINT_COLORS,
+	FOOTPRINT_GLOW,
+	FRONTIER_COLORS,
+	FRONTIER_GLOW,
+	PICTURE_BUCKETS,
+	PICTURE_UNKNOWN,
+	YOU_REST,
+	footprintStep,
+	frontierStep,
+	pictureBucket,
+	pictureColor,
+	pictureNebulaColor,
+	trailAlpha,
 	sceneLabelColor,
 	zoomGrowth,
 	formatCount,
@@ -167,21 +179,24 @@ interface NebulaTexture {
 	span: number;
 }
 
-const nebulaCache = new WeakMap<AtlasData, Map<AtlasLook, NebulaTexture>>();
+const nebulaCache = new WeakMap<AtlasData, Map<string, NebulaTexture>>();
+
+type Stamp = { sprite: HTMLCanvasElement; alpha: number } | null;
 
 /**
  * Scene nebulae as one world-space texture: every charted artist stamps a soft
- * disc in its scene hue, so a nebula takes the real shape of its cluster
- * (never a hard circle); a faint halo per scene and a grey band of dust for
- * the uncharted ring sit underneath; one blur pass melts it together.
+ * disc (the look decides its colour and strength), so a nebula takes the real
+ * shape of its cluster (never a hard circle); a grey band of dust for the
+ * uncharted ring sits underneath; one blur pass melts it together. Cached
+ * per data and `key` (the look and the version of its data).
  */
-function buildNebula(data: AtlasData, look: AtlasLook): NebulaTexture {
-	let perLook = nebulaCache.get(data);
-	if (!perLook) {
-		perLook = new Map();
-		nebulaCache.set(data, perLook);
+function buildNebula(data: AtlasData, key: string, stampOf: (i: number) => Stamp): NebulaTexture {
+	let perKey = nebulaCache.get(data);
+	if (!perKey) {
+		perKey = new Map();
+		nebulaCache.set(data, perKey);
 	}
-	const cached = perLook.get(look);
+	const cached = perKey.get(key);
 	if (cached) return cached;
 
 	const size = 1024;
@@ -195,25 +210,6 @@ function buildNebula(data: AtlasData, look: AtlasLook): NebulaTexture {
 	const ctx = raw.getContext('2d')!;
 	ctx.globalCompositeOperation = 'lighter';
 
-	const place = look === 'place';
-	const sat = place ? 44 : 26;
-	const lightness = place ? 52 : 46;
-
-	// Halos: the scene's whole extent, very faint.
-	for (const scene of data.scenes) {
-		const cx = (scene.x - x0) * k;
-		const cy = (scene.y - y0) * k;
-		const r = scene.r * 1.45 * k;
-		const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-		g.addColorStop(0, `hsla(${scene.hue}, ${sat}%, ${lightness}%, ${place ? 0.1 : 0.07})`);
-		g.addColorStop(0.55, `hsla(${scene.hue}, ${sat}%, ${lightness - 8}%, ${place ? 0.035 : 0.025})`);
-		g.addColorStop(1, `hsla(${scene.hue}, ${sat}%, ${lightness - 10}%, 0)`);
-		ctx.fillStyle = g;
-		ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
-	}
-
-	// Member stamps.
-	const stamps = data.scenes.map((scene) => stampSprite(scene.hue, sat, lightness));
 	const dust = stampSprite(222, 12, 62);
 	for (let i = 0; i < data.count; i++) {
 		const s = data.scene[i];
@@ -226,9 +222,11 @@ function buildNebula(data: AtlasData, look: AtlasLook): NebulaTexture {
 			ctx.drawImage(dust, cx - r, cy - r, r * 2, r * 2);
 			continue;
 		}
+		const stamp = stampOf(i);
+		if (!stamp) continue;
 		const r = (7 + 1.5 * Math.sqrt(v)) * k;
-		ctx.globalAlpha = (place ? 0.03 : 0.022) + Math.log1p(v) * (place ? 0.007 : 0.005);
-		ctx.drawImage(stamps[s], cx - r, cy - r, r * 2, r * 2);
+		ctx.globalAlpha = stamp.alpha;
+		ctx.drawImage(stamp.sprite, cx - r, cy - r, r * 2, r * 2);
 	}
 	ctx.globalAlpha = 1;
 
@@ -244,9 +242,18 @@ function buildNebula(data: AtlasData, look: AtlasLook): NebulaTexture {
 	octx.drawImage(raw, 0, 0);
 	octx.globalAlpha = 1;
 	const texture = { canvas: out, x0, y0, span };
-	perLook.set(look, texture);
+	perKey.set(key, texture);
 	return texture;
 }
+
+/** You draws the newest this many trails. */
+const YOU_TRAILS = 20;
+
+/** Thumbnails show from this zoom in the Picture look. */
+const THUMB_K = 7;
+const THUMB_CACHE = 500;
+const THUMB_PARALLEL = 10;
+const THUMB_FADE_MS = 220;
 
 // ------------------------------------------------------------------ renderer
 
@@ -266,7 +273,7 @@ export class AtlasRenderer {
 	data: AtlasData | null = null;
 	names: Map<number, string> = new Map();
 	grid: SpatialGrid | null = null;
-	look: AtlasLook = 'light';
+	look: AtlasLook = 'picture';
 	reducedMotion = false;
 	compact = false;
 
@@ -287,6 +294,27 @@ export class AtlasRenderer {
 	private bucketStart = new Int32Array(1);
 	private bucketScene = new Int16Array(0);
 	private bucketColor: string[] = [];
+	/** The order buckets are painted in (You puts the rest underneath). */
+	private bucketDraw: number[] = [];
+	/** Each artist's bucket, and each scene's members in paint order, so a
+	 *  picked scene can be painted again at full strength over the dimmed map. */
+	private keyOf = new Int16Array(0);
+	private sceneMembers: Int32Array[] = [];
+	// Picture: each artist's colour group and thumbnail path.
+	private pictures: AtlasPicturesResponse | null = null;
+	private pictureOf = new Uint8Array(0);
+	private artOf: (string | null)[] = [];
+	private thumbs = new Map<number, { img: HTMLImageElement; readyAt: number; failed: boolean }>();
+	private thumbLoads = 0;
+	private thumbFadeUntil = 0;
+	// You: days since each artist's last footprint (Infinity for none), its
+	// plays, its frontier score (0 for none), and the trails as index lists.
+	private you: AtlasYouResponse | null = null;
+	private footAge = new Float32Array(0);
+	private footPlays = new Uint16Array(0);
+	private frontier = new Float32Array(0);
+	private youTrails: { age: number; idx: Int32Array }[] = [];
+	private lookVersion = 0;
 	private glowList = new Int32Array(0);
 	private glowSprites: HTMLCanvasElement[] = [];
 	private glowAlpha = new Float32Array(0);
@@ -408,6 +436,9 @@ export class AtlasRenderer {
 		this.rebuildRadii();
 		this.artistWidth = new Float32Array(data.count).fill(-1);
 		this.sceneBoxes = [];
+		this.thumbs.clear();
+		this.mapPictures();
+		this.mapYou();
 		this.buildBuckets();
 		this.buildLookCaches();
 		this.updateFit();
@@ -441,7 +472,78 @@ export class AtlasRenderer {
 			this.buildBuckets();
 			this.buildLookCaches();
 		}
+		this.labelsStale = true;
 		this.requestDraw();
+	}
+
+	/** Picture's artwork colours (all read so far). */
+	setPictures(pictures: AtlasPicturesResponse | null): void {
+		if (pictures === this.pictures) return;
+		this.pictures = pictures;
+		if (!this.data) return;
+		this.mapPictures();
+		if (this.look === 'picture') {
+			this.buildBuckets();
+			this.buildLookCaches();
+			this.requestDraw();
+		}
+	}
+
+	/** You's footprints, trails and frontier. */
+	setYou(you: AtlasYouResponse | null): void {
+		if (you === this.you) return;
+		this.you = you;
+		if (!this.data) return;
+		this.mapYou();
+		if (this.look === 'you') {
+			this.buildBuckets();
+			this.buildLookCaches();
+			this.requestDraw();
+		}
+	}
+
+	private mapPictures(): void {
+		const data = this.data!;
+		this.pictureOf = new Uint8Array(data.count).fill(PICTURE_UNKNOWN);
+		this.artOf = new Array(data.count).fill(null);
+		const p = this.pictures;
+		if (p) {
+			for (let n = 0; n < p.ids.length; n++) {
+				const i = data.indexById.get(p.ids[n]);
+				if (i === undefined) continue;
+				this.pictureOf[i] = pictureBucket(p.rgb[n]);
+				this.artOf[i] = p.art[n] || null;
+			}
+		}
+		this.lookVersion += 1;
+	}
+
+	private mapYou(): void {
+		const data = this.data!;
+		this.footAge = new Float32Array(data.count).fill(Infinity);
+		this.footPlays = new Uint16Array(data.count);
+		this.frontier = new Float32Array(data.count);
+		this.youTrails = [];
+		const you = this.you;
+		if (you) {
+			const now = Date.now() / 1000;
+			const days = (at: number) => Math.max(0, (now - at) / 86_400);
+			for (const f of you.footprints) {
+				const i = data.indexById.get(f.artist_id);
+				if (i === undefined) continue;
+				this.footAge[i] = days(f.last_at);
+				this.footPlays[i] = Math.min(65_535, f.plays);
+			}
+			for (const f of you.frontier) {
+				const i = data.indexById.get(f.artist_id);
+				if (i !== undefined && this.footAge[i] === Infinity) this.frontier[i] = f.score;
+			}
+			for (const t of you.trails) {
+				const idx = t.artists.map((id) => data.indexById.get(id) ?? -1).filter((i) => i >= 0);
+				if (idx.length > 1) this.youTrails.push({ age: days(t.ended_at), idx: Int32Array.from(idx) });
+			}
+		}
+		this.lookVersion += 1;
 	}
 
 	setReducedMotion(reduce: boolean): void {
@@ -523,33 +625,53 @@ export class AtlasRenderer {
 		this.maxScale = this.fitScale * (this.mini ? 40 : 70);
 	}
 
-	/** Order artists into (scene, light) buckets so one path fills each colour. */
+	/** The paint bucket of an artist in the current look. 0 is uncharted
+	 *  dust in both; Picture: 1 + its colour group; You: 1-3 footprints by
+	 *  age, 4-6 frontier by score, 7 the rest. */
+	private pointKey(i: number): number {
+		const data = this.data!;
+		if (data.scene[i] < 0) return 0;
+		if (this.look === 'picture') return 1 + this.pictureOf[i];
+		if (this.footAge[i] < Infinity) return 1 + footprintStep(this.footAge[i]);
+		if (this.frontier[i] > 0) return 4 + frontierStep(this.frontier[i]);
+		return 7;
+	}
+
+	private bucketColorOf(b: number): string {
+		if (b === 0) return STAGE.uncharted;
+		if (this.look === 'picture') return pictureColor(b - 1);
+		if (b <= 3) return FOOTPRINT_COLORS[b - 1];
+		if (b <= 6) return FRONTIER_COLORS[b - 4];
+		return YOU_REST;
+	}
+
+	/** Order artists into colour buckets so one path fills each colour. */
 	private buildBuckets(): void {
 		const data = this.data!;
-		const sceneCount = data.scenes.length;
-		const keyOf = (i: number) => (data.scene[i] < 0 ? 0 : 1 + data.scene[i] * 4 + data.light[i]);
-		const buckets = 1 + sceneCount * 4;
+		const buckets = this.look === 'picture' ? 1 + PICTURE_BUCKETS : 8;
+		const keyOf = new Int16Array(data.count);
+		for (let i = 0; i < data.count; i++) keyOf[i] = this.pointKey(i);
 		const counts = new Int32Array(buckets + 1);
-		for (let i = 0; i < data.count; i++) counts[keyOf(i) + 1] += 1;
+		for (let i = 0; i < data.count; i++) counts[keyOf[i] + 1] += 1;
 		for (let b = 0; b < buckets; b++) counts[b + 1] += counts[b];
 		const cursor = counts.slice(0, buckets);
 		const order = new Int32Array(data.count);
 		// Within a bucket, small first so big points paint on top.
 		const bySize = Array.from({ length: data.count }, (_, i) => i).sort((a, b) => data.videos[a] - data.videos[b]);
-		for (const i of bySize) order[cursor[keyOf(i)]++] = i;
+		for (const i of bySize) order[cursor[keyOf[i]]++] = i;
 		this.bucketOrder = order;
 		this.bucketStart = counts;
-		this.bucketScene = new Int16Array(buckets);
-		this.bucketColor = new Array(buckets);
-		this.bucketScene[0] = -1;
-		this.bucketColor[0] = pointColor(this.look, null, 0);
-		for (let s = 0; s < sceneCount; s++) {
-			for (let l = 0; l < 4; l++) {
-				const b = 1 + s * 4 + l;
-				this.bucketScene[b] = s;
-				this.bucketColor[b] = pointColor(this.look, data.scenes[s].hue, l as Light);
-			}
-		}
+		this.keyOf = keyOf;
+		this.bucketScene = new Int16Array(buckets).fill(-1);
+		this.bucketColor = Array.from({ length: buckets }, (_, b) => this.bucketColorOf(b));
+		// You: the rest first, then the frontier, then your footprints on top.
+		this.bucketDraw =
+			this.look === 'you' ? [0, 7, 6, 5, 4, 3, 2, 1] : Array.from({ length: buckets }, (_, b) => b);
+		const rank = new Int16Array(buckets);
+		this.bucketDraw.forEach((b, n) => (rank[b] = n));
+		const members: number[][] = data.scenes.map(() => []);
+		for (const i of bySize) if (data.scene[i] >= 0) members[data.scene[i]].push(i);
+		this.sceneMembers = members.map((list) => Int32Array.from(list.sort((a, b) => rank[keyOf[a]] - rank[keyOf[b]])));
 	}
 
 	private buildLookCaches(): void {
@@ -557,27 +679,64 @@ export class AtlasRenderer {
 		const list: number[] = [];
 		const sprites: HTMLCanvasElement[] = [];
 		const alphas: number[] = [];
-		const sparks: number[] = [];
-		for (let i = 0; i < data.count; i++) {
-			const s = data.scene[i];
-			if (s < 0) continue;
-			const light = data.light[i] as Light;
-			const hub = isHub(data.rankInScene[i], data.videos[i]);
-			const strength = glowStrength(this.look, light, hub);
-			if (strength <= 0) continue;
-			const color = glowColor(this.look, data.scenes[s].hue, light);
-			if (!color) continue;
-			list.push(i);
-			sprites.push(glowSprite(color));
-			alphas.push(strength);
+		if (this.look === 'you') {
+			const warm = glowSprite(FOOTPRINT_GLOW);
+			const cool = glowSprite(FRONTIER_GLOW);
+			for (let i = 0; i < data.count; i++) {
+				if (data.scene[i] < 0) continue;
+				const age = this.footAge[i];
+				if (age < Infinity && footprintStep(age) < 2) {
+					list.push(i);
+					sprites.push(warm);
+					const fresh = footprintStep(age) === 0 ? 1 : 0.55;
+					alphas.push(Math.min(0.55, 0.22 + 0.08 * Math.log1p(this.footPlays[i])) * fresh);
+				} else if (this.frontier[i] > 0 && frontierStep(this.frontier[i]) === 0) {
+					list.push(i);
+					sprites.push(cool);
+					alphas.push(0.2);
+				}
+			}
 		}
 		// Draw small glows first so big ones sit on top.
 		const order = list.map((_, k) => k).sort((a, b) => data.videos[list[a]] - data.videos[list[b]]);
 		this.glowList = Int32Array.from(order.map((k) => list[k]));
 		this.glowSprites = order.map((k) => sprites[k]);
 		this.glowAlpha = Float32Array.from(order.map((k) => alphas[k]));
-		this.sparkList = Int32Array.from(sparks);
-		this.nebula = buildNebula(data, this.look);
+		this.sparkList = new Int32Array(0);
+		this.nebula = buildNebula(data, `${this.look}:${this.lookVersion}`, this.stampFor());
+	}
+
+	/** The nebula stamp per artist for the current look. */
+	private stampFor(): (i: number) => Stamp {
+		const data = this.data!;
+		if (this.look === 'picture') {
+			const sprites = new Map<number, HTMLCanvasElement | null>();
+			const spriteOf = (bucket: number) => {
+				if (!sprites.has(bucket)) {
+					const c = pictureNebulaColor(bucket);
+					sprites.set(bucket, c ? stampSprite(c.h, c.s, c.l) : null);
+				}
+				return sprites.get(bucket) ?? null;
+			};
+			return (i) => {
+				const sprite = spriteOf(this.pictureOf[i]);
+				if (!sprite) return null;
+				return { sprite, alpha: 0.03 + Math.log1p(Math.min(data.videos[i], 300)) * 0.007 };
+			};
+		}
+		const rest = stampSprite(222, 10, 50);
+		const warm = stampSprite(38, 70, 58);
+		const cool = stampSprite(186, 60, 50);
+		return (i) => {
+			const v = Math.log1p(Math.min(data.videos[i], 300));
+			const age = this.footAge[i];
+			if (age < Infinity) {
+				const step = footprintStep(age);
+				return { sprite: warm, alpha: [0.09, 0.055, 0.03][step] + Math.log1p(this.footPlays[i]) * 0.01 };
+			}
+			if (this.frontier[i] > 0) return { sprite: cool, alpha: 0.03 + this.frontier[i] * 0.03 };
+			return { sprite: rest, alpha: 0.01 + v * 0.0025 };
+		};
 	}
 
 	// ------------------------------------------------------------- state
@@ -959,6 +1118,7 @@ export class AtlasRenderer {
 			this.stampLabels(now, previous);
 		}
 		if (now < this.labelFadeUntil) animating = true;
+		if (now < this.thumbFadeUntil) animating = true;
 		this.draw(now);
 		this.dirty = false;
 		if (moved && this.onCamera) this.onCamera(this.camera);
@@ -1134,7 +1294,7 @@ export class AtlasRenderer {
 		if (neb) {
 			const zoomFade = clamp(1.12 - Math.log2(Math.max(1, k)) * 0.13, 0.42, 1);
 			ctx.globalCompositeOperation = 'lighter';
-			ctx.globalAlpha = (this.look === 'place' ? 0.55 : 0.4) * zoomFade * reveal;
+			ctx.globalAlpha = (this.look === 'picture' ? 0.5 : 0.6) * zoomFade * reveal;
 			ctx.imageSmoothingEnabled = true;
 			ctx.imageSmoothingQuality = 'high';
 			const x = (neb.x0 - cam.cx) * scale + halfW;
@@ -1144,6 +1304,7 @@ export class AtlasRenderer {
 			ctx.globalCompositeOperation = 'source-over';
 		}
 
+		if (this.look === 'you') this.drawYouTrails(k, reveal);
 		this.drawTrail();
 		this.drawRoute(true);
 
@@ -1173,35 +1334,55 @@ export class AtlasRenderer {
 		ctx.globalAlpha = 1;
 		ctx.globalCompositeOperation = 'source-over';
 
-		// Cores, one path per bucket.
-		const buckets = this.bucketColor.length;
-		for (let b = 0; b < buckets; b++) {
+		// Cores, one path per bucket, in the look's paint order. A picked
+		// scene (or a route) dims the rest; the picked scene is then painted
+		// again at full strength over it.
+		const dimAll = this.routeIdx !== null || focus >= 0 ? dimOthers : 1;
+		const addPoint = (i: number) => {
+			const wx = data.x[i];
+			const wy = data.y[i];
+			if (wx < minX || wx > maxX || wy < minY || wy > maxY) return;
+			const r = this.baseR[i] * growth;
+			const sx = (wx - cam.cx) * scale + halfW;
+			const sy = (wy - cam.cy) * scale + halfH;
+			if (r < 1.15) {
+				ctx.rect(sx - r, sy - r, r * 2, r * 2);
+			} else {
+				ctx.moveTo(sx + r, sy);
+				ctx.arc(sx, sy, r, 0, TAU);
+			}
+		};
+		for (const b of this.bucketDraw) {
 			const start = this.bucketStart[b];
 			const end = this.bucketStart[b + 1];
 			if (start === end) continue;
-			const s = this.bucketScene[b];
-			const dim = (focus >= 0 && s !== focus) || this.routeIdx ? dimOthers : 1;
-			ctx.globalAlpha = dim * reveal;
+			ctx.globalAlpha = dimAll * reveal;
 			ctx.fillStyle = this.bucketColor[b];
 			ctx.beginPath();
-			for (let n = start; n < end; n++) {
-				const i = this.bucketOrder[n];
-				const wx = data.x[i];
-				const wy = data.y[i];
-				if (wx < minX || wx > maxX || wy < minY || wy > maxY) continue;
-				const r = this.baseR[i] * growth;
-				const sx = (wx - cam.cx) * scale + halfW;
-				const sy = (wy - cam.cy) * scale + halfH;
-				if (r < 1.15) {
-					ctx.rect(sx - r, sy - r, r * 2, r * 2);
-				} else {
-					ctx.moveTo(sx + r, sy);
-					ctx.arc(sx, sy, r, 0, TAU);
-				}
-			}
+			for (let n = start; n < end; n++) addPoint(this.bucketOrder[n]);
 			ctx.fill();
 		}
+		if (focus >= 0 && !this.routeIdx && this.sceneMembers[focus]) {
+			const members = this.sceneMembers[focus];
+			ctx.globalAlpha = reveal;
+			let current = -1;
+			for (let n = 0; n < members.length; n++) {
+				const i = members[n];
+				const b = this.keyOf[i];
+				if (b !== current) {
+					if (current >= 0) ctx.fill();
+					current = b;
+					ctx.fillStyle = this.bucketColor[b];
+					ctx.beginPath();
+				}
+				addPoint(i);
+			}
+			if (current >= 0) ctx.fill();
+		}
 		ctx.globalAlpha = 1;
+
+		if (this.look === 'picture' && !this.mini && k >= THUMB_K) this.drawThumbs(now, growth, minX, minY, maxX, maxY, dimAll);
+		if (this.look === 'you') this.drawFrontierRings(growth, minX, minY, maxX, maxY, dimAll * reveal);
 
 		// Diffraction spikes on the brightest lit stars.
 		if (this.sparkList.length && !this.compact) {
@@ -1347,6 +1528,150 @@ export class AtlasRenderer {
 			ctx.restore();
 			angle += w / radius;
 		}
+	}
+
+	/** You: what you watched in a row, as faint warm arcs between the
+	 *  artists (flight paths, so a session that crosses the map reads as
+	 *  journeys rather than a web), the newest 20, fading over weeks. */
+	private drawYouTrails(k: number, reveal: number): void {
+		if (this.youTrails.length === 0) return;
+		const ctx = this.ctx;
+		ctx.save();
+		ctx.lineCap = 'round';
+		ctx.lineJoin = 'round';
+		ctx.lineWidth = this.mini ? 0.9 : k > 3 ? 1.4 : 1;
+		const from = Math.max(0, this.youTrails.length - YOU_TRAILS);
+		for (let t = from; t < this.youTrails.length; t++) {
+			const trail = this.youTrails[t];
+			const alpha = trailAlpha(trail.age) * reveal;
+			if (alpha < 0.03) continue;
+			ctx.strokeStyle = `hsla(38, 80%, 76%, ${alpha.toFixed(3)})`;
+			ctx.beginPath();
+			// screenOf answers in a shared point: copy it out.
+			const start = this.screenOf(trail.idx[0]);
+			let px = start.x;
+			let py = start.y;
+			ctx.moveTo(px, py);
+			for (let n = 1; n < trail.idx.length; n++) {
+				const p = this.screenOf(trail.idx[n]);
+				// Bend each leg to its left by a sixth of its length.
+				const mx = (px + p.x) / 2 - (p.y - py) / 6;
+				const my = (py + p.y) / 2 + (p.x - px) / 6;
+				ctx.quadraticCurveTo(mx, my, p.x, p.y);
+				px = p.x;
+				py = p.y;
+			}
+			ctx.stroke();
+		}
+		ctx.restore();
+	}
+
+	/** You: a thin cool ring around the strongest frontier artists. */
+	private drawFrontierRings(growth: number, minX: number, minY: number, maxX: number, maxY: number, alpha: number): void {
+		const data = this.data!;
+		const ctx = this.ctx;
+		const cam = this.camera;
+		const halfW = this.viewport.width / 2;
+		const halfH = this.viewport.height / 2;
+		ctx.save();
+		ctx.strokeStyle = FRONTIER_COLORS[0];
+		ctx.lineWidth = 1;
+		ctx.globalAlpha = 0.55 * alpha;
+		ctx.beginPath();
+		for (let i = 0; i < data.count; i++) {
+			if (this.frontier[i] <= 0 || frontierStep(this.frontier[i]) !== 0) continue;
+			const wx = data.x[i];
+			const wy = data.y[i];
+			if (wx < minX || wx > maxX || wy < minY || wy > maxY) continue;
+			const r = this.baseR[i] * growth + 2.5;
+			const sx = (wx - cam.cx) * cam.scale + halfW;
+			const sy = (wy - cam.cy) * cam.scale + halfH;
+			ctx.moveTo(sx + r, sy);
+			ctx.arc(sx, sy, r, 0, TAU);
+		}
+		ctx.stroke();
+		ctx.restore();
+	}
+
+	/** Picture, zoomed right in: the dots become the artists' own
+	 *  thumbnails, loaded as they come into view (never while the camera
+	 *  moves) and faded in, ringed in their colour. */
+	private drawThumbs(now: number, growth: number, minX: number, minY: number, maxX: number, maxY: number, dim: number): void {
+		const data = this.data!;
+		const grid = this.grid;
+		if (!grid) return;
+		const ctx = this.ctx;
+		const cam = this.camera;
+		const halfW = this.viewport.width / 2;
+		const halfH = this.viewport.height / 2;
+		const visible: number[] = [];
+		grid.forEachIn(minX, minY, maxX, maxY, (i) => {
+			if (data.scene[i] >= 0 && this.artOf[i]) visible.push(i);
+		});
+		// The biggest artists first; at most what reads on screen.
+		visible.sort((a, b) => data.videos[b] - data.videos[a]);
+		if (visible.length > 160) visible.length = 160;
+		for (const i of visible) {
+			let entry = this.thumbs.get(i);
+			if (!entry) {
+				if (this.inMotion || this.thumbLoads >= THUMB_PARALLEL) continue;
+				entry = this.loadThumb(i) ?? undefined;
+				if (!entry) continue;
+			} else {
+				// Most recently used last, so eviction drops the stale ones.
+				this.thumbs.delete(i);
+				this.thumbs.set(i, entry);
+			}
+			if (entry.failed || entry.readyAt === 0) continue;
+			const r = this.baseR[i] * growth;
+			const R = clamp(r * 2.2, 10, 30);
+			const sx = (data.x[i] - cam.cx) * cam.scale + halfW;
+			const sy = (data.y[i] - cam.cy) * cam.scale + halfH;
+			const fade = this.reducedMotion ? 1 : clamp((now - entry.readyAt) / THUMB_FADE_MS, 0, 1);
+			const focusDim = this.selectedScene >= 0 && data.scene[i] !== this.selectedScene ? dim : 1;
+			ctx.save();
+			ctx.globalAlpha = fade * focusDim;
+			ctx.beginPath();
+			ctx.arc(sx, sy, R, 0, TAU);
+			ctx.clip();
+			ctx.drawImage(entry.img, sx - R, sy - R, R * 2, R * 2);
+			ctx.restore();
+			ctx.globalAlpha = fade * focusDim;
+			ctx.strokeStyle = pictureColor(this.pictureOf[i], 0.95);
+			ctx.lineWidth = 1.5;
+			ctx.beginPath();
+			ctx.arc(sx, sy, R, 0, TAU);
+			ctx.stroke();
+		}
+		ctx.globalAlpha = 1;
+	}
+
+	private loadThumb(i: number): { img: HTMLImageElement; readyAt: number; failed: boolean } | null {
+		const art = this.artOf[i];
+		const url = art ? upscaleTidalArtwork(`https://resources.tidal.com/images/${art}/640x640.jpg`, 160) : null;
+		if (!url) return null;
+		const img = new Image();
+		img.decoding = 'async';
+		const entry = { img, readyAt: 0, failed: false };
+		this.thumbLoads += 1;
+		img.onload = () => {
+			this.thumbLoads -= 1;
+			if (this.destroyed) return;
+			entry.readyAt = performance.now();
+			this.thumbFadeUntil = entry.readyAt + THUMB_FADE_MS;
+			this.requestDraw();
+		};
+		img.onerror = () => {
+			this.thumbLoads -= 1;
+			entry.failed = true;
+		};
+		img.src = url;
+		this.thumbs.set(i, entry);
+		while (this.thumbs.size > THUMB_CACHE) {
+			const oldest = this.thumbs.keys().next().value as number;
+			this.thumbs.delete(oldest);
+		}
+		return entry;
 	}
 
 	private drawTrail(): void {

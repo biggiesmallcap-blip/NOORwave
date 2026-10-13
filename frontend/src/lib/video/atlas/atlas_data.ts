@@ -3,9 +3,10 @@
 // but renders the last copy at once so switching tabs never blanks the map.
 
 import { api } from '$lib/api/client';
-import { createPersistedStore, oneOf } from '$lib/stores/persisted';
+import { createPersistedStore } from '$lib/stores/persisted';
+import type { AtlasPicturesResponse, AtlasYouResponse } from '$lib/api/video_explore_types';
 import { decodeAtlas, decodeNames, type AtlasData } from './decode';
-import type { AtlasLook } from './style';
+import { parseLook, type AtlasLook } from './style';
 
 export interface LoadedAtlas {
 	data: AtlasData;
@@ -55,6 +56,39 @@ export function rememberName(id: number, name: string): void {
 	cached?.names.set(id, name);
 }
 
-export const atlasLook = createPersistedStore<AtlasLook>('videos.atlas.look', 'light', {
-	parse: oneOf(['light', 'place'] as const),
+export const atlasLook = createPersistedStore<AtlasLook>('videos.atlas.look', 'picture', {
+	parse: (raw) => parseLook(raw),
 });
+
+// The two looks' own data, shared by the page and the mini map. Picture
+// fills in while the background read of the artwork goes on, You changes
+// with every watch: both are asked again after a minute.
+const LOOK_DATA_TTL_MS = 60_000;
+
+function lookLoader<T>(fetch: () => Promise<T>) {
+	let value: T | null = null;
+	let at = 0;
+	let inflight: Promise<T | null> | null = null;
+	return {
+		cached: (): T | null => value,
+		load(fresh = false): Promise<T | null> {
+			if (!fresh && value && Date.now() - at < LOOK_DATA_TTL_MS) return Promise.resolve(value);
+			if (inflight) return inflight;
+			inflight = fetch()
+				.then((result) => {
+					value = result;
+					at = Date.now();
+					return result;
+				})
+				// A server without these endpoints yet: the look draws without them.
+				.catch(() => value)
+				.finally(() => {
+					inflight = null;
+				});
+			return inflight;
+		},
+	};
+}
+
+export const atlasPictures = lookLoader<AtlasPicturesResponse>(() => api.getVideoAtlasPictures());
+export const atlasYou = lookLoader<AtlasYouResponse>(() => api.getVideoAtlasYou());

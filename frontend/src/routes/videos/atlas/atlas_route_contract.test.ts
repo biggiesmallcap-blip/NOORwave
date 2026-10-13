@@ -11,7 +11,7 @@ const atlasDir = '../../../lib/video/atlas/';
 const view = read(`${atlasDir}AtlasView.svelte`);
 const sceneCard = read(`${atlasDir}AtlasSceneCard.svelte`);
 const artistCard = read(`${atlasDir}AtlasArtistCard.svelte`);
-const routeCard = read(`${atlasDir}AtlasRouteCard.svelte`);
+const journeyCard = read(`${atlasDir}AtlasJourneyCard.svelte`);
 const miniMap = read(`${atlasDir}AtlasMiniMap.svelte`);
 const renderer = read(`${atlasDir}renderer.ts`);
 const data = read(`${atlasDir}atlas_data.ts`);
@@ -46,12 +46,12 @@ describe('atlas route contract', () => {
 		expect(view).toContain('api.getVideoAtlasArtist(id)');
 		expect(view).toContain('if (seq === artistSeq) artistCard = result;');
 		expect(view).toContain('api.probeVideoAtlasArtist(id)');
-		expect(view).toContain('api.getVideoAtlasRoute(data.ids[routeFrom], data.ids[routeTo])');
-		expect(view).toContain('if (seq !== routeSeq) return;');
+		expect(view).toContain('await api.getVideoAtlasJourney({');
+		expect(view).toContain('if (seq !== journeySeq) return;');
 	});
 
-	test('keyboard: arrows pan, +/- zoom, F fits, R routes, Esc closes', () => {
-		for (const key of ["case 'ArrowLeft':", "case 'ArrowUp':", "case '+':", "case '-':", "case 'f':", "case 'r':", "case 'Escape':"]) {
+	test('keyboard: arrows pan, +/- zoom, F fits, J opens Journeys, Esc closes', () => {
+		for (const key of ["case 'ArrowLeft':", "case 'ArrowUp':", "case '+':", "case '-':", "case 'f':", "case 'j':", "case 'Escape':"]) {
 			expect(view).toContain(key);
 		}
 		expect(view).toContain("window.addEventListener('keydown', onKeydown, { capture: true });");
@@ -68,7 +68,7 @@ describe('atlas route contract', () => {
 	});
 
 	test('every artist and video reference carries the shared context menu', () => {
-		for (const source of [sceneCard, artistCard, routeCard]) {
+		for (const source of [sceneCard, artistCard, journeyCard]) {
 			expect(source).toContain('buildArtistMenu({ tidal_id:');
 			expect(source).toContain('buildVideoMenu(video)');
 		}
@@ -77,16 +77,19 @@ describe('atlas route contract', () => {
 	});
 
 	test('artwork goes through the TIDAL-aware image with fallbacks', () => {
-		for (const source of [sceneCard, artistCard, routeCard]) {
+		for (const source of [sceneCard, artistCard, journeyCard]) {
 			expect(source).toContain('<ArtworkImage src={video.artwork_url} size={320}');
 			expect(source).not.toContain('<img');
 		}
 	});
 
-	test('route plays its stops in order; probes report honestly', () => {
-		expect(routeCard).toContain('routeQueue(route.stops)');
-		expect(routeCard).toContain('Play route');
-		expect(routeCard).toContain('No path within six hops');
+	test('a journey plays its stops in order and the map follows it; probes report honestly', () => {
+		expect(journeyCard).toContain('journeyQueue(journey.stops)');
+		expect(journeyCard).toContain('Play journey');
+		expect(journeyCard).toContain('Somewhere new');
+		expect(journeyCard).toContain('Collab chain');
+		expect(view).toContain('if (session.sourceLabel !== journeyPlaying.label) {');
+		expect(view).toContain('renderer?.flyToArtist(index, compact ? 6 : 7, ox, oy);');
 		expect(artistCard).toContain('Send a probe');
 		expect(view).toContain('probeMessage(name, result.queued, result.reason)');
 	});
@@ -97,6 +100,14 @@ describe('atlas route contract', () => {
 		expect(renderer).toContain('if (this.mini || this.reducedMotion || this.pulseTimer || this.destroyed) return;');
 	});
 
+	test('the looks load their own data, Picture and You', () => {
+		expect(data).toContain('api.getVideoAtlasPictures()');
+		expect(data).toContain('api.getVideoAtlasYou()');
+		expect(view).toContain('renderer?.setPictures(next);');
+		expect(view).toContain('renderer?.setYou(next);');
+		expect(renderer).toContain("if (this.look === 'picture' && !this.mini && k >= THUMB_K)");
+	});
+
 	test('the mini map deep-links into the Atlas with its trail', () => {
 		expect(miniMap).toContain('atlasUrl({ artist: artistId, trail:');
 		expect(miniMap).toContain("new AtlasRenderer(canvasEl, { mini: true })");
@@ -104,7 +115,7 @@ describe('atlas route contract', () => {
 	});
 
 	test('runes only', () => {
-		for (const source of [page, view, sceneCard, artistCard, routeCard, miniMap]) {
+		for (const source of [page, view, sceneCard, artistCard, journeyCard, miniMap]) {
 			expect(source).not.toContain('$:');
 			expect(source).not.toContain('export let ');
 		}

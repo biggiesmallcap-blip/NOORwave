@@ -1,10 +1,10 @@
 import { describe, expect, test, vi } from 'vitest';
-import type { AtlasRouteStop, ExploreVideo } from '$lib/api/video_explore_types';
+import type { AtlasJourneyStop, ExploreVideo } from '$lib/api/video_explore_types';
 
 vi.mock('$lib/stores/video_session', () => ({ playVideo: vi.fn().mockResolvedValue(true), videoSession: { subscribe: () => () => {} } }));
 vi.mock('$lib/stores/toast', () => ({ showToast: vi.fn() }));
 
-const { formatRuntime, playAtlasQueue, probeMessage, routeLabel, routeQueue } = await import('./play');
+const { formatRuntime, journeyLabel, journeyQueue, playAtlasQueue, probeMessage } = await import('./play');
 const { playVideo } = await import('$lib/stores/video_session');
 
 const video = (id: number): ExploreVideo => ({
@@ -20,14 +20,14 @@ const video = (id: number): ExploreVideo => ({
 	type: 'video',
 });
 
-const stop = (artist_id: number, name: string, v: ExploreVideo | null): AtlasRouteStop => ({ artist_id, name, via: null, video: v });
+const stop = (artist_id: number, name: string, v: ExploreVideo | null): AtlasJourneyStop => ({ artist_id, name, light: 1, why: '', video: v });
 
 describe('atlas playback helpers', () => {
-	test('a route plays one video per stop, in order, skipping gaps and repeats', () => {
+	test('a journey plays one video per stop, in order, skipping gaps and repeats', () => {
 		const stops = [stop(1, 'Future', video(10)), stop(2, 'Gap', null), stop(3, 'Steps', video(30)), stop(4, 'Again', video(10)), stop(5, 'Shakira', video(50))];
-		expect(routeQueue(stops).map((v) => v.tidal_id)).toEqual([10, 30, 50]);
-		expect(routeLabel(stops)).toBe('Route: Future to Shakira');
-		expect(routeLabel([])).toBe('Atlas route');
+		expect(journeyQueue(stops).map((v) => v.tidal_id)).toEqual([10, 30, 50]);
+		expect(journeyLabel({ title: 'Future to Shakira' })).toBe('Journey: Future to Shakira');
+		expect(journeyLabel({ title: '' })).toBe('Journey: across the map');
 	});
 
 	test('a queue plays through with autoplay', async () => {

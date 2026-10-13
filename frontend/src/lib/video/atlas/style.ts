@@ -1,17 +1,27 @@
-// The Atlas's visual language in one place: the two looks, point colours per
-// scene hue and light, point sizes, and the stage palette. The stage is a
-// night sky in every app theme (like a video stage), so these colours are not
-// theme tokens; the chrome around the stage still follows the theme.
+// The Atlas's visual language in one place: the two looks, their point
+// colours, point sizes, and the stage palette. The stage is a night sky in
+// every app theme (like a video stage), so these colours are not theme
+// tokens; the chrome around the stage still follows the theme.
+//
+// Each look encodes something position does not:
+// - Picture: every artist in the dominant colour of its own video artwork.
+// - You: your watching as footprints that fade with time, and the frontier
+//   (unwatched artists right next to the ones you watch).
 
 import type { Light } from '$lib/api/video_explore_types';
 
-/** "Light is knowledge" or "Color is place". */
-export type AtlasLook = 'light' | 'place';
+export type AtlasLook = 'picture' | 'you';
 
-export const ATLAS_LOOKS: readonly { value: AtlasLook; label: string }[] = [
-	{ value: 'light', label: 'Light is knowledge' },
-	{ value: 'place', label: 'Color is place' },
+export const ATLAS_LOOKS: readonly { value: AtlasLook; label: string; help: string }[] = [
+	{ value: 'picture', label: 'Picture', help: 'Every artist in the colour of its own videos' },
+	{ value: 'you', label: 'You', help: 'Where you have been, and the frontier next to it' },
 ];
+
+/** A stored look, including the retired ones ('light' was about you,
+ *  'place' about colour). */
+export function parseLook(raw: unknown): AtlasLook {
+	return raw === 'you' || raw === 'light' ? 'you' : 'picture';
+}
 
 export const LIGHT_NAMES: Record<Light, string> = {
 	0: 'Uncharted',
@@ -53,39 +63,108 @@ function hsla(h: number, s: number, l: number, a = 1): string {
 /** The warm white every lit artist shares: "known" reads the same in every scene. */
 export const LIT_COLOR = 'hsla(40, 62%, 90%, 1)';
 
-/**
- * Core colour for a point of `light` in a scene of `hue` (null = uncharted).
- * Restrained on purpose: hue says where, saturation stays low enough that no
- * scene shouts, and light (in the knowledge look) is the one bright accent.
- */
-export function pointColor(look: AtlasLook, hue: number | null, light: Light): string {
-	if (hue === null || light === 0) return STAGE.uncharted;
-	if (look === 'place') {
-		if (light === 3) return hsla(hue, 46, 80, 1);
-		if (light === 2) return hsla(hue, 42, 68, 0.95);
-		return hsla(hue, 34, 60, 0.78);
+/** Scene name colour on the map: near white. (A scene's hue is its
+ *  identity colour elsewhere, on its channel and Archive chip; on the map
+ *  it would only repeat where the scene is.) */
+export function sceneLabelColor(_hue: number, alpha = 1): string {
+	return hsla(222, 14, 88, alpha);
+}
+
+// ------------------------------------------------------------- Picture
+
+/** RGB (0xRRGGBB) to HSL with h in degrees, s and l in 0..1. */
+export function rgbToHsl(rgb: number): { h: number; s: number; l: number } {
+	const r = ((rgb >> 16) & 255) / 255;
+	const g = ((rgb >> 8) & 255) / 255;
+	const b = (rgb & 255) / 255;
+	const max = Math.max(r, g, b);
+	const min = Math.min(r, g, b);
+	const l = (max + min) / 2;
+	const d = max - min;
+	if (d < 1e-6) return { h: 0, s: 0, l };
+	const s = d / (1 - Math.abs(2 * l - 1));
+	let h: number;
+	if (max === r) h = ((g - b) / d) % 6;
+	else if (max === g) h = (b - r) / d + 2;
+	else h = (r - g) / d + 4;
+	return { h: (h * 60 + 360) % 360, s: Math.min(1, s), l };
+}
+
+const PICTURE_HUES = 24;
+const PICTURE_GREYS = 3;
+/** Colour groups points are drawn in: 24 hues x 2 saturations x 2
+ *  lightnesses, 3 greys, and one for "not read yet". */
+export const PICTURE_BUCKETS = PICTURE_HUES * 4 + PICTURE_GREYS + 1;
+export const PICTURE_UNKNOWN = PICTURE_BUCKETS - 1;
+
+/** The colour group of an artwork colour. Near-greys (black-and-white
+ *  videos) keep their grey; colours keep their hue to 15 degrees and a
+ *  muted or vivid, deep or light step. */
+export function pictureBucket(rgb: number): number {
+	const { h, s, l } = rgbToHsl(rgb);
+	if (s < 0.14 || l < 0.06 || l > 0.97) {
+		return PICTURE_HUES * 4 + (l < 0.38 ? 0 : l < 0.66 ? 1 : 2);
 	}
-	if (light === 3) return LIT_COLOR;
-	if (light === 2) return hsla(hue, 40, 66, 0.88);
-	return hsla(hue, 12, 60, 0.3);
+	const hue = Math.floor(((h + 7.5) % 360) / (360 / PICTURE_HUES));
+	const vivid = s >= 0.45 ? 1 : 0;
+	const light = l >= 0.5 ? 1 : 0;
+	return hue * 4 + vivid * 2 + light;
 }
 
-/** Glow colour (the centre stop of a glow sprite); null = no glow. Only lit
- *  artists glow, and only in the knowledge look. */
-export function glowColor(look: AtlasLook, hue: number | null, light: Light): string | null {
-	if (hue === null || light !== 3 || look !== 'light') return null;
-	return 'hsla(40, 70%, 78%, 1)';
+/**
+ * A colour group as it is drawn on the night stage: the hue kept, the
+ * saturation tamed and the lightness lifted into a band where every artist
+ * reads, so a dark, moody video is still a visible point, just a deeper one.
+ */
+export function pictureColor(bucket: number, alpha = 0.92): string {
+	if (bucket === PICTURE_UNKNOWN) return 'hsla(222, 10%, 60%, 0.26)';
+	if (bucket >= PICTURE_HUES * 4) {
+		const step = bucket - PICTURE_HUES * 4;
+		return hsla(220, 6, [52, 66, 82][step], alpha * 0.85);
+	}
+	const hue = Math.floor(bucket / 4) * (360 / PICTURE_HUES);
+	const vivid = (bucket >> 1) & 1;
+	const light = bucket & 1;
+	return hsla(hue, vivid ? 64 : 34, light ? 74 : 60, alpha);
 }
 
-/** How strongly a point's glow shows, 0..1: a soft halo on lit hubs only. */
-export function glowStrength(look: AtlasLook, light: Light, hub: boolean): number {
-	if (look !== 'light' || light !== 3) return 0;
-	return hub ? 0.32 : 0;
+/** The nebula's stamp colour for a group: the same hue, softer. */
+export function pictureNebulaColor(bucket: number): { h: number; s: number; l: number } | null {
+	if (bucket === PICTURE_UNKNOWN) return null;
+	if (bucket >= PICTURE_HUES * 4) return { h: 220, s: 6, l: 50 };
+	const vivid = (bucket >> 1) & 1;
+	return { h: Math.floor(bucket / 4) * (360 / PICTURE_HUES), s: vivid ? 46 : 24, l: 52 };
 }
 
-/** Scene name colour: near white with a breath of the scene's hue. */
-export function sceneLabelColor(hue: number, alpha = 1): string {
-	return hsla(hue, 22, 84, alpha);
+// ----------------------------------------------------------------- You
+
+/** Footprint steps by how long ago: this week, this month, earlier. */
+export const FOOTPRINT_WEEK = 7;
+export const FOOTPRINT_MONTH = 30;
+
+export function footprintStep(ageDays: number): 0 | 1 | 2 {
+	return ageDays <= FOOTPRINT_WEEK ? 0 : ageDays <= FOOTPRINT_MONTH ? 1 : 2;
+}
+
+/** Warm, brightest where you were this week, fading with time. */
+export const FOOTPRINT_COLORS = ['hsla(38, 92%, 82%, 1)', 'hsla(36, 70%, 72%, 0.88)', 'hsla(32, 42%, 64%, 0.62)'] as const;
+export const FOOTPRINT_GLOW = 'hsla(38, 90%, 70%, 1)';
+
+/** Frontier steps by score (edge strength times how fresh the footprint is). */
+export function frontierStep(score: number): 0 | 1 | 2 {
+	return score >= 0.45 ? 0 : score >= 0.2 ? 1 : 2;
+}
+
+/** Cool, so the edge of your world reads apart from where you have been. */
+export const FRONTIER_COLORS = ['hsla(186, 78%, 72%, 0.98)', 'hsla(186, 58%, 66%, 0.78)', 'hsla(188, 40%, 60%, 0.56)'] as const;
+export const FRONTIER_GLOW = 'hsla(186, 80%, 62%, 1)';
+
+/** Everything else in You: present, but stepping back. */
+export const YOU_REST = 'hsla(222, 10%, 62%, 0.2)';
+
+/** A trail's opacity: half every two weeks. */
+export function trailAlpha(ageDays: number): number {
+	return 0.62 * Math.pow(0.5, Math.max(0, ageDays) / 14);
 }
 
 /** Point radius in CSS px at fit zoom: area grows with videos. */

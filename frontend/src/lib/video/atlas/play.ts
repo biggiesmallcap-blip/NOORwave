@@ -1,9 +1,9 @@
-// Playing from the Atlas: a sample, an artist's best cuts or a route play as
+// Playing from the Atlas: a sample, an artist's best cuts or a journey play as
 // a queue in order; radio seeds from one video. Picking a video opens the
 // watch page (the section layout follows the stage reveal).
 
 import { get } from 'svelte/store';
-import type { AtlasRouteStop, ExploreVideo } from '$lib/api/video_explore_types';
+import type { ExploreVideo } from '$lib/api/video_explore_types';
 import { playVideo, videoSession } from '$lib/stores/video_session';
 import { showToast } from '$lib/stores/toast';
 
@@ -36,8 +36,8 @@ export async function playAtlasRadio(video: ExploreVideo, artistName: string): P
 	reportFailure(ok);
 }
 
-/** The playable videos of a route, one per stop, in order. */
-export function routeQueue(stops: readonly AtlasRouteStop[]): ExploreVideo[] {
+/** The playable videos of a journey, one per stop, in order, never twice. */
+export function journeyQueue(stops: readonly { video: ExploreVideo | null }[]): ExploreVideo[] {
 	const seen = new Set<number>();
 	const out: ExploreVideo[] = [];
 	for (const stop of stops) {
@@ -49,10 +49,10 @@ export function routeQueue(stops: readonly AtlasRouteStop[]): ExploreVideo[] {
 	return out;
 }
 
-/** "Future to Shakira" for the queue label. */
-export function routeLabel(stops: readonly AtlasRouteStop[]): string {
-	if (stops.length === 0) return 'Atlas route';
-	return `Route: ${stops[0].name} to ${stops[stops.length - 1].name}`;
+/** "Journey: Drake to Calvin Harris" for the queue label; the map follows
+ *  a journey while this is what is playing. */
+export function journeyLabel(journey: { title: string }): string {
+	return `Journey: ${journey.title || 'across the map'}`;
 }
 
 export function formatRuntime(ms: number | null | undefined): string {

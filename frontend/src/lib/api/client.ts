@@ -3,7 +3,11 @@ import type {
 	AtlasNamesResponse,
 	AtlasProbeResponse,
 	AtlasResponse,
+	AtlasJourneyResponse,
+	AtlasPicturesResponse,
 	AtlasRouteResponse,
+	AtlasYouResponse,
+	JourneyKind,
 	AtlasSceneCard,
 	ArchiveQuery,
 	ArchiveResponse,
@@ -2504,6 +2508,22 @@ export const api = {
 
 	getVideoAtlasRoute(from: number, to: number): Promise<AtlasRouteResponse> {
 		return fetchApi<AtlasRouteResponse>('/api/videos/atlas/route', { from: String(from), to: String(to) });
+	},
+
+	getVideoAtlasPictures(): Promise<AtlasPicturesResponse> {
+		return fetchApi<AtlasPicturesResponse>('/api/videos/atlas/pictures');
+	},
+
+	getVideoAtlasYou(): Promise<AtlasYouResponse> {
+		return fetchApi<AtlasYouResponse>('/api/videos/atlas/you');
+	},
+
+	/** kind 'collab' needs `to`; kind 'new' may name a destination `scene`. */
+	getVideoAtlasJourney(params: { kind: JourneyKind; from: number; to?: number; scene?: number }): Promise<AtlasJourneyResponse> {
+		const query: Record<string, string> = { kind: params.kind, from: String(params.from) };
+		if (params.to != null) query.to = String(params.to);
+		if (params.scene != null) query.scene = String(params.scene);
+		return fetchApi<AtlasJourneyResponse>('/api/videos/atlas/journey', query);
 	},
 
 	getVideoChannels(): Promise<VideoChannelsResponse> {
