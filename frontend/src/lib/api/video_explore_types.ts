@@ -6,8 +6,14 @@
 import type { TidalSearchVideo } from './types';
 
 /** A catalog video as every new endpoint sends it (VideoSetItem on the
- *  server). `why` is a short reason chip, empty when nothing fired. */
-export type ExploreVideo = TidalSearchVideo & { why?: string };
+ *  server). `why` is a short reason chip, empty when nothing fired. `cut`
+ *  and `song_year` ride along when the catalog intelligence knows them
+ *  (`song_year` only when its era is confident). */
+export type ExploreVideo = TidalSearchVideo & {
+	why?: string;
+	cut?: VideoCut;
+	song_year?: number | null;
+};
 
 /** The kind of a video, from multilingual title markers, TIDAL type and
  *  duration. `clip` is anything under 90 s; `longform` is 30 min and up. */
@@ -269,7 +275,9 @@ export interface VideoChannel {
 	/** your | wild | premieres | live | sessions | concerts | rewind |
 	 *  spotlight | scene:{id} */
 	id: string;
-	/** Stable: fixed channels 1-8, scene channels keep theirs forever. */
+	/** Stable: fixed channels 1-8, scene channels keep theirs forever.
+	 *  0 = not numbered yet: a locked "coming up" scene listed after the
+	 *  numbered channels. */
 	no: number;
 	title: string;
 	subtitle: string;
@@ -281,6 +289,9 @@ export interface VideoChannel {
 	unlock: { hours: number; need_hours: number } | null;
 	now: (ChannelProgram & { offset_s: number }) | null;
 	next: ChannelProgram | null;
+	/** Scene appetite (about 0.05-1.1) for ordering a "for you" strip; null
+	 *  on the fixed channels. Never changes the numbers. */
+	appetite?: number | null;
 }
 
 export interface VideoChannelsResponse {

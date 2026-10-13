@@ -84,9 +84,11 @@ export async function loadExploreMode(): Promise<void> {
 	}
 }
 
-/** Every channel in dial order. */
+/** Every channel in dial order. Unnumbered "coming up" scenes (no 0) go
+ *  last, in the order the server ranked them. */
 export function byNumber<T extends Pick<VideoChannel, 'no'>>(channels: readonly T[]): T[] {
-	return [...channels].sort((a, b) => a.no - b.no);
+	const key = (no: number) => (no > 0 ? no : Number.MAX_SAFE_INTEGER);
+	return [...channels].sort((a, b) => key(a.no) - key(b.no));
 }
 
 /** "For you tonight": Your Channel, then the scene channels you have the

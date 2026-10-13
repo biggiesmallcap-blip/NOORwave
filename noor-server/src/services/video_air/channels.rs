@@ -20,6 +20,8 @@ pub const FIXED_NEED_HOURS: f64 = 20.0;
 /// Scene channels: 30 programmable hours and 40 artists.
 pub const SCENE_NEED_HOURS: f64 = 30.0;
 pub const SCENE_NEED_ARTISTS: usize = 40;
+/// Unnumbered scenes listed as "coming up" after the scene channels.
+const COMING_UP: usize = 3;
 /// Rewind waits until half the programmable songs know their year.
 pub const ERA_NEED_COVERAGE: f64 = 0.5;
 const UNITLESS_WEIGHT: f64 = 1e-6;
@@ -829,11 +831,65 @@ pub fn plan(universe: &Universe, taste: &Taste, ctx: &DayContext) -> Vec<Planned
         .filter_map(|scene| scene.channel_no.map(|no| (no, scene.id)))
         .collect();
     scenes.sort();
-    ChannelId::FIXED
+    let mut planned: Vec<Planned> = ChannelId::FIXED
         .iter()
         .cloned()
         .chain(scenes.into_iter().map(|(_, id)| ChannelId::Scene(id)))
         .map(|id| plan_one(&id, universe, taste, ctx))
+        .collect();
+    planned.extend(coming_up(universe, taste, ctx));
+    planned
+}
+
+/// Programmable hours and artists a scene would air with (the same rule
+/// its channel uses), without building the pool.
+fn scene_progress(universe: &Universe, taste: &Taste, scene: i64) -> (f64, usize) {
+    let mut seconds = 0i64;
+    let mut artists: Vec<i64> = Vec::new();
+    for index in universe.scene_members.get(&scene).into_iter().flatten() {
+        let video = &universe.videos[*index];
+        let member = video.scene == Some(scene) || video.scene2 == Some(scene);
+        if !member || !program_ok(video) || skip_damp(taste, video.id).is_none() {
+            continue;
+        }
+        seconds += video.duration_s;
+        artists.push(video.artist);
+    }
+    artists.sort_unstable();
+    artists.dedup();
+    (seconds as f64 / 3600.0, artists.len())
+}
+
+/// The scenes closest to a channel number, as locked "coming up" channels
+/// with `no: 0`. Ranked by the further of the two thresholds; never
+/// numbered here (numbers are handed out once, by the intelligence build).
+fn coming_up(universe: &Universe, taste: &Taste, ctx: &DayContext) -> Vec<Planned> {
+    let mut ranked: Vec<(f64, f64, i64)> = universe
+        .scenes
+        .iter()
+        .filter(|scene| scene.channel_no.is_none())
+        .map(|scene| {
+            let (hours, artists) = scene_progress(universe, taste, scene.id);
+            let progress =
+                (hours / SCENE_NEED_HOURS).min(artists as f64 / SCENE_NEED_ARTISTS as f64);
+            (progress, hours, scene.id)
+        })
+        .filter(|(progress, _, _)| *progress > 0.0)
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));
+    ranked
+        .into_iter()
+        .take(COMING_UP)
+        .map(|(_, hours, scene)| {
+            let meta = base_meta(&ChannelId::Scene(scene), universe, taste, ctx);
+            locked(
+                meta,
+                Some(Unlock {
+                    hours: round1(hours),
+                    need_hours: SCENE_NEED_HOURS,
+                }),
+            )
+        })
         .collect()
 }
 
@@ -1009,8 +1065,72 @@ mod tests {
                 "spotlight",
                 "scene:3",
                 "scene:1"
-            ]
+            ],
+            "an unnumbered scene with nothing playable is not even coming up"
         );
+    }
+
+    fn scene_row(id: i64, channel_no: Option<i64>) -> SceneRow {
+        SceneRow {
+            id,
+            name: format!("Scene {id}"),
+            hue: 0.0,
+            channel_no,
+            exemplars: vec![],
+        }
+    }
+
+    #[test]
+    fn the_three_scenes_closest_to_a_number_are_coming_up() {
+        // (scene, artists, videos each): 4-minute videos, so 15 per hour.
+        let shapes = [
+            (1, 50, 12), // numbered: 40 h, 50 artists
+            (2, 20, 20), // 26.7 h, 20 artists -> 0.50
+            (3, 45, 2),  // 6 h, 45 artists -> 0.20
+            (4, 10, 40), // 26.7 h, 10 artists -> 0.25
+            (5, 30, 10), // 20 h, 30 artists -> 0.67
+            (6, 5, 2),   // 0.7 h -> 0.02
+        ];
+        let mut videos = Vec::new();
+        for (scene, artists, each) in shapes {
+            for artist in 0..artists {
+                for n in 0..each {
+                    let id = scene * 100_000 + artist * 100 + n;
+                    let mut v = video(id, scene * 1000 + artist, Cut::Official, id as u64);
+                    v.scene = Some(scene);
+                    videos.push(v);
+                }
+            }
+        }
+        let mut u = universe(videos);
+        u.scenes = vec![
+            scene_row(1, Some(10)),
+            scene_row(2, None),
+            scene_row(3, None),
+            scene_row(4, None),
+            scene_row(5, None),
+            scene_row(6, None),
+        ];
+        let planned = plan(&u, &Taste::default(), &ctx());
+        let tail: Vec<&ChannelMeta> = planned.iter().skip(8).map(|p| &p.meta).collect();
+        let ids: Vec<&str> = tail.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["scene:1", "scene:5", "scene:2", "scene:4"]);
+        assert!(!tail[0].locked && tail[0].no == 10);
+        for meta in &tail[1..] {
+            assert!(meta.locked);
+            assert_eq!(meta.no, 0, "not numbered yet");
+            assert_eq!(meta.unlock.unwrap().need_hours, SCENE_NEED_HOURS);
+            assert!(
+                planned
+                    .iter()
+                    .find(|p| p.meta.id == meta.id)
+                    .unwrap()
+                    .pool
+                    .is_none()
+            );
+        }
+        assert!((tail[1].unlock.unwrap().hours - 20.0).abs() < 0.05);
+        assert!((tail[2].unlock.unwrap().hours - 26.7).abs() < 0.05);
     }
 
     #[test]

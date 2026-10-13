@@ -286,6 +286,10 @@ mod tests {
         let excluded: Vec<i64> = (0..11).map(|a| 10_000 + a * 100).collect();
         let items = next(&conn, "wild", &request(excluded.clone()));
         assert_eq!(items.len(), QUEUE);
+        assert!(
+            items.iter().all(|v| v.cut.as_deref() == Some("official")),
+            "refills carry the cut for the lower third"
+        );
         let recent_artists: HashSet<i64> = (0..11).map(|a| 500 + a).collect();
         assert!(items.iter().all(|v| !excluded.contains(&v.tidal_id)));
         assert!(

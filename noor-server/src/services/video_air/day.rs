@@ -317,31 +317,76 @@ pub fn upcoming(
         .collect())
 }
 
-/// Catalog rows for the given videos, by id.
-pub fn catalog_videos(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, VideoCandidate>> {
+/// A catalog video as On Air serves it: the stored card plus what the
+/// lower third needs from the intelligence build.
+#[derive(Debug, Clone)]
+pub struct CatalogVideo {
+    pub video: VideoCandidate,
+    pub cut: Option<String>,
+    /// Only when the song's era is known with confidence (era_conf >= 0.5).
+    pub song_year: Option<i32>,
+}
+
+/// Songs whose year is a guess (earliest upload) keep it off the screen.
+const SONG_YEAR_MIN_CONF: f64 = 0.5;
+
+/// Catalog rows for the given videos, by id, with their cut and song year
+/// when the intelligence build has them.
+pub fn catalog_videos(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, CatalogVideo>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
+    let ids_json = serde_json::to_string(ids)?;
     let mut stmt = conn.prepare_cached(
         "SELECT tidal_video_id, item_json FROM video_catalog
           WHERE tidal_video_id IN (SELECT value FROM json_each(?1))",
     )?;
-    let rows = stmt.query_map([serde_json::to_string(ids)?], |row| {
+    let rows = stmt.query_map([&ids_json], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
     })?;
     let mut out = HashMap::new();
     for row in rows {
         let (id, json) = row?;
         if let Ok(video) = serde_json::from_str::<VideoCandidate>(&json) {
-            out.insert(id, video);
+            out.insert(
+                id,
+                CatalogVideo {
+                    video,
+                    cut: None,
+                    song_year: None,
+                },
+            );
+        }
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT f.tidal_video_id, f.cut,
+                CASE WHEN s.era_conf >= ?2 THEN s.song_year END
+           FROM video_facets f
+           LEFT JOIN video_songs s ON s.song_key = f.song_key
+          WHERE f.tidal_video_id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let rows = stmt.query_map(params![ids_json, SONG_YEAR_MIN_CONF], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, cut, year) = row?;
+        if let Some(entry) = out.get_mut(&id) {
+            entry.cut = Some(cut).filter(|cut| !cut.is_empty());
+            entry.song_year = year.and_then(|year| i32::try_from(year).ok());
         }
     }
     Ok(out)
 }
 
-pub fn item(video: &VideoCandidate, why: &str) -> VideoSetItem {
-    let mut item = to_item(video);
+pub fn item(entry: &CatalogVideo, why: &str) -> VideoSetItem {
+    let mut item = to_item(&entry.video);
     item.why = why.to_string();
+    item.cut = entry.cut.clone();
+    item.song_year = entry.song_year;
     item
 }
 
@@ -401,7 +446,7 @@ pub enum Tune {
     OffAir,
 }
 
-fn program_out(program: &Program, videos: &HashMap<i64, VideoCandidate>) -> Option<ProgramOut> {
+fn program_out(program: &Program, videos: &HashMap<i64, CatalogVideo>) -> Option<ProgramOut> {
     let video = videos.get(&program.video_id)?;
     Some(ProgramOut {
         slot: program.slot,
@@ -417,7 +462,7 @@ fn channel_out(
     meta: &ChannelMeta,
     upcoming: &[Program],
     now_s: i64,
-    videos: &HashMap<i64, VideoCandidate>,
+    videos: &HashMap<i64, CatalogVideo>,
 ) -> ChannelOut {
     let (now, next) = match clock::locate(upcoming, now_s) {
         Some((index, offset)) => (Some((&upcoming[index], offset)), upcoming.get(index + 1)),
@@ -573,7 +618,9 @@ pub fn tune_at(
         // Same artist and same concert label: still the same concert.
         let concert_of = |program: &Program| {
             (
-                videos.get(&program.video_id).and_then(|v| v.artist_id),
+                videos
+                    .get(&program.video_id)
+                    .and_then(|v| v.video.artist_id),
                 program.why.clone(),
             )
         };
@@ -735,6 +782,55 @@ mod tests {
             .unwrap();
         assert_eq!(locked["locked"], true);
         assert!(locked["now"].is_null());
+    }
+
+    #[test]
+    fn served_videos_carry_their_cut_and_a_confident_song_year() {
+        let conn = conn();
+        seed_catalog(&conn);
+        conn.execute_batch(
+            "INSERT INTO video_songs (song_key, title, best_video_id, cut_count, song_year, era_conf) VALUES
+                 ('id:500:song 0', 'song 0', 10000, 1, 1987, 0.9),
+                 ('id:500:song 1', 'song 1', 10001, 1, 1999, 0.3);
+             UPDATE video_facets SET cut = 'live' WHERE tidal_video_id = 10001;",
+        )
+        .unwrap();
+        let videos = catalog_videos(&conn, &[10_000, 10_001, 10_002, 99]).unwrap();
+        assert!(!videos.contains_key(&99));
+        assert_eq!(videos[&10_000].cut.as_deref(), Some("official"));
+        assert_eq!(videos[&10_000].song_year, Some(1987));
+        assert_eq!(videos[&10_001].cut.as_deref(), Some("live"));
+        assert_eq!(
+            videos[&10_001].song_year, None,
+            "a low-confidence year stays off"
+        );
+        assert_eq!(videos[&10_002].song_year, None, "no song row");
+        let json = serde_json::to_value(item(&videos[&10_000], "Why")).unwrap();
+        assert_eq!(json["cut"], "official");
+        assert_eq!(json["song_year"], 1987);
+        assert_eq!(json["why"], "Why");
+        let json = serde_json::to_value(item(&videos[&10_001], "")).unwrap();
+        assert!(json.get("song_year").is_none());
+
+        let out = serde_json::to_value(
+            channels_at(&conn, "2026-10-14", 30_000, ExploreMode::Mixed).unwrap(),
+        )
+        .unwrap();
+        let wild = out["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "wild")
+            .unwrap();
+        assert!(wild["now"]["video"]["cut"].is_string());
+        assert!(wild["next"]["video"]["cut"].is_string());
+        let Tune::On(tune) =
+            tune_at(&conn, "wild", "2026-10-14", 30_000, ExploreMode::Mixed).unwrap()
+        else {
+            panic!("on air");
+        };
+        assert!(tune.video.cut.is_some());
+        assert!(tune.queue.iter().all(|v| v.cut.is_some()));
     }
 
     #[test]
@@ -1044,7 +1140,7 @@ mod tests {
             .unwrap();
             println!("--- {id}");
             for program in programs {
-                let video = &videos[&program.video_id];
+                let video = &videos[&program.video_id].video;
                 println!(
                     "  {:02}:{:02} {:>4}s  {} - {}  [{}]",
                     program.start_s / 3600 % 24,
