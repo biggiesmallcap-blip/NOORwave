@@ -1466,6 +1466,14 @@ impl ActiveListenSession {
             .unwrap_or(0);
         self.accumulated_ms + live_ms
     }
+
+    /// Whether this listen would flush as completed if it ended now.
+    pub fn completed_at(&self, track: &Track, now: DateTime<Utc>) -> bool {
+        is_completed_listen(
+            track,
+            clamp_listened_ms(self.listened_ms_at(now), track.duration_ms),
+        )
+    }
 }
 
 /// Canonical "give me everything the UI needs to render the player" loader.

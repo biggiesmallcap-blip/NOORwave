@@ -2668,14 +2668,13 @@ pub fn get_completion_weighted_listen_edges(
            AND b.track_id != a.track_id
            AND (
                 (a.session_id IS NOT NULL AND a.session_id = b.session_id)
-                OR (
-                    (a.session_id IS NULL OR b.session_id IS NULL)
-                    -- julianday(): started_at is RFC 3339, datetime() output is not; text compares fail.
-                    AND julianday(b.started_at)
-                        BETWEEN julianday(a.started_at)
-                            AND julianday(a.started_at) + (?1 / 1440.0)
-                )
+                OR a.session_id IS NULL
+                OR b.session_id IS NULL
            )
+           -- The window applies inside a session too: one session can run all
+           -- day. julianday(): started_at is RFC 3339, datetime() output is
+           -- not, so text compares fail.
+           AND ABS(julianday(b.started_at) - julianday(a.started_at)) <= (?1 / 1440.0)
         ORDER BY a.started_at ASC, a.id ASC, b.started_at ASC, b.id ASC",
     )?;
     let rows = stmt
@@ -2863,12 +2862,4 @@ pub fn get_genre_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
         }
     }
     Ok(seqs)
-}
-
-pub fn get_favorite_track_ids(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt = conn
-        .prepare("SELECT id FROM tracks WHERE is_favorite = 1 ORDER BY play_count DESC, id ASC")?;
-    stmt.query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
 }
