@@ -338,12 +338,12 @@ fn best_videos(
     }
     let ready = scenes::facets_ready(conn)?;
     let sql = if ready {
-        "SELECT c.item_json FROM video_facets f
+        "SELECT c.item_json, f.song_key FROM video_facets f
            JOIN video_catalog c ON c.tidal_video_id = f.tidal_video_id
           WHERE f.artist_tidal_id = ?1 AND f.programmable = 1
           ORDER BY f.quality DESC, COALESCE(f.popularity, -1) DESC, f.tidal_video_id DESC"
     } else {
-        "SELECT item_json FROM video_catalog WHERE artist_tidal_id = ?1
+        "SELECT item_json, NULL FROM video_catalog WHERE artist_tidal_id = ?1
           ORDER BY COALESCE(json_extract(item_json, '$.popularity'), -1) DESC, tidal_video_id DESC"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -352,13 +352,16 @@ fn best_videos(
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         let json: String = row.get(0)?;
+        let song_key: Option<String> = row.get(1)?;
         let Ok(video) = serde_json::from_str::<VideoCandidate>(&json) else {
             continue;
         };
         if !ready && video.duration_s.is_some_and(|d| d < MIN_PROGRAMMABLE_S) {
             continue;
         }
-        let key = video_song_key(video.artist_id, video.artist_name.as_deref(), &video.title);
+        let key = song_key.unwrap_or_else(|| {
+            video_song_key(video.artist_id, video.artist_name.as_deref(), &video.title)
+        });
         if songs.insert(key) {
             out.push(to_item(&video));
             if out.len() >= limit {
@@ -1073,6 +1076,28 @@ mod tests {
     }
 
     #[test]
+    fn best_cuts_follow_catalog_facets_once_they_exist() {
+        let db = seeded_db();
+        db.with_conn(|conn| {
+            // Quality ranks; the interview is not programmable; two cuts of
+            // one song collapse to the better one.
+            conn.execute_batch(
+                "INSERT INTO video_facets (tidal_video_id, artist_tidal_id, cut, programmable, song_key, quality, duration_s) VALUES
+                     (1001005, 1001, 'official', 1, 'k5', 0.9, 200),
+                     (1001006, 1001, 'live', 1, 'k5', 0.8, 200),
+                     (1001007, 1001, 'interview', 0, 'k7', 1.0, 900),
+                     (1001008, 1001, 'official', 1, 'k8', 0.5, 200);",
+            )?;
+            let best = best_videos(conn, 1001, 8)?;
+            let ids: Vec<i64> = best.iter().map(|v| v.tidal_id).collect();
+            assert_eq!(ids, vec![1001005, 1001008]);
+            assert_eq!(playable(conn, 1001)?, (3, 0.2));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn probe_decisions_cover_every_branch() {
         use artist_state::ArtistState;
         let checked = ArtistState {
@@ -1122,6 +1147,16 @@ mod tests {
             return;
         };
         let db = Database::open(&path).unwrap();
+        db.with_conn(|conn| {
+            let started = std::time::Instant::now();
+            let graph = scenes::ArtistGraph::load(conn)?;
+            eprintln!("graph load: {} ms", started.elapsed().as_millis());
+            let started = std::time::Instant::now();
+            light::load(conn, &graph)?;
+            eprintln!("light: {} ms", started.elapsed().as_millis());
+            Ok(())
+        })
+        .unwrap();
         let time = |label: &str, started: std::time::Instant, bytes: usize| {
             eprintln!(
                 "{label}: {} ms, {} bytes",
