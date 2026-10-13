@@ -76,3 +76,17 @@ describe('lineup and explore', () => {
 		expect(get(exploreMode)).toBe('adventurous');
 	});
 });
+
+describe('for you tonight ranks scenes by appetite', () => {
+	test('the hungriest scenes follow Your Channel, ties keep dial order', () => {
+		const base = fixtureChannels.channels.filter((channel) => !channel.locked && channel.now);
+		const scenes = base.filter((channel) => channel.scene_id != null);
+		if (scenes.length < 2) return;
+		const ranked = base.map((channel) => channel.scene_id != null
+			? { ...channel, appetite: channel.id === scenes[scenes.length - 1].id ? 0.9 : 0.1 }
+			: channel);
+		const picks = forYouTonight(ranked);
+		expect(picks[0].id).toBe('your');
+		expect(picks[1].id).toBe(scenes[scenes.length - 1].id);
+	});
+});

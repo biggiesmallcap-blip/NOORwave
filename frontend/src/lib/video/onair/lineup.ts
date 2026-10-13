@@ -92,15 +92,19 @@ export function byNumber<T extends Pick<VideoChannel, 'no'>>(channels: readonly 
 }
 
 /** "For you tonight": Your Channel, then the scene channels you have the
- *  most appetite for. The server sends channels in appetite order, so its
- *  order is the ranking; fixed channels fill in when there are few scenes.
- *  Only channels with something on now. */
+ *  most appetite for (the server's per-scene `appetite`, highest first, the
+ *  dial order breaking ties); fixed channels fill in when there are few
+ *  scenes. Only channels with something on now. */
 export function forYouTonight(channels: readonly VideoChannel[], size = 4): VideoChannel[] {
 	const live = channels.filter((channel) => !channel.locked && channel.now);
 	const picks: VideoChannel[] = [];
 	const your = live.find((channel) => channel.id === 'your');
 	if (your) picks.push(your);
-	for (const channel of live) {
+	const byAppetite = live
+		.map((channel, order) => ({ channel, order }))
+		.sort((a, b) => (b.channel.appetite ?? -1) - (a.channel.appetite ?? -1) || a.order - b.order)
+		.map(({ channel }) => channel);
+	for (const channel of byAppetite) {
 		if (picks.length >= size) break;
 		if (channel.scene_id != null && !picks.includes(channel)) picks.push(channel);
 	}
