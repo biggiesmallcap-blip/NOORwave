@@ -2601,6 +2601,25 @@ fn completed_listen_uses_ninety_percent_or_four_minute_cap() {
 }
 
 #[test]
+fn an_open_listen_reports_whether_it_has_completed_yet() {
+    // 180 s track: complete from 162 s.
+    let track = track_with_tidal_id(1, Some(42), Some("LOSSLESS"));
+    let now = chrono::Utc::now();
+    let started = |seconds_ago: i64| {
+        ActiveListenSession::start(
+            1,
+            now - chrono::Duration::seconds(seconds_ago),
+            crate::db::models::ListenSource::Manual,
+            None,
+        )
+    };
+    assert!(!started(20).completed_at(&track, now));
+    assert!(started(170).completed_at(&track, now));
+    // Wall time past the track length is capped, as when the listen is flushed.
+    assert!(started(10_000).completed_at(&track, now));
+}
+
+#[test]
 fn next_track_extends_queue_when_automix_is_enabled() {
     let conn = conn();
     let tracks = load_tracks(&conn, &[1, 2]);

@@ -684,12 +684,11 @@ describe('stale playback responses', () => {
 	});
 
 	it('ignores an older TIDAL radio lookup after a newer play request', async () => {
-		const radio = deferred<RadioTracksResult>();
+		const seedLookup = deferred<Awaited<ReturnType<typeof api.importTidalTrackForRadio>>>();
 		const play = deferred<PlaybackSnapshot>();
 		const currentRow = libraryRow(20, 2);
-		vi.mocked(api.getRadioTracks).mockReturnValueOnce(radio.promise);
+		vi.mocked(api.importTidalTrackForRadio).mockReturnValueOnce(seedLookup.promise);
 		vi.mocked(api.playTrack).mockReturnValueOnce(play.promise);
-		vi.mocked(api.replacePlaybackQueue).mockResolvedValue(mixedQueueResponse(libraryRow(10, 1), [libraryRow(10, 1)]));
 
 		const radioAction = startTidalSongRadio(tidalPlayable(1));
 		const playAction = playTrackNow(2);
@@ -698,10 +697,28 @@ describe('stale playback responses', () => {
 		await playAction;
 		expect(get(currentTrack)?.id).toBe(2);
 
-		radio.resolve(radioResults([1]));
+		seedLookup.resolve({ tidal_id: 1, local_id: 10, artist_id: 1, album_id: null });
 		await radioAction;
 		expect(get(currentTrack)?.id).toBe(2);
-		expect(api.replacePlaybackQueue).not.toHaveBeenCalled();
+		expect(api.startRadioStart).not.toHaveBeenCalled();
+		expect(get(playerError)).toBeNull();
+	});
+
+	it('starts TIDAL song radio as a server station when the track is already local', async () => {
+		const seedRow = libraryRow(50, 5);
+		vi.mocked(api.importTidalTrackForRadio).mockResolvedValueOnce({
+			tidal_id: 1,
+			local_id: 5,
+			artist_id: 1,
+			album_id: null,
+		});
+		vi.mocked(api.startRadioStart).mockResolvedValueOnce(radioQueue(seedRow));
+
+		await startTidalSongRadio(tidalPlayable(1));
+
+		expect(api.getRadioTracks).not.toHaveBeenCalled();
+		expect(api.startRadioStart).toHaveBeenCalledWith({ seed_track_id: 5, limit: 60 });
+		expect(get(currentTrack)?.id).toBe(5);
 		expect(get(playerError)).toBeNull();
 	});
 });

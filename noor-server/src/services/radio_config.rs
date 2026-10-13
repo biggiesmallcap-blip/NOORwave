@@ -42,6 +42,70 @@ impl RadioFlags {
     }
 }
 
+/// Where a station's picks come from (Settings > Playback > Radio).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StationSource {
+    /// Your library and listening, Last.fm, and the radio index; TIDAL's mix
+    /// fills in when a seed has too little of its own.
+    #[default]
+    Balanced,
+    /// Last.fm's similar tracks.
+    Lastfm,
+    /// TIDAL's own track or artist radio.
+    Tidal,
+    /// TIDAL and Last.fm together, shaped by your listening
+    /// (`services::radio::hybrid`).
+    Hybrid,
+}
+
+/// The listener's radio choices; requests without their own blend use `blend`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct RadioPreferences {
+    pub source: StationSource,
+    pub blend: RadioBlend,
+}
+
+const STATION_SOURCE_KEY: &str = "radio_station_source";
+const DEFAULT_BLEND_KEY: &str = "radio_default_blend";
+
+fn read_enum<T: serde::de::DeserializeOwned>(conn: &Connection, key: &str) -> Option<T> {
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok()?;
+    serde_json::from_value(serde_json::Value::String(raw)).ok()
+}
+
+/// Saved radio choices; anything missing or unreadable reads as the default.
+pub fn load_radio_preferences(conn: &Connection) -> RadioPreferences {
+    RadioPreferences {
+        source: read_enum(conn, STATION_SOURCE_KEY).unwrap_or_default(),
+        blend: read_enum(conn, DEFAULT_BLEND_KEY).unwrap_or_default(),
+    }
+}
+
+pub fn save_radio_preferences(conn: &Connection, preferences: RadioPreferences) -> Result<()> {
+    for (key, value) in [
+        (
+            STATION_SOURCE_KEY,
+            serde_json::to_value(preferences.source)?,
+        ),
+        (DEFAULT_BLEND_KEY, serde_json::to_value(preferences.blend)?),
+    ] {
+        let value = value.as_str().unwrap_or_default().to_string();
+        conn.execute(
+            "INSERT INTO server_config (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+    }
+    Ok(())
+}
+
 fn read_bool_flag(conn: &Connection, key: &str) -> bool {
     conn.query_row(
         "SELECT value FROM server_config WHERE key = ?1",
@@ -93,6 +157,14 @@ pub fn apply_quality_defaults_once(conn: &Connection) -> Result<()> {
 }
 
 pub fn load_radio_flags(conn: &Connection) -> RadioFlags {
+    // The rollback switch means every newer behavior off at once, whatever the
+    // individual rows say. It used to only suppress diagnostics.
+    if read_bool_flag(conn, "radio_use_legacy_pipeline") {
+        return RadioFlags {
+            use_legacy_pipeline: true,
+            ..RadioFlags::all_off()
+        };
+    }
     RadioFlags {
         use_legacy_pipeline: read_bool_flag(conn, "radio_use_legacy_pipeline"),
         score_normalization_enabled: read_bool_flag(conn, "radio_score_normalization_enabled"),
@@ -338,6 +410,66 @@ mod tests {
         schema::run_migrations(&conn).expect("migrations");
         let flags = load_radio_flags(&conn);
         assert!(!flags.use_legacy_pipeline);
+        assert!(!flags.score_normalization_enabled);
+        assert!(!flags.confidence_penalty_enabled);
+        assert!(!flags.hub_penalty_enabled);
+        assert!(!flags.diversity_rerank_enabled);
+        assert!(!flags.source_quota_bonus_enabled);
+    }
+
+    #[test]
+    fn radio_preferences_default_round_trip_and_ignore_junk() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        assert_eq!(load_radio_preferences(&conn), RadioPreferences::default());
+        assert_eq!(
+            RadioPreferences::default(),
+            RadioPreferences {
+                source: StationSource::Balanced,
+                blend: RadioBlend::Mixed
+            }
+        );
+
+        let chosen = RadioPreferences {
+            source: StationSource::Hybrid,
+            blend: RadioBlend::Adventurous,
+        };
+        save_radio_preferences(&conn, chosen).expect("save");
+        assert_eq!(load_radio_preferences(&conn), chosen);
+        let stored: String = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = 'radio_station_source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "hybrid");
+
+        conn.execute(
+            "UPDATE server_config SET value = 'nonsense' WHERE key = 'radio_station_source'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            load_radio_preferences(&conn).source,
+            StationSource::Balanced
+        );
+    }
+
+    #[test]
+    fn legacy_switch_turns_every_newer_behavior_off() {
+        // The rollback switch used to only hide diagnostics while the newer
+        // processing kept running under it.
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("migrations");
+        apply_quality_defaults_once(&conn).expect("apply");
+        conn.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES ('radio_use_legacy_pipeline', 'true')",
+            [],
+        )
+        .expect("legacy on");
+        let flags = load_radio_flags(&conn);
+        assert!(flags.use_legacy_pipeline);
         assert!(!flags.score_normalization_enabled);
         assert!(!flags.confidence_penalty_enabled);
         assert!(!flags.hub_penalty_enabled);

@@ -57,6 +57,192 @@ fn tidal_mix_fills_a_cold_seed_with_library_rows_first() {
 }
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Seed 2 is a new release of trained row 1 (same ISRC, 1 s longer). Row 1's
+/// learned neighbor is 3, by another artist.
+fn recording_twin_db() -> Database {
+    let db = Database::open(":memory:").expect("in-memory db");
+    db.run_migrations().expect("run migrations");
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Ram Dass'), (2, 'Ashana');
+             INSERT INTO tracks (id, title, artist_id, isrc, duration_ms) VALUES
+                 (1, 'The Water Poem', 1, 'USKHG2021203', 200000),
+                 (2, 'The Water Poem', 1, 'USKHG2021203', 201000),
+                 (3, 'Jai Ma', 2, 'USX000000003', 300000),
+                 (4, 'Long Version', 1, 'USX000000004', 200000),
+                 (5, 'Long Version', 1, 'USX000000004', 260000);",
+        )?;
+        let model = crate::db::queries::create_embedding_model(
+            conn,
+            "discovery-fusion-v2:twin",
+            crate::db::queries::DISCOVERY_ENGINE_V2_FAMILY,
+            8,
+            "ready",
+            None,
+        )?;
+        crate::db::queries::activate_embedding_model(conn, model.id)?;
+        conn.execute(
+            "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score)
+             VALUES (1, 3, ?1, 1, 0.9), (4, 3, ?1, 1, 0.9)",
+            rusqlite::params![model.id],
+        )?;
+        Ok(())
+    })
+    .expect("seed");
+    db
+}
+
+#[test]
+fn recall_seed_borrows_a_trained_twin_with_the_same_isrc() {
+    let db = recording_twin_db();
+    assert_eq!(crate::services::learning::recall_seed_for(&db, 2), 1);
+    // A seed with neighbors of its own keeps them.
+    assert_eq!(crate::services::learning::recall_seed_for(&db, 1), 1);
+    // No ISRC twin: the seed stands alone.
+    assert_eq!(crate::services::learning::recall_seed_for(&db, 3), 3);
+}
+
+#[test]
+fn recall_seed_ignores_a_twin_of_a_different_length() {
+    let db = recording_twin_db();
+    // Same ISRC, 60 s longer: not the same cut, no borrowing.
+    assert_eq!(crate::services::learning::recall_seed_for(&db, 5), 5);
+}
+
+#[tokio::test]
+async fn new_release_seed_gets_the_known_recordings_neighbors_with_isrcs() {
+    let db = recording_twin_db();
+    let queue = orchestrate_song(&db, None, None, 2, RadioBlend::Mixed, 20, &[])
+        .await
+        .expect("radio");
+    let neighbor = queue
+        .tracks
+        .iter()
+        .find(|c| c.track_id == 3)
+        .expect("the trained twin's neighbor is recalled");
+    assert_eq!(neighbor.source, RadioSource::Library);
+    assert_eq!(neighbor.isrc.as_deref(), Some("USX000000003"));
+    // Neither the seed nor its twin come back as picks.
+    assert!(
+        queue
+            .tracks
+            .iter()
+            .all(|c| c.track_id != 1 && c.track_id != 2)
+    );
+    assert_eq!(queue.seed.track_id, Some(2));
+}
+
+#[test]
+fn engine_rows_need_more_than_a_weak_genre_and_a_similar_length() {
+    let db = Database::open(":memory:").expect("in-memory db");
+    db.run_migrations().expect("run migrations");
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Ram Dass'), (2, 'Kajagoogoo'), (3, 'Ashana');
+             INSERT INTO tracks (id, title, artist_id) VALUES
+                 (1, 'The Water Poem', 1), (2, 'Too Shy', 2),
+                 (3, 'Heart Takes Flight', 1), (4, 'Jai Ma', 3);
+             -- The audited Too Shy edge: no album, artist or listening tie,
+             -- genre 0.048 and a near length.
+             INSERT INTO track_similarity (track_a, track_b, similarity_score, co_listen_score,
+                 co_album_score, co_artist_score, genre_proximity, duration_proximity, era_proximity)
+             VALUES (1, 2, 0.0525, 0, 0, 0, 0.048, 0.905, 0),
+                    (1, 3, 0.30, 0, 1.0, 1.0, 0.2, 0.5, 0.5),
+                    (1, 4, 0.20, 0, 0, 0, 0.8, 0.3, 0.2);",
+        )?;
+        Ok(())
+    })
+    .expect("seed");
+    let picks = engine_results_from_track_similarity(&db, 1, 10, &[]).expect("engine");
+    let ids: Vec<i64> = picks.iter().map(|c| c.track_id).collect();
+    assert!(ids.contains(&3), "same album and artist: {ids:?}");
+    assert!(ids.contains(&4), "strong shared genre: {ids:?}");
+    assert!(!ids.contains(&2), "weak genre plus length: {ids:?}");
+}
+
+#[test]
+fn blend_backfills_from_lanes_past_their_share() {
+    // 48 eligible Last.fm picks and nothing else used to come back as 24:
+    // the lane stopped at its 40% share and nothing filled the rest.
+    let only_lastfm = (0..48)
+        .map(|i| make_cand(RadioSource::Lastfm, i, 0.9 - i as f64 * 0.001))
+        .collect();
+    assert_eq!(
+        blend_interleave(only_lastfm, RadioBlend::Mixed, 60).len(),
+        48
+    );
+}
+
+#[tokio::test]
+async fn artist_radio_spaces_artists_across_its_seeds() {
+    // Three seeds by artist 1. Each seed's own radio holds two tracks by
+    // artist 9 (the per-seed cap), so the union held six in a row.
+    let db = Database::open(":memory:").expect("in-memory db");
+    db.run_migrations().expect("run migrations");
+    db.with_conn(|conn| {
+        conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Seed Artist'), (9, 'Hub Artist')", [])?;
+        for other in 20..40 {
+            conn.execute(
+                "INSERT INTO artists (id, name) VALUES (?1, ?2)",
+                rusqlite::params![other, format!("Other {other}")],
+            )?;
+        }
+        for seed in 1..=3 {
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist_id, play_count) VALUES (?1, ?2, 1, 10)",
+                rusqlite::params![seed, format!("Seed {seed}")],
+            )?;
+        }
+        let model = crate::db::queries::create_embedding_model(
+            conn,
+            "discovery-fusion-v2:artist-union",
+            crate::db::queries::DISCOVERY_ENGINE_V2_FAMILY,
+            8,
+            "ready",
+            None,
+        )?;
+        crate::db::queries::activate_embedding_model(conn, model.id)?;
+        let mut next_id = 100;
+        for seed in 1..=3 {
+            for rank in 0..6 {
+                let (artist, score) = if rank < 3 { (9, 0.9) } else { (20 + next_id % 20, 0.5) };
+                conn.execute(
+                    "INSERT INTO tracks (id, title, artist_id) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![next_id, format!("Track {next_id}"), artist],
+                )?;
+                conn.execute(
+                    "INSERT INTO track_neighbors (track_id, neighbor_track_id, model_id, rank, score)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![seed, next_id, model.id, rank + 1, score],
+                )?;
+                next_id += 1;
+            }
+        }
+        Ok(())
+    })
+    .expect("seed");
+
+    let queue = orchestrate_artist(&db, None, None, 1, RadioBlend::Familiar, 15, &[])
+        .await
+        .expect("artist radio");
+    let mut longest = 0;
+    let mut run = 0;
+    let mut previous = String::new();
+    for pick in &queue.tracks {
+        run = if pick.artist_name == previous {
+            run + 1
+        } else {
+            1
+        };
+        previous = pick.artist_name.clone();
+        longest = longest.max(run);
+    }
+    assert!(
+        longest <= ARTIST_RUN_CAP,
+        "longest same-artist run {longest}"
+    );
+}
+
 #[test]
 fn recent_played_artist_names_keep_to_the_hour_window_for_rfc3339_rows() {
     let db = Database::open(":memory:").expect("in-memory db");

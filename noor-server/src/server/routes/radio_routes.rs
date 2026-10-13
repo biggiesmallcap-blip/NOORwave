@@ -309,7 +309,7 @@ pub(super) async fn radio_song(
         ));
     }
 
-    let blend = payload.blend.unwrap_or_default();
+    let requested_blend = payload.blend;
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
 
@@ -320,15 +320,21 @@ pub(super) async fn radio_song(
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
     };
-
-    let mut queue = crate::services::radio::orchestrate_song(
-        &db,
-        lastfm.as_ref(),
-        Some(&lastfm_similar_cache),
-        payload.seed_track_id,
+    let preferences = radio_preferences(&db);
+    let blend = requested_blend.unwrap_or(preferences.blend);
+    let station = crate::server::routes::radio_station::StationContext {
+        state: &state,
+        db: &db,
+        lastfm: lastfm.as_ref(),
+        cache: &lastfm_similar_cache,
+    };
+    let queue = crate::server::routes::radio_station::build_station(
+        &station,
+        crate::server::routes::radio_station::StationSeed::Track(payload.seed_track_id),
         blend,
         limit,
         &exclude,
+        preferences.source,
     )
     .await
     .map_err(|e| {
@@ -338,14 +344,6 @@ pub(super) async fn radio_song(
             Json(json!({ "error": "radio orchestration failed" })),
         )
     })?;
-    add_tidal_mix_fallback(
-        &state,
-        &db,
-        TidalMixSeed::Track(payload.seed_track_id),
-        &mut queue.tracks,
-        limit,
-    )
-    .await;
 
     let (first_playable, pending_count) = build_radio_queue_and_spawn_resolvers(
         &state,
@@ -386,23 +384,15 @@ pub(crate) enum TidalMixSeed {
     Artist(i64),
 }
 
-/// A radio with fewer than `TIDAL_MIX_FALLBACK_MIN_PICKS` picks has a seed with
-/// too little evidence of its own (never played, no genres or audio analysis,
-/// no Last.fm match). Fill it from TIDAL's track or artist mix for the seed.
-/// Best effort: no TIDAL session or no mix leaves the radio as it was.
-pub(crate) async fn add_tidal_mix_fallback(
+/// TIDAL's own mix for a seed (`mixes.TRACK_MIX` on the track payload,
+/// `ARTIST_MIX` on the artist), with the seed's TIDAL id for a track seed, or
+/// a plain reason there is none.
+pub(crate) async fn fetch_seed_tidal_mix(
     state: &SharedState,
     db: &crate::db::Database,
     seed: TidalMixSeed,
-    tracks: &mut Vec<crate::services::radio::RadioCandidate>,
-    limit: usize,
-) {
-    use crate::services::radio::{
-        TIDAL_MIX_FALLBACK_MIN_PICKS, tidal_mix_candidates, tidal_mix_id,
-    };
-    if tracks.len() >= TIDAL_MIX_FALLBACK_MIN_PICKS {
-        return;
-    }
+) -> Result<(Vec<crate::services::tidal::client::TidalTrack>, Option<i64>), &'static str> {
+    use crate::services::radio::tidal_mix_id;
     let (sql, local_id) = match seed {
         TidalMixSeed::Track(id) => ("SELECT tidal_id FROM tracks WHERE id = ?1", id),
         TidalMixSeed::Artist(id) => ("SELECT tidal_id FROM artists WHERE id = ?1", id),
@@ -416,11 +406,13 @@ pub(crate) async fn add_tidal_mix_fallback(
         })
         .ok()
         .flatten()
-        .filter(|id| *id > 0);
-    let Some(tidal_id) = tidal_id else { return };
-    let Some(persisted) = load_persisted_tidal_tokens(state).await.ok().flatten() else {
-        return;
-    };
+        .filter(|id| *id > 0)
+        .ok_or("this seed is not on TIDAL")?;
+    let persisted = load_persisted_tidal_tokens(state)
+        .await
+        .ok()
+        .flatten()
+        .ok_or("TIDAL is not connected")?;
     let (tokens, tidal_session) = {
         let s = state.read().await;
         (s.tidal.tokens().unwrap_or(persisted), s.tidal.clone())
@@ -438,16 +430,34 @@ pub(crate) async fn add_tidal_mix_fallback(
             .await
             .ok()
             .and_then(|artist| tidal_mix_id(&artist.extra, "ARTIST_MIX")),
-    };
-    let Some(mix_id) = mix_id else { return };
-    let mix = match client.get_mix_tracks(&mix_id).await {
-        Ok(mix) => mix,
-        Err(error) => {
-            tracing::warn!(%error, mix_id, "radio: TIDAL mix fallback failed");
-            return;
-        }
-    };
+    }
+    .ok_or("TIDAL has no radio for this seed")?;
+    let mix = client.get_mix_tracks(&mix_id).await.map_err(|error| {
+        tracing::warn!(%error, mix_id, "radio: TIDAL mix request failed");
+        "the TIDAL radio request failed"
+    })?;
     let seed_tidal_id = matches!(seed, TidalMixSeed::Track(_)).then_some(tidal_id);
+    Ok((mix, seed_tidal_id))
+}
+
+/// A radio with fewer than `TIDAL_MIX_FALLBACK_MIN_PICKS` picks has a seed with
+/// too little evidence of its own (never played, no genres or audio analysis,
+/// no Last.fm match). Fill it from TIDAL's track or artist mix for the seed.
+/// Best effort: no TIDAL session or no mix leaves the radio as it was.
+pub(crate) async fn add_tidal_mix_fallback(
+    state: &SharedState,
+    db: &crate::db::Database,
+    seed: TidalMixSeed,
+    tracks: &mut Vec<crate::services::radio::RadioCandidate>,
+    limit: usize,
+) {
+    use crate::services::radio::{TIDAL_MIX_FALLBACK_MIN_PICKS, tidal_mix_candidates};
+    if tracks.len() >= TIDAL_MIX_FALLBACK_MIN_PICKS {
+        return;
+    }
+    let Ok((mix, seed_tidal_id)) = fetch_seed_tidal_mix(state, db, seed).await else {
+        return;
+    };
     let wanted = limit.saturating_sub(tracks.len());
     let existing = tracks.clone();
     let added = db
@@ -467,6 +477,33 @@ pub(crate) async fn add_tidal_mix_fallback(
         "radio: seed had too little evidence; filled from TIDAL mix"
     );
     tracks.extend(added);
+}
+
+/// The listener's saved radio choices (Settings > Playback > Radio).
+pub(crate) fn radio_preferences(
+    db: &crate::db::Database,
+) -> crate::services::radio_config::RadioPreferences {
+    db.with_conn(|conn| Ok(crate::services::radio_config::load_radio_preferences(conn)))
+        .unwrap_or_default()
+}
+
+pub(super) async fn get_radio_settings(
+    State(state): State<SharedState>,
+) -> Json<crate::services::radio_config::RadioPreferences> {
+    let db = state.read().await.db.clone();
+    Json(radio_preferences(&db))
+}
+
+pub(super) async fn put_radio_settings(
+    State(state): State<SharedState>,
+    Json(preferences): Json<crate::services::radio_config::RadioPreferences>,
+) -> Result<Json<crate::services::radio_config::RadioPreferences>, (StatusCode, Json<Value>)> {
+    let db = state.read().await.db.clone();
+    db.with_conn(move |conn| {
+        crate::services::radio_config::save_radio_preferences(conn, preferences)
+    })
+    .map_err(internal)?;
+    Ok(Json(preferences))
 }
 
 /// Remember which radio built the queue so topping it up continues that radio
@@ -608,7 +645,7 @@ pub(super) async fn radio_start(
         ));
     }
 
-    let blend = payload.blend.unwrap_or_default();
+    let requested_blend = payload.blend;
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
 
     let (db, lastfm, lastfm_similar_cache) = {
@@ -620,32 +657,30 @@ pub(super) async fn radio_start(
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
     };
-
-    let mut radio_queue = crate::services::radio::orchestrate_song(
-        &db,
-        lastfm.as_ref(),
-        Some(&lastfm_similar_cache),
-        payload.seed_track_id,
+    let preferences = radio_preferences(&db);
+    let blend = requested_blend.unwrap_or(preferences.blend);
+    let station = crate::server::routes::radio_station::StationContext {
+        state: &state,
+        db: &db,
+        lastfm: lastfm.as_ref(),
+        cache: &lastfm_similar_cache,
+    };
+    let radio_queue = crate::server::routes::radio_station::build_station(
+        &station,
+        crate::server::routes::radio_station::StationSeed::Track(payload.seed_track_id),
         blend,
         limit,
         &[],
+        preferences.source,
     )
     .await
     .map_err(|e| {
-        tracing::warn!("radio_start: orchestrate_song failed: {e}");
+        tracing::warn!("radio_start failed: {e}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "radio orchestration failed" })),
         )
     })?;
-    add_tidal_mix_fallback(
-        &state,
-        &db,
-        TidalMixSeed::Track(payload.seed_track_id),
-        &mut radio_queue.tracks,
-        limit,
-    )
-    .await;
 
     // Build queue atomically and collect pending row IDs for background tasks.
     let seed_track_id = payload.seed_track_id;
@@ -762,7 +797,7 @@ pub(super) async fn radio_album(
     State(state): State<SharedState>,
     Json(payload): Json<RadioAlbumRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let blend = payload.blend.unwrap_or_default();
+    let requested_blend = payload.blend;
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
 
@@ -773,15 +808,21 @@ pub(super) async fn radio_album(
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
     };
-
-    let queue = crate::services::radio::orchestrate_album(
-        &db,
-        lastfm.as_ref(),
-        Some(&lastfm_similar_cache),
-        payload.seed_album_id,
+    let preferences = radio_preferences(&db);
+    let blend = requested_blend.unwrap_or(preferences.blend);
+    let station = crate::server::routes::radio_station::StationContext {
+        state: &state,
+        db: &db,
+        lastfm: lastfm.as_ref(),
+        cache: &lastfm_similar_cache,
+    };
+    let queue = crate::server::routes::radio_station::build_station(
+        &station,
+        crate::server::routes::radio_station::StationSeed::Album(payload.seed_album_id),
         blend,
         limit,
         &exclude,
+        preferences.source,
     )
     .await
     .map_err(|e| {
@@ -830,7 +871,7 @@ pub(super) async fn radio_artist(
     State(state): State<SharedState>,
     Json(payload): Json<RadioArtistRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let blend = payload.blend.unwrap_or_default();
+    let requested_blend = payload.blend;
     let limit = payload.limit.unwrap_or(60).clamp(8, 200);
     let exclude = payload.exclude_track_ids.unwrap_or_default();
 
@@ -841,15 +882,21 @@ pub(super) async fn radio_artist(
         let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
         (g.db.clone(), lastfm, g.lastfm_similar_cache.clone())
     };
-
-    let mut queue = crate::services::radio::orchestrate_artist(
-        &db,
-        lastfm.as_ref(),
-        Some(&lastfm_similar_cache),
-        payload.seed_artist_id,
+    let preferences = radio_preferences(&db);
+    let blend = requested_blend.unwrap_or(preferences.blend);
+    let station = crate::server::routes::radio_station::StationContext {
+        state: &state,
+        db: &db,
+        lastfm: lastfm.as_ref(),
+        cache: &lastfm_similar_cache,
+    };
+    let queue = crate::server::routes::radio_station::build_station(
+        &station,
+        crate::server::routes::radio_station::StationSeed::Artist(payload.seed_artist_id),
         blend,
         limit,
         &exclude,
+        preferences.source,
     )
     .await
     .map_err(|e| {
@@ -859,14 +906,6 @@ pub(super) async fn radio_artist(
             Json(json!({ "error": "radio orchestration failed" })),
         )
     })?;
-    add_tidal_mix_fallback(
-        &state,
-        &db,
-        TidalMixSeed::Artist(payload.seed_artist_id),
-        &mut queue.tracks,
-        limit,
-    )
-    .await;
 
     let (first_playable, pending_count) = build_radio_queue_and_spawn_resolvers(
         &state,

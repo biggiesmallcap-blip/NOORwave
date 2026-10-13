@@ -6,6 +6,30 @@ use crate::{AppEvent, SharedState};
 use std::sync::{Arc, atomic::AtomicU64};
 use tracing::error;
 
+/// Whether the listen still open on `track_id` would count as completed now.
+/// Read before the session is flushed. False when no open listen belongs to
+/// that track: an early skip and an unknown outcome are both "not completed".
+pub(crate) async fn open_listen_completed(state: &SharedState, track_id: Option<i64>) -> bool {
+    let Some(track_id) = track_id else {
+        return false;
+    };
+    let state = state.read().await;
+    let Some(session) = state
+        .active_listen_session
+        .as_ref()
+        .filter(|session| session.track_id == track_id)
+    else {
+        return false;
+    };
+    let now = chrono::Utc::now();
+    state
+        .db
+        .with_conn(|conn| queue::get_track_by_id(conn, track_id))
+        .ok()
+        .flatten()
+        .is_some_and(|track| session.completed_at(&track, now))
+}
+
 pub(crate) async fn record_transition_if_changed(
     state: &SharedState,
     previous_track_id: Option<i64>,

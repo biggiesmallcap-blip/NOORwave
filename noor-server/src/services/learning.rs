@@ -2099,7 +2099,12 @@ pub async fn start_training(
             None,
             0,
         )?;
-        queries::update_embedding_model_metrics(conn, model.id, "ready", Some(&metrics_json))?;
+        queries::update_embedding_model_metrics(
+            conn,
+            model.id,
+            evaluated_model_status(should_activate),
+            Some(&metrics_json),
+        )?;
         if should_activate {
             queries::activate_embedding_model(conn, model.id)?;
         }
@@ -2156,6 +2161,27 @@ pub fn load_active_learning_model(db: &Database) -> Result<Option<ActiveLearning
 
 /// At creativity 1.0 the nearest neighbor's score is discounted by this much.
 const CREATIVITY_REACH: f64 = 0.6;
+
+/// The row whose learned neighbors stand in for `seed_track_id`. A new
+/// release of a recording the model already knows (same ISRC) has no
+/// neighbors of its own until the next retrain, but the trained row's evidence
+/// is the same recording's evidence. Returns the seed itself when it has
+/// neighbors, has no ISRC, or no trained twin exists.
+pub fn recall_seed_for(db: &Database, seed_track_id: i64) -> i64 {
+    db.with_conn(|conn| {
+        let Some(model) = queries::get_selected_discovery_embedding_model(conn)? else {
+            return Ok(seed_track_id);
+        };
+        if queries::seed_has_neighbors(conn, model.id, seed_track_id)? {
+            return Ok(seed_track_id);
+        }
+        Ok(
+            queries::trained_recording_twin(conn, model.id, seed_track_id)?
+                .unwrap_or(seed_track_id),
+        )
+    })
+    .unwrap_or(seed_track_id)
+}
 
 pub fn radio_from_neighbors(
     db: &Database,
@@ -2565,12 +2591,6 @@ fn build_trainer_input(
     let album_sequences = queries::get_album_sequences(conn)?;
     let artist_sequences = queries::get_artist_sequences(conn)?;
     let genre_sequences = queries::get_genre_sequences(conn)?;
-    let favorite_ids = queries::get_favorite_track_ids(conn)?;
-    let favorite_sequences = favorite_ids
-        .chunks(8)
-        .filter(|chunk| chunk.len() > 1)
-        .map(|chunk| chunk.to_vec())
-        .collect::<Vec<_>>();
 
     let mut heldout_examples = Vec::new();
     let mut heldout_pairs = Vec::new();
@@ -2681,11 +2701,6 @@ fn build_trainer_input(
                 label: "genre_tracks".to_string(),
                 weight: 0.3,
                 sequences: genre_sequences,
-            },
-            TrainerSequenceGroup {
-                label: "favorites".to_string(),
-                weight: 1.2,
-                sequences: favorite_sequences,
             },
         ],
         evidence_groups: vec![
@@ -3026,6 +3041,14 @@ pub(crate) fn trainer_config_version_from_json(config_json: Option<&str>) -> i64
 /// only to a first activation, where there is nothing to compare against; a
 /// fixed floor mostly measured the trainer's own bugs (model 17 beat the active
 /// model 0.131 to 0.116 and was still held back).
+/// Status a trained model is saved with. Selection serves the newest `ready`
+/// model of the selected engine's family even when inactive (switching engines
+/// relies on that), so a model the activation gate turned down is kept for
+/// inspection as `rejected` and never served.
+fn evaluated_model_status(should_activate: bool) -> &'static str {
+    if should_activate { "ready" } else { "rejected" }
+}
+
 fn should_activate_model(metrics: &HashMap<String, f64>) -> bool {
     let get = |key: &str| metrics.get(key).copied();
     let coverage = get("coverage_ratio").unwrap_or(0.0);

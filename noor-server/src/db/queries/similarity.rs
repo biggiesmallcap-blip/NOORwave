@@ -1476,6 +1476,35 @@ pub fn seed_has_neighbors(conn: &Connection, model_id: i64, seed_id: i64) -> Res
     )?)
 }
 
+/// Longest length difference between two catalogue rows that still counts as
+/// the same cut of one ISRC (re-release padding, silence trims).
+pub const RECORDING_TWIN_MAX_DURATION_DELTA_MS: i64 = 3_000;
+
+/// Another catalogue row of the same recording as `track_id` (same ISRC,
+/// length within `RECORDING_TWIN_MAX_DURATION_DELTA_MS` when both are known)
+/// that has neighbors under `model_id`. The most played twin wins.
+pub fn trained_recording_twin(
+    conn: &Connection,
+    model_id: i64,
+    track_id: i64,
+) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT twin.id FROM tracks seed
+             JOIN tracks twin ON twin.isrc = seed.isrc AND twin.id != seed.id
+             WHERE seed.id = ?1 AND seed.isrc IS NOT NULL AND seed.isrc != ''
+               AND (seed.duration_ms IS NULL OR twin.duration_ms IS NULL
+                    OR ABS(seed.duration_ms - twin.duration_ms) <= ?3)
+               AND EXISTS (SELECT 1 FROM track_neighbors n
+                           WHERE n.model_id = ?2 AND n.track_id = twin.id)
+             ORDER BY twin.play_count DESC, twin.id ASC
+             LIMIT 1",
+            params![track_id, model_id, RECORDING_TWIN_MAX_DURATION_DELTA_MS],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 pub fn replace_seed_neighbors(
     conn: &Connection,
     model_id: i64,
@@ -2639,14 +2668,13 @@ pub fn get_completion_weighted_listen_edges(
            AND b.track_id != a.track_id
            AND (
                 (a.session_id IS NOT NULL AND a.session_id = b.session_id)
-                OR (
-                    (a.session_id IS NULL OR b.session_id IS NULL)
-                    -- julianday(): started_at is RFC 3339, datetime() output is not; text compares fail.
-                    AND julianday(b.started_at)
-                        BETWEEN julianday(a.started_at)
-                            AND julianday(a.started_at) + (?1 / 1440.0)
-                )
+                OR a.session_id IS NULL
+                OR b.session_id IS NULL
            )
+           -- The window applies inside a session too: one session can run all
+           -- day. julianday(): started_at is RFC 3339, datetime() output is
+           -- not, so text compares fail.
+           AND ABS(julianday(b.started_at) - julianday(a.started_at)) <= (?1 / 1440.0)
         ORDER BY a.started_at ASC, a.id ASC, b.started_at ASC, b.id ASC",
     )?;
     let rows = stmt
@@ -2834,12 +2862,4 @@ pub fn get_genre_sequences(conn: &Connection) -> Result<Vec<Vec<i64>>> {
         }
     }
     Ok(seqs)
-}
-
-pub fn get_favorite_track_ids(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt = conn
-        .prepare("SELECT id FROM tracks WHERE is_favorite = 1 ORDER BY play_count DESC, id ASC")?;
-    stmt.query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
 }

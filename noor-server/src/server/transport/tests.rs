@@ -5950,6 +5950,31 @@ async fn play_command_rejects_non_library_ids_without_touching_playback() {
 }
 
 #[tokio::test]
+async fn outgoing_listen_completion_comes_from_the_open_listen() {
+    // Manual Next used to record every transition as "previous completed".
+    let db = fresh_migrated_db();
+    seed_basic_tracks(&db);
+    let state = Arc::new(tokio::sync::RwLock::new(fresh_test_state(db)));
+    let open_listen = |track_id: i64, seconds_ago: i64| {
+        player::ActiveListenSession::start(
+            track_id,
+            chrono::Utc::now() - chrono::Duration::seconds(seconds_ago),
+            crate::db::models::ListenSource::Manual,
+            None,
+        )
+    };
+
+    state.write().await.active_listen_session = Some(open_listen(1, 20));
+    assert!(!super::listen::open_listen_completed(&state, Some(1)).await);
+
+    state.write().await.active_listen_session = Some(open_listen(1, 170));
+    assert!(super::listen::open_listen_completed(&state, Some(1)).await);
+    // The open listen belongs to another track: nothing is known about track 2.
+    assert!(!super::listen::open_listen_completed(&state, Some(2)).await);
+    assert!(!super::listen::open_listen_completed(&state, None).await);
+}
+
+#[tokio::test]
 async fn owned_queue_writes_are_skipped_once_superseded() {
     use super::generation::mutate_if_owner_current;
     let (state, handle, _, _) = cpal_fault_fixture().await;

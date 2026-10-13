@@ -1997,6 +1997,37 @@ fn completion_weighted_listen_edges_window_handles_rfc3339_rows() {
 }
 
 #[test]
+fn completion_weighted_listen_edges_cap_long_sessions_by_the_window() {
+    let conn = Connection::open_in_memory().expect("in-memory db");
+    schema::run_migrations(&conn).expect("migrations");
+    conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+        .expect("artist");
+    conn.execute(
+        "INSERT INTO tracks (id, title, artist_id, duration_ms)
+         VALUES (1,'A',1,180000),(2,'B',1,180000),(3,'C',1,180000)",
+        [],
+    )
+    .expect("tracks");
+    // One session left running all day: a shared session id is not enough to
+    // make listens six hours apart a co-listen.
+    conn.execute(
+        "INSERT INTO listen_history (id, track_id, started_at, duration_listened_ms, completed, session_id)
+         VALUES
+            (1, 1, '2026-10-01T10:00:00+00:00', 180000, 1, 'long'),
+            (2, 2, '2026-10-01T10:20:00+00:00', 180000, 1, 'long'),
+            (3, 3, '2026-10-01T16:00:00+00:00', 180000, 1, 'long')",
+        [],
+    )
+    .expect("listens");
+    let rows = get_completion_weighted_listen_edges(&conn, 45).expect("edges");
+    let pairs: Vec<(i64, i64)> = rows
+        .iter()
+        .map(|row| (row.from_track_id, row.to_track_id))
+        .collect();
+    assert_eq!(pairs, vec![(1, 2)]);
+}
+
+#[test]
 fn completion_weighted_listen_edges_downweight_skipped_tracks() {
     let conn = Connection::open_in_memory().expect("in-memory db");
     schema::run_migrations(&conn).expect("migrations");

@@ -1659,6 +1659,37 @@ export interface RadioResponse {
 
 export type RadioBlend = 'familiar' | 'mixed' | 'adventurous';
 
+/** Where stations find their tracks (Settings > Playback > Radio). */
+export type RadioStationSource = 'balanced' | 'lastfm' | 'tidal' | 'hybrid';
+
+export interface RadioSettings {
+	source: RadioStationSource;
+	/** Used by radio starts that don't ask for a blend. */
+	blend: RadioBlend;
+}
+
+/** A row in the blind radio comparison: a `TidalPlayable`, plus the library id
+ * when the pick is a library track (`tidal_id` is 0 for a local-only file). */
+export interface RadioCompareTrack extends TidalPlayable {
+	local_id: number | null;
+	/** Why a hard seed suggestion is a hard case. */
+	seed_reason?: string;
+}
+
+/** One station design's first tracks for a seed. `arm` is hidden until reveal. */
+export interface RadioCompareArm {
+	arm: string;
+	tracks: RadioCompareTrack[];
+	/** Why the list is short or empty, in plain words. */
+	note: string | null;
+}
+
+export interface RadioCompareResult {
+	seed: RadioCompareTrack;
+	blend: RadioBlend;
+	arms: RadioCompareArm[];
+}
+
 export type RadioSource = 'library' | 'lastfm' | 'engine' | 'tidal';
 
 export interface RadioCandidate {

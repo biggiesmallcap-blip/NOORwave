@@ -561,7 +561,9 @@ fn build_behavioral_embeddings(
                     let distance = (i as isize - j as isize).unsigned_abs();
                     let weighted = weight / (distance as f64).max(1.0);
                     *entry.entry(other).or_default() += weighted;
-                    *count_entry.entry(other).or_default() += 1;
+                    if is_listening {
+                        *count_entry.entry(other).or_default() += 1;
+                    }
                     let bucket = support_buckets
                         .entry(track_id)
                         .or_default()
@@ -591,15 +593,18 @@ fn build_behavioral_embeddings(
                 continue;
             }
             let weighted = group.base_weight * edge.weight;
+            let support = counts_as_support(edge.evidence_kind);
             *co.entry(edge.from_track_id)
                 .or_default()
                 .entry(edge.to_track_id)
                 .or_default() += weighted;
-            *co_count
-                .entry(edge.from_track_id)
-                .or_default()
-                .entry(edge.to_track_id)
-                .or_default() += 1;
+            if support {
+                *co_count
+                    .entry(edge.from_track_id)
+                    .or_default()
+                    .entry(edge.to_track_id)
+                    .or_default() += 1;
+            }
             add_support_bucket(
                 &mut support_buckets,
                 edge.from_track_id,
@@ -617,11 +622,13 @@ fn build_behavioral_embeddings(
                     .or_default()
                     .entry(edge.from_track_id)
                     .or_default() += weighted;
-                *co_count
-                    .entry(edge.to_track_id)
-                    .or_default()
-                    .entry(edge.from_track_id)
-                    .or_default() += 1;
+                if support {
+                    *co_count
+                        .entry(edge.to_track_id)
+                        .or_default()
+                        .entry(edge.from_track_id)
+                        .or_default() += 1;
+                }
                 add_support_bucket(
                     &mut support_buckets,
                     edge.to_track_id,
@@ -703,6 +710,20 @@ fn add_hashed_context(vec: &mut [f64], context_track_id: i64, weight: f64) {
         };
         vec[bucket] += sign * weight;
     }
+}
+
+/// Observed listening or provider evidence. Library structure (album, artist,
+/// genre, playlist, favorites) still shapes the vectors but is not support:
+/// support count drives edge confidence as if it had been heard.
+fn counts_as_support(kind: EvidenceKind) -> bool {
+    !matches!(
+        kind,
+        EvidenceKind::PlaylistAdjacency
+            | EvidenceKind::AlbumAdjacency
+            | EvidenceKind::ArtistAffinity
+            | EvidenceKind::GenreAffinity
+            | EvidenceKind::FavoriteAffinity
+    )
 }
 
 fn add_support_bucket(

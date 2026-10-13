@@ -1708,7 +1708,7 @@ export async function playTidalPlaylist(tidalUuid: string) {
 	}
 }
 
-export async function startArtistRadio(artistId: number, _seedTrackId?: number) {
+export async function startArtistRadio(artistId: number) {
 	if (!assertOnline()) return;
 	playerErrorStore.set(null);
 	const intentSeq = beginPlaybackIntent();
@@ -1730,7 +1730,7 @@ export async function startArtistRadio(artistId: number, _seedTrackId?: number) 
 		showToast(`Radio from ${queue.seed.title}`, 'success');
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
-		setError('start artist radio', error, () => startArtistRadio(artistId, _seedTrackId));
+		setError('start artist radio', error, () => startArtistRadio(artistId));
 	} finally {
 		finishPlaybackIntent(intentSeq);
 	}
@@ -2146,39 +2146,11 @@ export async function startTidalSongRadio(track: TidalPlayable): Promise<void> {
 			return;
 		}
 	}
-	// Try discovery radio seeded directly by Tidal ID (only works if track is already in library)
-	try {
-		const { tracks } = await api.getRadioTracks({ seed_tidal_id: track.tidal_id, limit: 40 });
-		if (!isLatestPlaybackIntent(intentSeq)) {
-			dismissToast(loadingToastId);
-			return;
-		}
-		const radioIds = tracks.map((t) => t.track_id);
-		if (radioIds.length > 0) {
-			await loadQueueAndPlay(radioIds, { intentSeq });
-			dismissToast(loadingToastId);
-			if (!isLatestPlaybackIntent(intentSeq)) return;
-			showToast(`Radio from ${trackLabel(track)}`, 'success');
-			playerErrorStore.set(null);
-			return;
-		}
-	} catch (error) {
-		// 404 = track not yet in library index — fall through to silent import.
-		// Any other error is a real failure.
-		if (!isLatestPlaybackIntent(intentSeq)) {
-			dismissToast(loadingToastId);
-			return;
-		}
-		if (!(error instanceof ApiError && error.status === 404)) {
-			dismissToast(loadingToastId);
-			setError('start Tidal radio', error, () => startTidalSongRadio(track));
-			showToast(`Radio failed`, 'error');
-			return;
-		}
-	}
-
-	// Fallback: silently import the track as a tidal_stream entry (invisible in library grids)
-	// so the radio engine can use it as a seed, then run song radio from the resulting local ID.
+	// One station path for every Song Radio start. Import returns the existing
+	// local row for a track already in the library and otherwise adds it as an
+	// invisible tidal_stream entry; Song Radio then runs from that local id, so
+	// TIDAL-track starts get the same lanes, candidate gate, TIDAL mix fallback
+	// and continuation as library starts.
 	try {
 		const { local_id } = await api.importTidalTrackForRadio(track);
 		if (!isLatestPlaybackIntent(intentSeq)) {
