@@ -847,6 +847,93 @@ pub async fn refresh_lastfm_sightings_for_track(
     Ok(report.lastfm_sightings_upserted)
 }
 
+/// Source tag for picks from TIDAL's own track mix ("more like this").
+pub const TIDAL_MIX_SIGHTING_SOURCE: &str = "tidal_mix";
+
+/// Similarity for TIDAL mix picks, by mix position: first 0.7, last 0.3.
+/// TIDAL's order is its ranking; the range sits alongside Last.fm match
+/// scores so neither lane drowns the other in automix's external picks.
+fn tidal_mix_similarity(index: usize, total: usize) -> f64 {
+    0.7 - 0.4 * index as f64 / total.max(1) as f64
+}
+
+/// True when the seed already has unexpired TIDAL mix picks stored.
+pub fn has_fresh_tidal_mix_sightings(conn: &rusqlite::Connection, track_id: i64) -> bool {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM external_track_candidate_sightings
+         WHERE seed_track_id = ?1 AND source = ?2
+           AND expires_at > datetime('now'))",
+        rusqlite::params![track_id, TIDAL_MIX_SIGHTING_SOURCE],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+/// Store TIDAL's track mix for a seed as external picks, so "Include new"
+/// works without Last.fm. The seed itself is skipped. Returns sightings stored.
+pub fn persist_tidal_mix_sightings(
+    conn: &rusqlite::Connection,
+    seed_track_id: i64,
+    seed_tidal_id: Option<i64>,
+    mix: Vec<TidalTrack>,
+    now: chrono::NaiveDateTime,
+) -> Result<usize> {
+    let expires_at = (now + chrono::Duration::days(30))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let total = mix.len();
+    let mut stored = 0usize;
+    for (index, track) in mix.into_iter().enumerate() {
+        if Some(track.id) == seed_tidal_id {
+            continue;
+        }
+        let row = external_tidal_candidate_from_track(track);
+        if row.tidal_id <= 0 || row.title.trim().is_empty() || row.artist_name.trim().is_empty() {
+            continue;
+        }
+        let genre_tags_json = if row.genre_tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&row.genre_tags)?)
+        };
+        let candidate = queries::upsert_external_track_candidate(
+            conn,
+            &queries::ExternalTrackCandidateUpsert {
+                tidal_id: Some(row.tidal_id),
+                mbid: None,
+                dedupe_key: external_candidate_dedupe_key(
+                    Some(row.tidal_id),
+                    None,
+                    &row.artist_name,
+                    &row.title,
+                    row.duration_ms,
+                ),
+                title: row.title.clone(),
+                artist_name: row.artist_name.clone(),
+                genre_tags_json,
+                duration_ms: row.duration_ms,
+                expires_at: expires_at.clone(),
+            },
+        )?;
+        queries::upsert_external_candidate_sighting(
+            conn,
+            &queries::ExternalCandidateSightingUpsert {
+                candidate_id: candidate.id,
+                seed_track_id,
+                source: TIDAL_MIX_SIGHTING_SOURCE.to_string(),
+                source_payload_json: Some(
+                    serde_json::json!({ "tidal_id": row.tidal_id, "mix_rank": index + 1 })
+                        .to_string(),
+                ),
+                similarity: Some(tidal_mix_similarity(index, total)),
+                expires_at: expires_at.clone(),
+            },
+        )?;
+        stored += 1;
+    }
+    Ok(stored)
+}
+
 pub fn persist_external_provider_refresh(
     conn: &rusqlite::Connection,
     seeds: &[EmbeddingTrackRow],

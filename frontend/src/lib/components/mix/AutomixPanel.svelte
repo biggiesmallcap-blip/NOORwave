@@ -367,7 +367,7 @@
 		<div class="session-row">
 			<span class="row-label">Queue source</span>
 			<div class="chips">
-				<FilterChip pressed={$automixDiscoverNew} onclick={toggleDiscoverNew} disabled={saving} title="Mix in tracks from outside your library that Last.fm links to what is playing; more of them when your library knows little about it. Radio stations keep to their own picks.">Include new</FilterChip>
+				<FilterChip pressed={$automixDiscoverNew} onclick={toggleDiscoverNew} disabled={saving} title="Mix in tracks from outside your library that TIDAL mixes and Last.fm link to what is playing; more of them when your library knows little about it. Radio stations keep to their own picks.">Include new</FilterChip>
 			</div>
 		</div>
 		<div class="session-row">

@@ -1228,7 +1228,13 @@ fn lastfm_two_hop_candidates(
     });
     rows.unwrap_or_default()
         .into_iter()
-        .map(|row| RadioCandidate {
+        .map(|row| {
+            // The sighted lane also holds TIDAL mix picks warmed for automix.
+            let tidal_mix =
+                row.source.as_deref() == Some(crate::services::learning::TIDAL_MIX_SIGHTING_SOURCE);
+            (row, tidal_mix)
+        })
+        .map(|(row, tidal_mix)| RadioCandidate {
             track_id: 0,
             tidal_track_id: row.tidal_id,
             title: row.title,
@@ -1238,8 +1244,16 @@ fn lastfm_two_hop_candidates(
             duration_ms: row.duration_ms,
             isrc: None,
             is_in_library: false,
-            source: RadioSource::Lastfm,
-            reason: format!("Last.fm 2-hop {:.2}", row.score),
+            source: if tidal_mix {
+                RadioSource::Tidal
+            } else {
+                RadioSource::Lastfm
+            },
+            reason: if tidal_mix {
+                format!("TIDAL mix 2-hop {:.2}", row.score)
+            } else {
+                format!("Last.fm 2-hop {:.2}", row.score)
+            },
             similarity_score: row.score.clamp(0.0, 1.0),
             confidence: None,
             candidate_in_degree_percentile: None,

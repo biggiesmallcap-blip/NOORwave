@@ -2848,6 +2848,66 @@ fn include_new_uses_the_lastfm_lane_and_skips_weak_links() {
 }
 
 #[test]
+fn include_new_reads_the_anchor_seed_and_labels_tidal_mix_picks() {
+    // Playing an automix pick: the external lane still reaches the track the
+    // listener chose (the session anchor), whose TIDAL mix was warmed when it
+    // played, and the pick says where it came from.
+    let conn = conn();
+    let tracks = queue::get_tracks_by_ids(&conn, &[1, 2]).unwrap();
+    queue::append_tracks(&conn, &tracks[..1], "user").unwrap();
+    queue::append_tracks(&conn, &tracks[1..], "automix").unwrap();
+    conn.execute(
+        "UPDATE playback_state
+         SET current_track_id = 2, position_ms = 0, is_playing = 1, automix_enabled = 1,
+             automix_allow_external = 0, automix_discover_new = 1, automix_use_learning = 0",
+        [],
+    )
+    .unwrap();
+    let candidate = queries::upsert_external_track_candidate(
+        &conn,
+        &queries::ExternalTrackCandidateUpsert {
+            tidal_id: Some(99201),
+            mbid: None,
+            dedupe_key: "tidal:99201".to_string(),
+            title: "Anchor Mix Pick".to_string(),
+            artist_name: "Outside Artist".to_string(),
+            genre_tags_json: None,
+            duration_ms: Some(180_000),
+            expires_at: "2099-01-01 00:00:00".to_string(),
+        },
+    )
+    .unwrap();
+    queries::upsert_external_candidate_sighting(
+        &conn,
+        &queries::ExternalCandidateSightingUpsert {
+            candidate_id: candidate.id,
+            seed_track_id: 1,
+            source: crate::services::learning::TIDAL_MIX_SIGHTING_SOURCE.to_string(),
+            source_payload_json: None,
+            similarity: Some(0.7),
+            expires_at: "2099-01-01 00:00:00".to_string(),
+        },
+    )
+    .unwrap();
+
+    let queue = ensure_automix_queue_depth(&conn, 2, false).unwrap();
+
+    let pick = queue
+        .iter()
+        .find(|item| item.source == "automix-new")
+        .expect("anchor's TIDAL mix pick");
+    assert_eq!(pick.track.title, "Anchor Mix Pick");
+    assert!(
+        pick.reason
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("TIDAL mix"),
+        "reason: {:?}",
+        pick.reason
+    );
+}
+
+#[test]
 fn ensure_automix_external_enabled_appends_pending_sidecar_rows() {
     let conn = conn();
     let current = queue::get_tracks_by_ids(&conn, &[1]).unwrap().remove(0);
