@@ -32,11 +32,15 @@
 		lenses,
 		facets,
 		total,
+		at = null,
 		onchange,
 	}: {
 		lenses: ArchiveLenses;
 		facets: ArchiveResponse['facets'] | null;
 		total: number | null;
+		/** Offset of the first song on screen, while the row is docked:
+		 *  the count then says where you are ("Song 35,214 of 127,281"). */
+		at?: number | null;
 		onchange: (next: ArchiveLenses) => void;
 	} = $props();
 
@@ -241,7 +245,11 @@
 
 	<div class="tools">
 		<span class="total" aria-live="polite">
-			{#if total !== null}{total.toLocaleString()} {total === 1 ? 'song' : 'songs'}{/if}
+			{#if total !== null && at !== null && total > 0}
+				Song {Math.min(at + 1, total).toLocaleString()} of {total.toLocaleString()}
+			{:else if total !== null}
+				{total.toLocaleString()} {total === 1 ? 'song' : 'songs'}
+			{/if}
 		</span>
 		<Segmented
 			options={SOURCES}

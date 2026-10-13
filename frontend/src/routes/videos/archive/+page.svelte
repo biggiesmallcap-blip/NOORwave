@@ -68,6 +68,8 @@
 	let gridEl = $state<HTMLDivElement | null>(null);
 	/** Index into `jumps` of the section at the top of the screen. */
 	let section = $state(-1);
+	/** Offset in the whole result of the first song on screen. */
+	let firstOffset = $state(0);
 	/** Earlier pages load only once the listener scrolls up after a jump,
 	 *  not the moment the jumped-to row lands at the top. */
 	let earlierArmed = $state(false);
@@ -133,10 +135,11 @@
 		updateSection();
 	}
 
-	/** The section of the first row on screen, for the rail's mark. */
+	/** The first song on screen: its place in the whole result (for the
+	 *  docked count) and its section (for the rail's mark). */
 	function updateSection() {
 		const grid = gridEl;
-		if (!grid || jumps.length === 0) {
+		if (!grid) {
 			section = -1;
 			return;
 		}
@@ -153,7 +156,8 @@
 			} else lo = mid + 1;
 		}
 		const offset = feedState.base + first;
-		let at = 0;
+		firstOffset = offset;
+		let at = jumps.length > 0 ? 0 : -1;
 		for (let i = 0; i < jumps.length; i += 1) if (jumps[i].offset <= offset) at = i;
 		section = at;
 	}
@@ -311,10 +315,11 @@
 		<div class="dock-sentinel" bind:this={dockSentinel} aria-hidden="true"></div>
 		<div class="lens-dock" class:docked class:hidden={docked && dockHidden} bind:clientHeight={dockHeight}>
 			{#if docked}
-				<button type="button" class="to-top" onclick={() => void toTop()} aria-label="Back to the top" title="Back to the top">
+				<button type="button" class="to-top" onclick={() => void toTop()} aria-label="Back to the top" title="Back to the first song">
 					<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-						<path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+						<path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
 					</svg>
+					Top
 				</button>
 			{/if}
 			<div class="dock-lenses">
@@ -322,6 +327,7 @@
 					{lenses}
 					{facets}
 					total={firstLoad && !facets ? null : feedState.total}
+					at={docked ? firstOffset : null}
 					onchange={setLenses}
 				/>
 			</div>
@@ -480,22 +486,28 @@
 		min-width: 0;
 	}
 
+	/* The way back up, plainly labelled and in the accent so it is found
+	   at a glance in the docked row. */
 	.to-top {
-		display: grid;
-		place-items: center;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
 		flex: none;
-		width: var(--control-h);
 		height: var(--control-h);
-		border: 1px solid var(--border-subtle);
-		border-radius: 50%;
-		background: none;
-		color: var(--text-secondary);
+		padding: 0 14px 0 11px;
+		border: 1px solid var(--accent-line);
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--accent-strong);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		white-space: nowrap;
 		cursor: pointer;
+		transition: background var(--motion-fast);
 	}
 
 	.to-top:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
+		background: color-mix(in srgb, var(--accent-soft) 60%, var(--accent) 22%);
 	}
 
 	.to-top:focus-visible {
