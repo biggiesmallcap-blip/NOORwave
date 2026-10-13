@@ -2660,7 +2660,7 @@ async fn runtime_exit_listener_still_clears_dead_output_if_persisted_pause_fails
 #[test]
 fn tidal_playlist_tracks_cache_returns_fresh_entries_and_expires_stale_entries() {
     let cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
-    let key = tidal_playlist_tracks_cache_key("AU", "playlist-uuid", 100, 0);
+    let key = tidal_playlist_tracks_cache_key("AU", "playlist-uuid");
     let tracks: Vec<TidalTrack> = Vec::new();
 
     put_cached_tidal_playlist_tracks(&cache, key.clone(), tracks.clone());

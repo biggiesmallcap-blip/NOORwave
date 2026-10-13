@@ -1505,18 +1505,20 @@ fn normalize_tidal_timestamp(raw: Option<&str>) -> Option<String> {
     Some(format!("{date} {time}"))
 }
 
-/// Whether a playlist's tracks need re-fetching from TIDAL.
-///
-/// `previous` is the locally stored `(tidal_last_updated, track_count)`, absent
-/// for a playlist we have never seen. Re-pull whenever TIDAL reports a change,
-/// whenever the counts disagree, and whenever either side's timestamp is
-/// missing - an unknown is not evidence that nothing changed.
+/// Insert or refresh a TIDAL playlist's index row by uuid.
 const TIDAL_PLAYLIST_INDEX_UPSERT: &str = "INSERT INTO playlists (tidal_uuid, name, description, track_count, tidal_last_updated, updated_at)
     VALUES (?1, ?2, ?3, 0, NULL, COALESCE(?4, datetime('now')))
     ON CONFLICT(tidal_uuid) DO UPDATE SET
         name = excluded.name,
         description = excluded.description,
         updated_at = COALESCE(?4, playlists.updated_at)";
+
+/// Whether a playlist's tracks need re-fetching from TIDAL.
+///
+/// `previous` is the locally stored `(tidal_last_updated, track_count)`, absent
+/// for a playlist we have never seen. Re-pull whenever TIDAL reports a change,
+/// whenever the counts disagree, and whenever either side's timestamp is
+/// missing - an unknown is not evidence that nothing changed.
 
 fn playlist_needs_pull(
     previous: Option<(Option<&str>, i64)>,
