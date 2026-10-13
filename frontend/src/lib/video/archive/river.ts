@@ -1,5 +1,5 @@
-// The era river: the decade facet drawn as a small area chart you drag across
-// to pick a range of decades. Geometry only; EraRiver.svelte owns the DOM.
+// The era lens geometry: the decade facet as columns you click or drag across
+// to pick a range of decades. Geometry only; EraBars.svelte owns the DOM.
 
 export interface DecadeCount {
 	decade: number;

@@ -8,7 +8,8 @@ const lib = join(here, '../../../lib/video/archive');
 const page = readFileSync(join(here, '+page.svelte'), 'utf8');
 const tile = readFileSync(join(lib, 'ArchiveTile.svelte'), 'utf8');
 const lensBar = readFileSync(join(lib, 'LensBar.svelte'), 'utf8');
-const river = readFileSync(join(lib, 'EraRiver.svelte'), 'utf8');
+const era = readFileSync(join(lib, 'EraBars.svelte'), 'utf8');
+const lens = readFileSync(join(lib, 'LensPopover.svelte'), 'utf8');
 const drawer = readFileSync(join(lib, 'VersionsDrawer.svelte'), 'utf8');
 const setlist = readFileSync(join(lib, 'ConcertSetlist.svelte'), 'utf8');
 
@@ -65,21 +66,31 @@ describe('archive tile contract', () => {
 });
 
 describe('lens bar contract', () => {
-	test('every lens shows a live count from the facets', () => {
+	test('one row of lens pills, every choice with a live count from the facets', () => {
 		expect(lensBar).toContain("facets?.scene");
 		expect(lensBar).toContain('hueColor(scene.hue)');
 		expect(lensBar).toContain('chipCount(cutCounts.get(cut) ?? 0)');
 		expect(lensBar).toContain('count(depthCounts, option.value)');
 		expect(lensBar).toContain('count(lengthCounts, option.value)');
-		expect(lensBar).toContain('<EraRiver');
+		expect(lensBar).toContain('<EraBars');
 		expect(lensBar).toContain('options={SOURCES}');
 		expect(lensBar).toContain('options={SORTS}');
+		for (const label of ['Scene', 'Era', 'Cut', 'Depth', 'Length']) {
+			expect(lensBar).toContain(`label="${label}"`);
+		}
 	});
 
-	test('the era river is draggable and has keyboard decade buttons', () => {
-		expect(river).toContain('onpointerdown={onPointerDown}');
-		expect(river).toContain('setPointerCapture(event.pointerId)');
-		expect(river).toContain('onclick={(event) => pickDecade(d.decade, event.shiftKey)}');
+	test('a lens panel is portalled, closes on Escape and outside presses, and keeps typing to itself', () => {
+		expect(lens).toContain('use:portal');
+		expect(lens).toContain("if (event.key === 'Escape')");
+		expect(lens).toContain("window.addEventListener('pointerdown', onPointerDown, true);");
+		expect(lens).toContain('event.stopPropagation();');
+	});
+
+	test('the era bars are draggable and have keyboard decade buttons', () => {
+		expect(era).toContain('onpointerdown={onPointerDown}');
+		expect(era).toContain('setPointerCapture(event.pointerId)');
+		expect(era).toContain('onclick={(event) => pickDecade(d.decade, event.shiftKey)}');
 	});
 });
 
