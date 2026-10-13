@@ -173,14 +173,47 @@
 		queueMicrotask(updateSection);
 	});
 
+	// Earlier pages come in above without moving what is on screen. The
+	// browser's own scroll anchoring does not hold at scroll offset 0 (the
+	// very top), where the new rows would push the list down, leave the top
+	// sentinel in view and pull in page after page back to the start. So
+	// the first row on screen is noted before the prepend and put back to
+	// the same height after it.
+	let earlierAnchor: { key: string; top: number } | null = null;
+
+	function loadEarlier() {
+		const grid = gridEl;
+		const el = scroller();
+		if (grid && el) {
+			const top = el.getBoundingClientRect().top;
+			for (const tile of grid.children) {
+				const rect = (tile as HTMLElement).getBoundingClientRect();
+				const key = (tile as HTMLElement).dataset.key;
+				if (rect.bottom > top && key) {
+					earlierAnchor = { key, top: rect.top };
+					break;
+				}
+			}
+		}
+		feed.loadEarlier();
+	}
+
+	$effect(() => {
+		void feedState.base;
+		const anchor = earlierAnchor;
+		const el = scroller();
+		if (!anchor || !el || feedState.loadingEarlier) return;
+		earlierAnchor = null;
+		const tile = gridEl?.querySelector<HTMLElement>(`[data-key="${CSS.escape(anchor.key)}"]`);
+		if (tile) el.scrollTop += tile.getBoundingClientRect().top - anchor.top;
+	});
+
 	// Scrolling up past the first loaded row brings the page before it in.
-	// Prepending above keeps the screen where it is (the browser anchors
-	// the scroll to the rows in view).
 	$effect(() => {
 		if (!topSentinel || !earlierArmed || feedState.base <= 0 || feedState.loadingEarlier) return;
 		const observer = new IntersectionObserver(
 			(entries) => {
-				if (entries.some((entry) => entry.isIntersecting)) feed.loadEarlier();
+				if (entries.some((entry) => entry.isIntersecting)) loadEarlier();
 			},
 			{ rootMargin: '600px 0px' }
 		);
@@ -272,13 +305,13 @@
 			<div class="list">
 				{#if feedState.base > 0}
 					<div class="sentinel" bind:this={topSentinel} aria-hidden="true"></div>
-					<button type="button" class="earlier" disabled={feedState.loadingEarlier} onclick={() => feed.loadEarlier()}>
+					<button type="button" class="earlier" disabled={feedState.loadingEarlier} onclick={loadEarlier}>
 						{feedState.loadingEarlier ? 'Loading earlier songs...' : `${feedState.base.toLocaleString()} songs before these`}
 					</button>
 				{/if}
 				<div class="grid" class:dimmed={refreshing} bind:this={gridEl}>
 					{#each items as song, index (song.song_key)}
-						<div class="rise-in-card" style={`--rise-index: ${index % 24}`}>
+						<div class="rise-in-card" data-key={song.song_key} style={`--rise-index: ${index % 24}`}>
 							<ArchiveTile {song} onplay={play} onversions={(picked) => (openSong = picked)} />
 						</div>
 					{/each}
