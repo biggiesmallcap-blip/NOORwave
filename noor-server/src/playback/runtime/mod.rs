@@ -318,6 +318,31 @@ struct PlaybackRuntimeLoopState {
     silent_start_streak: u32,
 }
 
+impl PlaybackRuntimeLoopState {
+    /// Every deck slot that currently holds an engine.
+    fn live_engines(&self) -> impl Iterator<Item = &PlaybackEngine> {
+        [
+            self.engine.as_ref(),
+            self.next_engine.as_ref(),
+            self.fading_out_engine.as_ref(),
+            self.drop_preview_engine.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    fn live_engines_mut(&mut self) -> impl Iterator<Item = &mut PlaybackEngine> {
+        [
+            self.engine.as_mut(),
+            self.next_engine.as_mut(),
+            self.fading_out_engine.as_mut(),
+            self.drop_preview_engine.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn receive_runtime_command(
     state: &PlaybackRuntimeLoopState,
@@ -328,15 +353,7 @@ fn receive_runtime_command(
 ) -> std::result::Result<PlaybackRuntimeCommand, mpsc::RecvTimeoutError> {
     // Reconcile a failed output before accepting Resume. The diagnostic lives
     // on its stream, so replacement streams cannot inherit an old fault.
-    for engine in [
-        state.engine.as_ref(),
-        state.next_engine.as_ref(),
-        state.fading_out_engine.as_ref(),
-        state.drop_preview_engine.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for engine in state.live_engines() {
         if let Some(command) = engine.take_output_error() {
             return Ok(command);
         }
@@ -348,15 +365,7 @@ fn receive_runtime_command(
         Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvTimeoutError::Disconnected),
         Err(mpsc::TryRecvError::Empty) => {}
     }
-    for engine in [
-        state.engine.as_ref(),
-        state.next_engine.as_ref(),
-        state.fading_out_engine.as_ref(),
-        state.drop_preview_engine.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for engine in state.live_engines() {
         if let Some(command) = engine.shared.take_rt_command(event_tx) {
             return Ok(command);
         }
@@ -431,15 +440,7 @@ fn run_runtime_loop(
         #[cfg(target_os = "windows")]
         poll_exclusive_output_fault(&mut state, &event_tx);
         let mut output_running = false;
-        for engine in [
-            state.engine.as_ref(),
-            state.next_engine.as_ref(),
-            state.fading_out_engine.as_ref(),
-            state.drop_preview_engine.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for engine in state.live_engines() {
             let shared = &engine.shared;
             if !shared.paused.load(Ordering::SeqCst) && !shared.stopped.load(Ordering::SeqCst) {
                 output_running = true;
@@ -472,15 +473,7 @@ fn run_runtime_loop(
                 // rejected in-callback seek) - the callback itself must not
                 // touch tracing.
                 let mut default_output_changed = false;
-                for engine in [
-                    state.engine.as_ref(),
-                    state.next_engine.as_ref(),
-                    state.fading_out_engine.as_ref(),
-                    state.drop_preview_engine.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
-                {
+                for engine in state.live_engines() {
                     default_output_changed |= engine.shared.drain_deferred_rt_logs();
                 }
                 // A shared stream opened on "Default" keeps rendering to the
@@ -507,6 +500,19 @@ fn run_runtime_loop(
                 // has frozen on a hung TIDAL segment and, if so, force the queue
                 // forward (the audio callback can't, because a starved-but-not-
                 // finished engine emits no command).
+                // A panic while the PCM lock was held leaves the deck silent
+                // and unusable in place. Restart it at its position the way
+                // an explicit Resume does; a failed restart pauses with an
+                // error, which ends these retries.
+                if !state.user_paused
+                    && state.engine.as_ref().is_some_and(|engine| {
+                        engine.shared.buffer.is_poisoned()
+                            || engine.shared.handoff_source_prefix.is_poisoned()
+                    })
+                {
+                    warn!("Playback buffer poisoned; restarting the active track in place");
+                    let _ = command_tx.send(PlaybackRuntimeCommand::Resume);
+                }
                 let stall = stall_tracker.poll(&state);
                 if let Some(track_id) = stall.just_stalled {
                     let _ = event_tx.send(PlaybackRuntimeEvent::Stalled { track_id });
@@ -761,27 +767,17 @@ fn run_runtime_loop(
                     // Pause the active engine AND the fading-out engine (if any), so
                     // pressing pause during a crossfade actually stops all audio. The
                     // pre-decoded next engine is already paused so we don't touch it.
-                    if let Some(engine) = state.engine.as_mut() {
-                        match engine.pause() {
-                            Ok(()) => {
-                                let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
-                                    track_id: Some(engine.track_id),
-                                });
-                            }
-                            Err(error) => {
-                                fail_runtime_command(&mut state, &event_tx, "Pause", error);
-                            }
-                        }
+                    if let Some(engine) = state.engine.as_ref() {
+                        engine.pause();
+                        let _ = event_tx.send(PlaybackRuntimeEvent::Paused {
+                            track_id: Some(engine.track_id),
+                        });
                     }
-                    if let Some(engine) = state.fading_out_engine.as_mut()
-                        && let Err(error) = engine.pause()
-                    {
-                        fail_runtime_command(&mut state, &event_tx, "Pause", error);
+                    if let Some(engine) = state.fading_out_engine.as_ref() {
+                        engine.pause();
                     }
-                    if let Some(engine) = state.drop_preview_engine.as_mut()
-                        && let Err(error) = engine.pause()
-                    {
-                        fail_runtime_command(&mut state, &event_tx, "Pause", error);
+                    if let Some(engine) = state.drop_preview_engine.as_ref() {
+                        engine.pause();
                     }
                     // Instrumentation only (slice C0): correlate an explicit user
                     // pause with the render thread's idle-release timing in the logs.

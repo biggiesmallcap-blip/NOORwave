@@ -203,7 +203,6 @@ pub(super) fn handle_prepare_next(
     let LoopEnv {
         config,
         command_tx,
-        event_tx,
         device,
         output_config,
         output_sample_format,
@@ -243,8 +242,6 @@ pub(super) fn handle_prepare_next(
                 output_config,
                 *output_sample_format,
                 job,
-                event_tx.clone(),
-                state.device_sample_rate,
                 state.device_channels,
                 Arc::clone(volume_ctl),
                 pending_position,
@@ -282,7 +279,6 @@ pub(super) fn handle_prepare_drop_preview(
     let LoopEnv {
         config,
         command_tx,
-        event_tx,
         device,
         output_config,
         output_sample_format,
@@ -336,8 +332,6 @@ pub(super) fn handle_prepare_drop_preview(
                 output_config,
                 *output_sample_format,
                 job,
-                event_tx.clone(),
-                state.device_sample_rate,
                 state.device_channels,
                 Arc::clone(volume_ctl),
                 pending_position,
@@ -710,7 +704,7 @@ pub(super) fn handle_release_exclusive_now(
     .into_iter()
     .flatten()
     {
-        let _ = engine.pause();
+        engine.pause();
     }
     // The release listener retries while public transport says "playing".
     // Queue the pause acknowledgment before the renderer can report release.
@@ -733,15 +727,7 @@ pub(super) fn recover_poisoned_pcm(
     state: &mut PlaybackRuntimeLoopState,
     restart: impl FnOnce(&mut PlaybackRuntimeLoopState, PreparedPlaybackJob) -> Result<()>,
 ) -> Result<bool> {
-    let poisoned = [
-        &state.engine,
-        &state.next_engine,
-        &state.fading_out_engine,
-        &state.drop_preview_engine,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|engine| {
+    let poisoned = state.live_engines().any(|engine| {
         engine.shared.buffer.is_poisoned() || engine.shared.handoff_source_prefix.is_poisoned()
     });
     if !poisoned {
@@ -812,6 +798,15 @@ pub(super) fn handle_resume(
     let entry_output_rate = state.device_sample_rate;
     state.user_paused = false;
     state.silent_start_streak = 0;
+    #[cfg(target_os = "windows")]
+    let exclusive_rebuild = state.current_exclusive && state.exclusive_sink.needs_rebuild();
+    #[cfg(not(target_os = "windows"))]
+    let exclusive_rebuild = false;
+    let shared_rebuild =
+        !state.current_exclusive && state.live_engines().any(|engine| engine.output_faulted);
+    if exclusive_rebuild || shared_rebuild {
+        refresh_output_device(state, device);
+    }
     // On-demand re-grab: if exclusive mode is on and the active
     // engine's WASAPI stream self-released after idle, rebuild it
     // BEFORE unpausing so the decoder doesn't push samples into a
@@ -838,7 +833,6 @@ pub(super) fn handle_resume(
                 rebuild_rate,
                 release_grace_secs,
                 latency_mode,
-                command_tx.clone(),
                 event_tx.clone(),
             ) {
                 Ok(actual_rate) => {
@@ -860,8 +854,6 @@ pub(super) fn handle_resume(
                         output_config,
                         *output_sample_format,
                         rebuild_rate,
-                        command_tx,
-                        event_tx,
                     ) {
                         stop_all_engines(state);
                         state.exclusive_sink.clear();
@@ -887,11 +879,8 @@ pub(super) fn handle_resume(
                 device,
                 output_config,
                 *output_sample_format,
-                command_tx.clone(),
-                event_tx.clone(),
                 false,
                 Some(output_config.sample_rate),
-                0,
             )
         }) {
             state.user_paused = true;
@@ -899,35 +888,35 @@ pub(super) fn handle_resume(
             return ControlFlow::Continue(());
         }
     }
-    if let Some(engine) = state.engine.as_mut() {
-        match engine.resume() {
-            Ok(()) => {
-                let _ = event_tx.send(PlaybackRuntimeEvent::Resumed {
-                    track_id: Some(engine.track_id),
-                });
-            }
-            Err(error) => {
-                fail_runtime_command(state, event_tx, "Resume", error);
-                return ControlFlow::Continue(());
-            }
-        }
+    if let Some(engine) = state.engine.as_ref() {
+        engine.resume();
+        let _ = event_tx.send(PlaybackRuntimeEvent::Resumed {
+            track_id: Some(engine.track_id),
+        });
     }
-    if let Some(engine) = state.fading_out_engine.as_mut()
-        && let Err(error) = engine.resume()
-    {
-        fail_runtime_command(state, event_tx, "Resume", error);
-        return ControlFlow::Continue(());
+    if let Some(engine) = state.fading_out_engine.as_ref() {
+        engine.resume();
     }
+    // A preview deck only clears a pending pause fade here; a preview that has
+    // not started yet stays paused until its trigger.
     if let Some(engine) = state
         .drop_preview_engine
-        .as_mut()
+        .as_ref()
         .filter(|engine| !engine.shared.paused.load(Ordering::SeqCst))
-        && let Err(error) = engine.resume()
     {
-        fail_runtime_command(state, event_tx, "Resume", error);
-        return ControlFlow::Continue(());
+        engine.resume();
     }
     ControlFlow::Continue(())
+}
+
+/// An unplugged or re-enumerated endpoint invalidates the handle the runtime
+/// opened before the fault. Rebuilding output needs a fresh handle for the
+/// selected endpoint; keep the old one if the selection cannot be resolved.
+fn refresh_output_device(state: &mut PlaybackRuntimeLoopState, device: &mut cpal::Device) {
+    if let Some(fresh) = resolve_device(&state.current_device_selection) {
+        state.device_name = device_display_name(&fresh);
+        *device = fresh;
+    }
 }
 
 /// An engine reached its end or failed; advance, promote or stop.
@@ -944,15 +933,7 @@ pub(super) fn handle_track_terminal(
     outcome: PlaybackTerminalReason,
 ) -> ControlFlow<()> {
     if decoder_stop.load(Ordering::Acquire)
-        || ![
-            &state.engine,
-            &state.next_engine,
-            &state.fading_out_engine,
-            &state.drop_preview_engine,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|engine| {
+        || !state.live_engines().any(|engine| {
             engine.track_id == track_id
                 && engine.generation == generation
                 && Arc::ptr_eq(&engine.shared.stopped, &decoder_stop)
@@ -1069,8 +1050,8 @@ pub(super) fn handle_track_terminal(
             }
         }
         None => {
-            // The terminal is one-shot (`finished_notified` is
-            // latched before the send), so a terminal that
+            // The terminal is one-shot (`finished_notified`
+            // latches once it is queued), so a terminal that
             // matches no live slot is an advance that will
             // never be re-issued from the audio callback. The
             // stall watchdog is the backstop; surface it at
@@ -1110,15 +1091,7 @@ pub(super) fn handle_cpal_output_error(
 ) {
     if !output_live.load(Ordering::Acquire)
         || decoder_stop.load(Ordering::Acquire)
-        || ![
-            &state.engine,
-            &state.next_engine,
-            &state.fading_out_engine,
-            &state.drop_preview_engine,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|engine| {
+        || !state.live_engines().any(|engine| {
             engine.track_id == track_id
                 && engine.generation == generation
                 && !engine.output_faulted
@@ -1128,15 +1101,7 @@ pub(super) fn handle_cpal_output_error(
         return;
     }
     state.user_paused = true;
-    for engine in [
-        &mut state.engine,
-        &mut state.next_engine,
-        &mut state.fading_out_engine,
-        &mut state.drop_preview_engine,
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for engine in state.live_engines_mut() {
         if Arc::ptr_eq(&engine.shared.stopped, &decoder_stop) {
             engine.output_faulted = true;
         }
@@ -1183,15 +1148,9 @@ pub(super) fn recover_faulted_shared_outputs(
     mut rebuild: impl FnMut(&mut PlaybackEngine) -> Result<u32>,
 ) -> Result<()> {
     let mut failure = None;
-    for engine in [
-        &mut state.engine,
-        &mut state.next_engine,
-        &mut state.fading_out_engine,
-        &mut state.drop_preview_engine,
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|engine| engine.output_faulted)
+    for engine in state
+        .live_engines_mut()
+        .filter(|engine| engine.output_faulted)
     {
         match rebuild(engine) {
             Ok(_) => engine.output_faulted = false,
@@ -1250,7 +1209,6 @@ pub(super) fn handle_device_swap(
         return ControlFlow::Continue(());
     }
     let LoopEnv {
-        command_tx,
         event_tx,
         device,
         output_config,
@@ -1308,18 +1266,6 @@ pub(super) fn handle_device_swap(
         );
         return ControlFlow::Continue(());
     }
-    // A previous shared fallback can run at the device's mix rate. An explicit
-    // exclusive retry still follows the active source's native rate.
-    let desired_sample_rate = desired_sample_rate.or_else(|| {
-        (exclusive && sample_rate_follow)
-            .then(|| {
-                state
-                    .engine
-                    .as_ref()
-                    .and_then(|engine| engine.job.output_sample_rate)
-            })
-            .flatten()
-    });
     let mut desired_rate = device_swap_target_sample_rate(
         desired_sample_rate,
         sample_rate_follow,
@@ -1371,7 +1317,6 @@ pub(super) fn handle_device_swap(
                 desired_rate,
                 exclusive_release_grace_secs,
                 exclusive_latency_mode.clone(),
-                command_tx.clone(),
                 event_tx.clone(),
             ) {
                 Ok(actual_rate) => {
@@ -1386,8 +1331,6 @@ pub(super) fn handle_device_swap(
                         &mut actual_config,
                         new_format,
                         desired_rate,
-                        command_tx,
-                        event_tx,
                     ) {
                         swap_failed = true;
                         swap_errors.push(error);
@@ -1399,25 +1342,9 @@ pub(super) fn handle_device_swap(
         #[cfg(target_os = "windows")]
         state.exclusive_sink.clear();
 
-        for engine_slot in [
-            state.engine.as_mut(),
-            state.next_engine.as_mut(),
-            state.fading_out_engine.as_mut(),
-            state.drop_preview_engine.as_mut(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            match engine_slot.swap_stream(
-                &new_device,
-                &new_config,
-                new_format,
-                command_tx.clone(),
-                event_tx.clone(),
-                false,
-                desired_rate,
-                exclusive_release_grace_secs,
-            ) {
+        for engine_slot in state.live_engines_mut() {
+            match engine_slot.swap_stream(&new_device, &new_config, new_format, false, desired_rate)
+            {
                 Ok(actual_rate) => {
                     actual_config.sample_rate = actual_rate;
                 }

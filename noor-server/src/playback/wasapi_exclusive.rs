@@ -32,9 +32,7 @@ use windows_sys::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
 };
 
-use super::runtime::{
-    PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackSharedState, fill_f32_from_shared,
-};
+use super::runtime::{PlaybackRuntimeEvent, PlaybackSharedState, fill_f32_from_shared};
 use crate::db::audio_settings::ExclusiveLatencyMode;
 
 // AUDCLNT_E_* HRESULTs from <audioclient.h>. Raw i32 reps so we don't have to
@@ -518,7 +516,6 @@ pub fn build_exclusive_stream(
     grace_secs: u32,
     latency_mode: ExclusiveLatencyMode,
     source_bank: Arc<ExclusiveRenderSourceBank>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     output_identity: Arc<()>,
 ) -> std::result::Result<ExclusiveStream, ExclusiveInitFailure> {
@@ -549,7 +546,6 @@ pub fn build_exclusive_stream(
                     grace_secs,
                     latency_mode,
                     render_source_bank,
-                    command_tx,
                     event_tx,
                     output_identity,
                     shutdown_clone,
@@ -630,7 +626,6 @@ fn run_render_thread(
     grace_secs: u32,
     latency_mode: ExclusiveLatencyMode,
     source_bank: Arc<ExclusiveRenderSourceBank>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     output_identity: Arc<()>,
     shutdown: Arc<AtomicBool>,
@@ -686,8 +681,6 @@ fn run_render_thread(
         blockalign,
         fmt_tag,
         &source_bank,
-        &command_tx,
-        &event_tx,
         &mut f32_scratch,
         &mut mix_scratch,
         &mut byte_buf,
@@ -785,8 +778,6 @@ fn run_render_thread(
             blockalign,
             fmt_tag,
             &source_bank,
-            &command_tx,
-            &event_tx,
             &mut f32_scratch,
             &mut mix_scratch,
             &mut byte_buf,
@@ -874,8 +865,6 @@ fn write_available_wasapi_frames(
     blockalign: usize,
     fmt_tag: Format,
     source_bank: &ExclusiveRenderSourceBank,
-    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
     f32_scratch: &mut [f32],
     mix_scratch: &mut [f32],
     byte_buf: &mut [u8],
@@ -899,8 +888,7 @@ fn write_available_wasapi_frames(
     let f32_scratch = &mut f32_scratch[..interleaved];
     let mix_scratch = &mut mix_scratch[..interleaved];
     let byte_buf = &mut byte_buf[..bytes_needed];
-    let sources_paused =
-        mix_published_sources(source_bank, f32_scratch, mix_scratch, command_tx, event_tx);
+    let sources_paused = mix_published_sources(source_bank, f32_scratch, mix_scratch);
     let nonzero_audio = f32_scratch.iter().any(|sample| sample.abs() > f32::EPSILON);
 
     convert_f32_to_bytes(
@@ -926,15 +914,13 @@ fn mix_published_sources(
     source_bank: &ExclusiveRenderSourceBank,
     out: &mut [f32],
     mix_scratch: &mut [f32],
-    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Option<bool> {
     out.fill(0.0);
     let sources = source_bank.try_borrow()?;
     let paused = source_bank_all_paused(&sources);
     for source in sources.iter() {
         mix_scratch.fill(0.0);
-        fill_f32_from_shared(mix_scratch, &source.shared, command_tx, event_tx);
+        fill_f32_from_shared(mix_scratch, &source.shared);
         mix_f32_into(out, mix_scratch);
     }
     // The read guard drops here, before conversion and device transfer. Source
@@ -1464,7 +1450,6 @@ mod tests {
             .default_output_config()
             .expect("shared config")
             .channels();
-        let (command_tx, _) = mpsc::channel();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(32);
 
         for (rate, idle_release) in [
@@ -1482,7 +1467,6 @@ mod tests {
                 1,
                 ExclusiveLatencyMode::Stable,
                 Arc::new(ExclusiveRenderSourceBank::new()),
-                command_tx.clone(),
                 event_tx.clone(),
                 Arc::clone(&output_identity),
             )
@@ -1540,8 +1524,6 @@ mod tests {
                 &fallback_config.config(),
                 fallback_config.sample_format(),
                 shared,
-                command_tx,
-                event_tx,
             )
             .expect("88.2 kHz request must have a playable shared fallback");
         eprintln!("silent shared 88200 Hz request opened at {actual_rate} Hz");
@@ -1550,7 +1532,6 @@ mod tests {
 
     #[test]
     fn exclusive_stream_missing_selected_endpoint_does_not_open_default_output() {
-        let (command_tx, _) = mpsc::channel();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
         let result = build_exclusive_stream(
             Some("noor-regression-missing-endpoint"),
@@ -1560,7 +1541,6 @@ mod tests {
             1,
             ExclusiveLatencyMode::Stable,
             Arc::new(ExclusiveRenderSourceBank::new()),
-            command_tx,
             event_tx,
             Arc::new(()),
         );
@@ -1938,11 +1918,9 @@ mod tests {
             shared: Arc::clone(&shared),
         }]);
         let writer = bank.sources.write().expect("source bank writer");
-        let (command_tx, _) = mpsc::channel();
-        let (event_tx, _) = tokio::sync::broadcast::channel(8);
         let mut out = [1.0; 8];
         let mut scratch = [1.0; 8];
-        let paused = mix_published_sources(&bank, &mut out, &mut scratch, &command_tx, &event_tx);
+        let paused = mix_published_sources(&bank, &mut out, &mut scratch);
         assert_eq!(paused, None);
         assert_eq!(out, [0.0; 8]);
         assert_eq!(shared.source_position_samples.load(Ordering::Relaxed), 0);
@@ -1961,7 +1939,7 @@ mod tests {
         drop(writer);
         bank.clear();
         assert_eq!(
-            mix_published_sources(&bank, &mut out, &mut scratch, &command_tx, &event_tx),
+            mix_published_sources(&bank, &mut out, &mut scratch),
             Some(true)
         );
         assert_eq!(bank.contended_periods.load(Ordering::Relaxed), 1);

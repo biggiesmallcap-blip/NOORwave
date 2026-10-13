@@ -1,5 +1,5 @@
 use super::PlaybackRuntimeConfig;
-use super::commands::{PlaybackRuntimeCommand, PlaybackRuntimeEvent, PlaybackTerminalReason};
+use super::commands::{PlaybackRuntimeCommand, PlaybackTerminalReason};
 use super::shared::{PlaybackSharedState, estimate_total_samples_from_duration_ms};
 use crate::playback::decode::decode_and_buffer_job;
 use crate::playback::output::cpal_shared::{
@@ -167,8 +167,6 @@ impl PlaybackEngine {
         output_config: &StreamConfig,
         output_sample_format: SampleFormat,
         job: PreparedPlaybackJob,
-        event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
-        _device_sample_rate: u32,
         device_channels: u16,
         volume_ctl: Arc<AtomicU32>,
         position_samples: Arc<AtomicU64>,
@@ -184,7 +182,6 @@ impl PlaybackEngine {
             output_config,
             output_sample_format,
             job.clone(),
-            event_tx.clone(),
             device_channels,
             Arc::clone(&volume_ctl),
             Arc::clone(&position_samples),
@@ -207,7 +204,6 @@ impl PlaybackEngine {
                     &fallback_config,
                     output_sample_format,
                     job,
-                    event_tx,
                     device_channels,
                     volume_ctl,
                     position_samples,
@@ -230,7 +226,6 @@ impl PlaybackEngine {
         output_config: &StreamConfig,
         output_sample_format: SampleFormat,
         job: PreparedPlaybackJob,
-        event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
         device_channels: u16,
         volume_ctl: Arc<AtomicU32>,
         position_samples: Arc<AtomicU64>,
@@ -251,8 +246,6 @@ impl PlaybackEngine {
             output_config,
             output_sample_format,
             Arc::clone(&engine.shared),
-            engine.shared.command_tx.clone(),
-            event_tx,
         ) {
             Ok((stream, _actual_rate)) => stream,
             Err(error) => {
@@ -375,14 +368,13 @@ impl PlaybackEngine {
         })
     }
 
-    pub(super) fn pause(&self) -> Result<()> {
+    pub(super) fn pause(&self) {
         // Ramped exit: the callback drains ~TRANSPORT_FADE_MS more audio on its
         // way to silence, then disarms itself. `paused` still flips
         // synchronously inside begin_fade_out, so snapshots, promotions and the
         // swap guard read the intent immediately and nothing downstream has to
         // wait on the audio thread to observe the pause.
         self.shared.begin_fade_out();
-        Ok(())
     }
 
     pub(super) fn cold_restart_job(&self, start_paused: bool) -> Result<PreparedPlaybackJob> {
@@ -404,10 +396,9 @@ impl PlaybackEngine {
         Ok(job)
     }
 
-    pub(super) fn resume(&self) -> Result<()> {
+    pub(super) fn resume(&self) {
         self.shared.disarm_pause_fade();
         self.shared.paused.store(false, Ordering::SeqCst);
-        Ok(())
     }
 
     pub(super) fn stop(&mut self) {
@@ -429,11 +420,8 @@ impl PlaybackEngine {
         device: &cpal::Device,
         output_config: &StreamConfig,
         output_sample_format: SampleFormat,
-        command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-        event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
         exclusive: bool,
         desired_sample_rate: Option<u32>,
-        _exclusive_release_grace_secs: u32,
     ) -> Result<u32> {
         let pause_guard = SwapPauseGuard::new(Arc::clone(&self.shared));
         drop(self.stream.take());
@@ -464,8 +452,6 @@ impl PlaybackEngine {
             &fallback_config,
             output_sample_format,
             Arc::clone(&self.shared),
-            command_tx,
-            event_tx,
         )?;
         let mut active_plan = shared_plan;
         active_plan.stream_config.sample_rate = actual_rate;

@@ -1,6 +1,6 @@
 //! CPAL shared-mode output helpers.
 
-use crate::playback::runtime::commands::{PlaybackRuntimeCommand, PlaybackRuntimeEvent};
+use crate::playback::runtime::commands::PlaybackRuntimeCommand;
 use crate::playback::runtime::shared::{
     PlaybackSharedState, write_output_f32, write_output_f64, write_output_i16, write_output_i24,
     write_output_i32, write_output_u16,
@@ -189,8 +189,6 @@ fn build_output_stream(
     output_config: &StreamConfig,
     output_sample_format: SampleFormat,
     shared: Arc<PlaybackSharedState>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<CpalOutputStream> {
     let live = Arc::new(AtomicBool::new(true));
     let callback = Arc::new(CpalCallbackState::new(Arc::clone(&live)));
@@ -207,7 +205,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [f32], _| write_output_f32(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [f32], _| write_output_f32(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -217,7 +215,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [f64], _| write_output_f64(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [f64], _| write_output_f64(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -227,9 +225,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [cpal::I24], _| {
-                    write_output_i24(data, &shared, &command_tx, &event_tx)
-                },
+                move |data: &mut [cpal::I24], _| write_output_i24(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -239,7 +235,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [i16], _| write_output_i16(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [i16], _| write_output_i16(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -249,7 +245,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [i32], _| write_output_i32(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [i32], _| write_output_i32(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -259,7 +255,7 @@ fn build_output_stream(
             let error_live = Arc::clone(&callback);
             device.build_output_stream(
                 *output_config,
-                move |data: &mut [u16], _| write_output_u16(data, &shared, &command_tx, &event_tx),
+                move |data: &mut [u16], _| write_output_u16(data, &shared),
                 move |err| emit_cpal_stream_error(&error_shared, &error_live, err),
                 None,
             )?
@@ -289,17 +285,8 @@ fn build_started_output_stream(
     output_config: &StreamConfig,
     output_sample_format: SampleFormat,
     shared: Arc<PlaybackSharedState>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<CpalOutputStream> {
-    let stream = build_output_stream(
-        device,
-        output_config,
-        output_sample_format,
-        shared,
-        command_tx,
-        event_tx,
-    )?;
+    let stream = build_output_stream(device, output_config, output_sample_format, shared)?;
     start_cpal_stream(&stream)?;
     Ok(stream)
 }
@@ -310,16 +297,12 @@ pub(crate) fn build_started_output_stream_with_rate_fallback(
     fallback_config: &StreamConfig,
     output_sample_format: SampleFormat,
     shared: Arc<PlaybackSharedState>,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<(CpalOutputStream, u32)> {
     match build_started_output_stream(
         device,
         attempted_config,
         output_sample_format,
         Arc::clone(&shared),
-        command_tx.clone(),
-        event_tx.clone(),
     ) {
         Ok(stream) => Ok((stream, attempted_config.sample_rate)),
         Err(primary_error) => {
@@ -337,8 +320,6 @@ pub(crate) fn build_started_output_stream_with_rate_fallback(
                 &fallback_config,
                 output_sample_format,
                 shared,
-                command_tx,
-                event_tx,
             )
             .with_context(|| {
                 format!(

@@ -151,8 +151,6 @@ pub(super) fn transition_to_job(
                 output_config,
                 output_sample_format,
                 job,
-                event_tx.clone(),
-                state.device_sample_rate,
                 state.device_channels,
                 Arc::clone(volume_ctl),
                 Arc::clone(position_samples),
@@ -179,7 +177,6 @@ pub(super) fn transition_to_job(
             desired_rate,
             state.current_exclusive_release_grace_secs,
             state.current_exclusive_latency_mode.clone(),
-            command_tx.clone(),
             event_tx.clone(),
         ) {
             Ok(actual_rate) => {
@@ -210,8 +207,6 @@ pub(super) fn transition_to_job(
                     output_config,
                     output_sample_format,
                     job,
-                    event_tx.clone(),
-                    state.device_sample_rate,
                     state.device_channels,
                     Arc::clone(volume_ctl),
                     Arc::clone(position_samples),

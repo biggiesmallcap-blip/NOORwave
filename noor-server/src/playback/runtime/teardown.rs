@@ -112,15 +112,7 @@ pub(super) fn fail_runtime_command(
 /// cannot be relied on to finish a fade, so any armed ramp is cleared.
 pub(super) fn hard_pause_all_decks(state: &mut PlaybackRuntimeLoopState) {
     state.user_paused = true;
-    for engine in [
-        &state.engine,
-        &state.next_engine,
-        &state.fading_out_engine,
-        &state.drop_preview_engine,
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for engine in state.live_engines() {
         engine.shared.disarm_pause_fade();
         engine.shared.paused.store(true, Ordering::SeqCst);
     }

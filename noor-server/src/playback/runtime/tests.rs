@@ -1737,9 +1737,8 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
             192_000 * 2
         );
         let frames_to_play = if seek_during_mix { 24_000 } else { 60_000 };
-        let (callback_tx, _) = mpsc::channel();
         let mut output = vec![0.0; frames_to_play * 2];
-        write_output_f32(&mut output, &incoming.shared, &callback_tx, &event_tx);
+        write_output_f32(&mut output, &incoming.shared);
         let source_frame = if seek_during_mix { 120_375 } else { 156_750 };
         assert_eq!(
             incoming
@@ -1839,7 +1838,7 @@ fn handoff_source_clock_survives_callback_decode_compaction_seek_and_next_anchor
             .shared
             .set_manual_seek_crossfade_suppression(seek_frame * 2);
         let mut after_seek = [0.0; 256];
-        write_output_f32(&mut after_seek, &incoming.shared, &callback_tx, &event_tx);
+        write_output_f32(&mut after_seek, &incoming.shared);
         assert_eq!(
             &after_seek[..],
             &original_b[(seek_frame * 2) as usize..(seek_frame * 2 + 256) as usize],
@@ -1883,12 +1882,7 @@ fn callback_countdown_target_uses_decoded_end_and_survives_dispatch_delay() {
     assert!(arm_active_transition_window(&mut state, &job));
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(8);
-    write_output_f32(
-        &mut [0.0; 256],
-        &state.engine.as_ref().unwrap().shared,
-        &command_tx,
-        &event_tx,
-    );
+    write_output_f32(&mut [0.0; 256], &state.engine.as_ref().unwrap().shared);
     state
         .engine
         .as_ref()
@@ -3958,7 +3952,6 @@ fn swap_pause_guard_restores_previous_pause_state_on_drop() {
 #[test]
 fn write_output_f32_drains_ready_buffer_at_96khz() {
     let (command_tx, _command_rx) = mpsc::channel();
-    let (event_tx, _) = tokio::sync::broadcast::channel(8);
     let position = Arc::new(AtomicU64::new(0));
     let shared = Arc::new(PlaybackSharedState::new(
         42,
@@ -3980,7 +3973,7 @@ fn write_output_f32_drains_ready_buffer_at_96khz() {
     }
 
     let mut out = vec![0.0_f32; 4];
-    write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+    write_output_f32(&mut out, &shared);
 
     assert_eq!(out, vec![0.25, -0.25, 0.5, -0.5]);
     assert_eq!(position.load(Ordering::Relaxed), 4);
@@ -3989,7 +3982,6 @@ fn write_output_f32_drains_ready_buffer_at_96khz() {
 #[test]
 fn write_output_f32_outputs_silence_when_paused_at_96khz() {
     let (command_tx, _command_rx) = mpsc::channel();
-    let (event_tx, _) = tokio::sync::broadcast::channel(8);
     let position = Arc::new(AtomicU64::new(0));
     let shared = Arc::new(PlaybackSharedState::new(
         42,
@@ -4012,7 +4004,7 @@ fn write_output_f32_outputs_silence_when_paused_at_96khz() {
     }
 
     let mut out = vec![1.0_f32; 4];
-    write_output_f32(&mut out, &shared, &command_tx, &event_tx);
+    write_output_f32(&mut out, &shared);
 
     assert_eq!(out, vec![0.0, 0.0, 0.0, 0.0]);
     assert_eq!(position.load(Ordering::Relaxed), 0);
@@ -5506,7 +5498,7 @@ fn missing_output_device_swap_pauses_actual_decks_and_reports_error() {
         assert!(engine.shared.paused.load(Ordering::Acquire));
         assert!(!engine.shared.stopped.load(Ordering::Acquire));
         let mut data = [1.0_f32; 8];
-        write_output_f32(&mut data, &engine.shared, &command_tx, &event_tx);
+        write_output_f32(&mut data, &engine.shared);
         assert_eq!(data, [0.0; 8]);
     }
     match event_rx.try_recv().expect("user-visible failure") {
@@ -5621,7 +5613,6 @@ fn existing_exclusive_sink_reports_actual_rate_when_request_changes() {
     let mut state = test_runtime_loop_state();
     state.exclusive_sink.stream =
         Some(crate::playback::wasapi_exclusive::ExclusiveStream::test_live_at_rate(44_100));
-    let (command_tx, _) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(8);
     let rate = ensure_exclusive_sink_started(
         &mut state,
@@ -5630,7 +5621,6 @@ fn existing_exclusive_sink_reports_actual_rate_when_request_changes() {
         Some(96_000),
         1,
         ExclusiveLatencyMode::Stable,
-        command_tx,
         event_tx,
     )
     .unwrap();
@@ -5651,7 +5641,7 @@ fn queued_control_precedes_callback_mailbox_and_seek_retires_transition() {
     let shared = &state.engine.as_ref().unwrap().shared;
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, _) = tokio::sync::broadcast::channel(8);
-    write_output_f32(&mut [0.0; 8], shared, &command_tx, &event_tx);
+    write_output_f32(&mut [0.0; 8], shared);
     command_tx.send(PlaybackRuntimeCommand::Pause).unwrap();
     assert!(matches!(
         receive_runtime_command(

@@ -36,19 +36,6 @@ pub(super) fn poll_exclusive_output_fault(
     );
 }
 
-fn live_engines_mut(
-    state: &mut PlaybackRuntimeLoopState,
-) -> impl Iterator<Item = &mut PlaybackEngine> {
-    [
-        state.engine.as_mut(),
-        state.next_engine.as_mut(),
-        state.fading_out_engine.as_mut(),
-        state.drop_preview_engine.as_mut(),
-    ]
-    .into_iter()
-    .flatten()
-}
-
 fn retarget_exclusive_engines<'a>(
     engines: impl Iterator<Item = &'a mut PlaybackEngine>,
     sample_rate: u32,
@@ -96,25 +83,19 @@ pub(super) fn install_shared_fallback(
     output_config: &mut StreamConfig,
     output_sample_format: SampleFormat,
     desired_sample_rate: Option<u32>,
-    command_tx: &mpsc::Sender<PlaybackRuntimeCommand>,
-    event_tx: &tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<()> {
     state.exclusive_sink.clear_after_failed_start();
     // The preference remains in settings and an explicit retry requests it
     // again. Newly prepared decks must use the backend actually rendering.
     state.current_exclusive = false;
-    let grace_secs = state.current_exclusive_release_grace_secs;
     let mut selected_rate = desired_sample_rate;
-    let actual_rate = rebuild_shared_engine_outputs(live_engines_mut(state), |engine| {
+    let actual_rate = rebuild_shared_engine_outputs(state.live_engines_mut(), |engine| {
         let rate = engine.swap_stream(
             device,
             output_config,
             output_sample_format,
-            command_tx.clone(),
-            event_tx.clone(),
             false,
             selected_rate,
-            grace_secs,
         )?;
         selected_rate = Some(rate);
         Ok(rate)
@@ -269,7 +250,6 @@ pub(super) fn ensure_exclusive_sink_started(
     desired_sample_rate: Option<u32>,
     exclusive_release_grace_secs: u32,
     exclusive_latency_mode: ExclusiveLatencyMode,
-    command_tx: mpsc::Sender<PlaybackRuntimeCommand>,
     event_tx: tokio::sync::broadcast::Sender<PlaybackRuntimeEvent>,
 ) -> Result<u32> {
     let exclusive_plan =
@@ -284,13 +264,14 @@ pub(super) fn ensure_exclusive_sink_started(
     }
     let output_identity = state.exclusive_sink.retire_stream();
     retarget_exclusive_engines(
-        live_engines_mut(state),
+        state.live_engines_mut(),
         exclusive_plan.stream_config.sample_rate,
     )?;
 
     // Shared fallback streams must relinquish the endpoint before this process
     // attempts exclusive acquisition. Hold transport intent until startup ends.
-    let pause_guards: Vec<_> = live_engines_mut(state)
+    let pause_guards: Vec<_> = state
+        .live_engines_mut()
         .map(|engine| {
             let guard = engine::SwapPauseGuard::new(Arc::clone(&engine.shared));
             engine.drop_stream();
@@ -312,7 +293,6 @@ pub(super) fn ensure_exclusive_sink_started(
         exclusive_release_grace_secs,
         exclusive_latency_mode,
         Arc::clone(&state.exclusive_sink.source_bank),
-        command_tx,
         event_tx.clone(),
         Arc::clone(&output_identity),
     ) {
@@ -320,7 +300,7 @@ pub(super) fn ensure_exclusive_sink_started(
             let actual_rate = stream.effective_sample_rate;
             let transport_format = stream.transport_format.clone();
             state.exclusive_sink.stream = Some(stream);
-            retarget_exclusive_engines(live_engines_mut(state), actual_rate)?;
+            retarget_exclusive_engines(state.live_engines_mut(), actual_rate)?;
             drop(pause_guards);
             let _ = event_tx.send(PlaybackRuntimeEvent::ExclusiveModeEngaged {
                 output_identity,
