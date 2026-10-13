@@ -51,7 +51,7 @@ pub(crate) fn effective_output_config(
     base: &StreamConfig,
     desired_sample_rate: Option<u32>,
 ) -> StreamConfig {
-    let mut config = base.clone();
+    let mut config = *base;
     if let Some(rate) = desired_sample_rate {
         config.sample_rate = rate;
     }
@@ -62,7 +62,7 @@ pub(crate) fn output_rate_fallback_config(
     attempted: &StreamConfig,
     base: &StreamConfig,
 ) -> Option<StreamConfig> {
-    (attempted.sample_rate != base.sample_rate).then(|| base.clone())
+    (attempted.sample_rate != base.sample_rate).then_some(*base)
 }
 
 /// Retire the callback identity before CPAL tears down its native stream.

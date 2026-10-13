@@ -101,95 +101,6 @@ pub(super) fn install_shared_fallback(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn engine(track_id: i64) -> PlaybackEngine {
-        let (command_tx, _) = mpsc::channel();
-        PlaybackEngine::test_with_shared(
-            track_id,
-            1,
-            Arc::new(PlaybackSharedState::new(
-                track_id,
-                1,
-                crate::playback::player::PlaybackSourceKind::TidalStream,
-                GaplessPlan::disabled(),
-                96_000,
-                2,
-                None,
-                command_tx,
-                Arc::new(AtomicU32::new(1.0f32.to_bits())),
-                Arc::new(AtomicU64::new(0)),
-                Arc::new(AtomicU64::new(0)),
-            )),
-        )
-    }
-
-    #[test]
-    fn shared_fallback_installs_output_for_every_live_deck() {
-        let mut engines = [engine(1), engine(2), engine(3), engine(4)];
-        engines[1].shared.paused.store(true, Ordering::SeqCst);
-        let mut installed = Vec::new();
-        let rate = rebuild_shared_engine_outputs(engines.iter_mut(), |engine| {
-            installed.push(engine.track_id);
-            engine
-                .shared
-                .target_sample_rate
-                .store(48_000, Ordering::Relaxed);
-            Ok(48_000)
-        })
-        .unwrap();
-        assert_eq!(installed, [1, 2, 3, 4]);
-        assert_eq!(rate, Some(48_000));
-        assert!(engines[1].shared.paused.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn shared_fallback_surfaces_failure_and_still_rebuilds_other_decks() {
-        let mut engines = [engine(1), engine(2), engine(3)];
-        let mut installed = Vec::new();
-        let result = rebuild_shared_engine_outputs(engines.iter_mut(), |engine| {
-            installed.push(engine.track_id);
-            if engine.track_id == 1 {
-                Err(anyhow!("output unavailable"))
-            } else {
-                Ok(48_000)
-            }
-        });
-        assert!(result.is_err());
-        assert_eq!(installed, [1, 2, 3]);
-    }
-
-    #[test]
-    fn shared_fallback_reports_active_rate_instead_of_last_prepared_rate() {
-        let mut engines = [engine(1), engine(2)];
-        let rate = rebuild_shared_engine_outputs(engines.iter_mut(), |engine| {
-            Ok(if engine.track_id == 1 { 48_000 } else { 96_000 })
-        })
-        .unwrap();
-        assert_eq!(rate, Some(48_000));
-    }
-
-    #[test]
-    fn exclusive_acquisition_rejects_mismatched_decoded_rates() {
-        let engines = [engine(1), engine(2), engine(3), engine(4)];
-        for engine in &engines {
-            engine
-                .shared
-                .target_sample_rate
-                .store(48_000, Ordering::Relaxed);
-        }
-        assert!(require_engines_decoded_at(engines.iter(), 96_000).is_err());
-        assert!(
-            engines
-                .iter()
-                .all(|engine| engine.shared.target_sample_rate.load(Ordering::Relaxed) == 48_000)
-        );
-        assert!(require_engines_decoded_at(engines.iter(), 48_000).is_ok());
-    }
-}
-
 pub(super) fn exclusive_render_sources(
     active: Option<&PlaybackEngine>,
     prepared: Option<&PlaybackEngine>,
@@ -314,5 +225,94 @@ pub(super) fn ensure_exclusive_sink_started(
             });
             Err(anyhow!(reason))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine(track_id: i64) -> PlaybackEngine {
+        let (command_tx, _) = mpsc::channel();
+        PlaybackEngine::test_with_shared(
+            track_id,
+            1,
+            Arc::new(PlaybackSharedState::new(
+                track_id,
+                1,
+                crate::playback::player::PlaybackSourceKind::TidalStream,
+                GaplessPlan::disabled(),
+                96_000,
+                2,
+                None,
+                command_tx,
+                Arc::new(AtomicU32::new(1.0f32.to_bits())),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+            )),
+        )
+    }
+
+    #[test]
+    fn shared_fallback_installs_output_for_every_live_deck() {
+        let mut engines = [engine(1), engine(2), engine(3), engine(4)];
+        engines[1].shared.paused.store(true, Ordering::SeqCst);
+        let mut installed = Vec::new();
+        let rate = rebuild_shared_engine_outputs(engines.iter_mut(), |engine| {
+            installed.push(engine.track_id);
+            engine
+                .shared
+                .target_sample_rate
+                .store(48_000, Ordering::Relaxed);
+            Ok(48_000)
+        })
+        .unwrap();
+        assert_eq!(installed, [1, 2, 3, 4]);
+        assert_eq!(rate, Some(48_000));
+        assert!(engines[1].shared.paused.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn shared_fallback_surfaces_failure_and_still_rebuilds_other_decks() {
+        let mut engines = [engine(1), engine(2), engine(3)];
+        let mut installed = Vec::new();
+        let result = rebuild_shared_engine_outputs(engines.iter_mut(), |engine| {
+            installed.push(engine.track_id);
+            if engine.track_id == 1 {
+                Err(anyhow!("output unavailable"))
+            } else {
+                Ok(48_000)
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(installed, [1, 2, 3]);
+    }
+
+    #[test]
+    fn shared_fallback_reports_active_rate_instead_of_last_prepared_rate() {
+        let mut engines = [engine(1), engine(2)];
+        let rate = rebuild_shared_engine_outputs(engines.iter_mut(), |engine| {
+            Ok(if engine.track_id == 1 { 48_000 } else { 96_000 })
+        })
+        .unwrap();
+        assert_eq!(rate, Some(48_000));
+    }
+
+    #[test]
+    fn exclusive_acquisition_rejects_mismatched_decoded_rates() {
+        let engines = [engine(1), engine(2), engine(3), engine(4)];
+        for engine in &engines {
+            engine
+                .shared
+                .target_sample_rate
+                .store(48_000, Ordering::Relaxed);
+        }
+        assert!(require_engines_decoded_at(engines.iter(), 96_000).is_err());
+        assert!(
+            engines
+                .iter()
+                .all(|engine| engine.shared.target_sample_rate.load(Ordering::Relaxed) == 48_000)
+        );
+        assert!(require_engines_decoded_at(engines.iter(), 48_000).is_ok());
     }
 }

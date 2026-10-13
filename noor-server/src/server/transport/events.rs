@@ -113,70 +113,6 @@ impl Drop for ExclusiveRecoveryQueue {
     }
 }
 
-#[cfg(test)]
-mod exclusive_recovery_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn recovery_burst_keeps_one_lookup_and_only_the_latest_request() {
-        let db = crate::db::Database::open_in_memory().expect("database");
-        let locked_db = db.clone();
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            locked_db.with_conn(|_| {
-                locked_tx.send(()).expect("lock signal");
-                let _ = unlock_rx.recv_timeout(Duration::from_secs(5));
-                Ok(())
-            })
-        });
-        locked_rx.recv().expect("database locked");
-        let first = Arc::new(());
-        let request = |identity| ExclusiveRecoveryRequest {
-            identity,
-            device_name: "test output".to_string(),
-            db: db.clone(),
-        };
-        let mut recovery = ExclusiveRecoveryQueue::default();
-        recovery.request(request(first.clone()));
-        let first_task = recovery.active.as_ref().expect("active").task.id();
-        let mut latest = first.clone();
-        for _ in 0..1_000 {
-            latest = Arc::new(());
-            recovery.request(request(latest.clone()));
-            recovery.request(request(first.clone()));
-        }
-        assert_eq!(
-            recovery.active.as_ref().expect("active").task.id(),
-            first_task
-        );
-        assert!(Arc::ptr_eq(
-            &recovery.latest.as_ref().expect("latest").identity,
-            &latest
-        ));
-        unlock_tx.send(()).expect("unlock");
-        holder
-            .join()
-            .expect("database holder")
-            .expect("database read");
-        let (completed, _) = recovery.completed().await.expect("first completion");
-        assert!(Arc::ptr_eq(&completed.identity, &first));
-        assert!(recovery.latest.is_none());
-        assert!(Arc::ptr_eq(
-            &recovery
-                .active
-                .as_ref()
-                .expect("next active")
-                .request
-                .identity,
-            &latest
-        ));
-        let (completed, _) = recovery.completed().await.expect("latest completion");
-        assert!(Arc::ptr_eq(&completed.identity, &latest));
-        assert!(recovery.active.is_none());
-    }
-}
-
 async fn apply_exclusive_recovery(
     state: &SharedState,
     handle: &playback_runtime::PlaybackRuntimeHandle,
@@ -2272,15 +2208,14 @@ async fn handle_runtime_error_checked(
         // any asynchronous scrobble work. The audio callback never uses it.
         let source_guard = command_context
             .and_then(|_| expected_handle.map(|handle| handle.lock_playback_source_identity()));
-        if let Some((generation, source_identity)) = command_context {
-            if generation
+        if let Some((generation, source_identity)) = command_context
+            && (generation
                 .is_some_and(|generation| current_playback_generation(&state_guard) != generation)
                 || source_guard
                     .as_ref()
-                    .is_none_or(|current| !std::sync::Arc::ptr_eq(current, source_identity))
-            {
-                return false;
-            }
+                    .is_none_or(|current| !std::sync::Arc::ptr_eq(current, source_identity)))
+        {
+            return false;
         }
         let paused = match state_guard.db.with_conn(player::pause) {
             Ok(_) => true,
@@ -2424,5 +2359,69 @@ pub(crate) fn describe_tidal_playback_error(error: &TidalPlaybackError) -> Strin
         TidalPlaybackError::NotConnected => "TIDAL is not connected.".to_string(),
         TidalPlaybackError::SessionRefreshFailed(message) => message.clone(),
         TidalPlaybackError::StreamResolve(error) => error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod exclusive_recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn recovery_burst_keeps_one_lookup_and_only_the_latest_request() {
+        let db = crate::db::Database::open_in_memory().expect("database");
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            locked_db.with_conn(|_| {
+                locked_tx.send(()).expect("lock signal");
+                let _ = unlock_rx.recv_timeout(Duration::from_secs(5));
+                Ok(())
+            })
+        });
+        locked_rx.recv().expect("database locked");
+        let first = Arc::new(());
+        let request = |identity| ExclusiveRecoveryRequest {
+            identity,
+            device_name: "test output".to_string(),
+            db: db.clone(),
+        };
+        let mut recovery = ExclusiveRecoveryQueue::default();
+        recovery.request(request(first.clone()));
+        let first_task = recovery.active.as_ref().expect("active").task.id();
+        let mut latest = first.clone();
+        for _ in 0..1_000 {
+            latest = Arc::new(());
+            recovery.request(request(latest.clone()));
+            recovery.request(request(first.clone()));
+        }
+        assert_eq!(
+            recovery.active.as_ref().expect("active").task.id(),
+            first_task
+        );
+        assert!(Arc::ptr_eq(
+            &recovery.latest.as_ref().expect("latest").identity,
+            &latest
+        ));
+        unlock_tx.send(()).expect("unlock");
+        holder
+            .join()
+            .expect("database holder")
+            .expect("database read");
+        let (completed, _) = recovery.completed().await.expect("first completion");
+        assert!(Arc::ptr_eq(&completed.identity, &first));
+        assert!(recovery.latest.is_none());
+        assert!(Arc::ptr_eq(
+            &recovery
+                .active
+                .as_ref()
+                .expect("next active")
+                .request
+                .identity,
+            &latest
+        ));
+        let (completed, _) = recovery.completed().await.expect("latest completion");
+        assert!(Arc::ptr_eq(&completed.identity, &latest));
+        assert!(recovery.active.is_none());
     }
 }

@@ -1519,7 +1519,6 @@ const TIDAL_PLAYLIST_INDEX_UPSERT: &str = "INSERT INTO playlists (tidal_uuid, na
 /// for a playlist we have never seen. Re-pull whenever TIDAL reports a change,
 /// whenever the counts disagree, and whenever either side's timestamp is
 /// missing - an unknown is not evidence that nothing changed.
-
 fn playlist_needs_pull(
     previous: Option<(Option<&str>, i64)>,
     remote_last_updated: Option<&str>,

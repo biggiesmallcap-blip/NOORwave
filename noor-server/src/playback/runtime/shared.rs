@@ -461,10 +461,10 @@ fn write_output_buffer<T>(
                 * shared.device_sample_rate as i64
                 * shared.device_channels as i64
                 / 1000;
-            if total.saturating_sub(pos) <= threshold as u64 {
-                if guard.push_notification(RtNotification::NearEnd) {
-                    shared.near_end_signaled.store(true, Ordering::Relaxed);
-                }
+            if total.saturating_sub(pos) <= threshold as u64
+                && guard.push_notification(RtNotification::NearEnd)
+            {
+                shared.near_end_signaled.store(true, Ordering::Relaxed);
             }
         }
     }
@@ -483,15 +483,15 @@ fn write_output_buffer<T>(
                 let total = shared.total_samples.load(Ordering::Relaxed);
                 (total > 0).then(|| total.saturating_sub(xfade))
             };
-            if let Some(trigger_target_samples) = trigger_target.filter(|target| pos >= *target) {
-                if guard.push_notification(RtNotification::Crossfade {
+            if let Some(trigger_target_samples) = trigger_target.filter(|target| pos >= *target)
+                && guard.push_notification(RtNotification::Crossfade {
                     position: pos,
                     target: trigger_target_samples,
-                }) {
-                    shared
-                        .crossfade_start_signaled
-                        .store(true, Ordering::Relaxed);
-                }
+                })
+            {
+                shared
+                    .crossfade_start_signaled
+                    .store(true, Ordering::Relaxed);
             }
         }
     }
@@ -500,12 +500,12 @@ fn write_output_buffer<T>(
         let trigger = shared.drop_preview_trigger_samples.load(Ordering::Relaxed);
         if trigger != u64::MAX {
             let pos = shared.position_samples.load(Ordering::Relaxed);
-            if pos >= trigger {
-                if guard.push_notification(RtNotification::DropPreview { position: pos }) {
-                    shared
-                        .drop_preview_start_signaled
-                        .store(true, Ordering::Relaxed);
-                }
+            if pos >= trigger
+                && guard.push_notification(RtNotification::DropPreview { position: pos })
+            {
+                shared
+                    .drop_preview_start_signaled
+                    .store(true, Ordering::Relaxed);
             }
         }
     }

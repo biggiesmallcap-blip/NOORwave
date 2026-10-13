@@ -2518,6 +2518,8 @@ fn deck_status_exposes_inflight_profile_as_analyzing() {
 // Transport listeners hold the playback source lock while they write SQLite.
 // Status must not take the DB first and then wait on that lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// Holding the listener-side lock across an await is the scenario under test.
+#[allow(clippy::await_holding_lock)]
 async fn status_never_waits_on_playback_source_while_holding_db() {
     let db = crate::db::Database::open_in_memory().expect("db");
     db.run_migrations().expect("migrations");

@@ -873,8 +873,8 @@ pub(super) fn handle_resume(
             channels: state.device_channels,
         });
     }
-    if !state.current_exclusive {
-        if let Err(error) = recover_faulted_shared_outputs(state, |engine| {
+    if !state.current_exclusive
+        && let Err(error) = recover_faulted_shared_outputs(state, |engine| {
             engine.swap_stream(
                 device,
                 output_config,
@@ -882,11 +882,11 @@ pub(super) fn handle_resume(
                 false,
                 Some(output_config.sample_rate),
             )
-        }) {
-            state.user_paused = true;
-            fail_runtime_command(state, event_tx, "Resume", error);
-            return ControlFlow::Continue(());
-        }
+        })
+    {
+        state.user_paused = true;
+        fail_runtime_command(state, event_tx, "Resume", error);
+        return ControlFlow::Continue(());
     }
     if let Some(engine) = state.engine.as_ref() {
         engine.resume();
@@ -1291,7 +1291,7 @@ pub(super) fn handle_device_swap(
         SwapBackend::Shared
     };
     let requested_plan = swap_stream_plan(&new_config, desired_rate, requested_backend);
-    let mut actual_config = requested_plan.stream_config.clone();
+    let mut actual_config = requested_plan.stream_config;
 
     // In exclusive mode only one stream can hold the device, so
     // drop the pre-buffered + fading engines and only swap the

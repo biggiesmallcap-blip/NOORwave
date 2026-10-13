@@ -97,7 +97,11 @@ pub(crate) async fn ensure_for_track(
     drop(state_guard);
 
     if let Some(listener_handle) = spawned_handle.clone() {
-        let _ = super::events::spawn_playback_runtime_listener(state.clone(), listener_handle);
+        // Detached: the listener runs for the runtime's life.
+        drop(super::events::spawn_playback_runtime_listener(
+            state.clone(),
+            listener_handle,
+        ));
     }
 
     if let Some(runtime_handle) = spawned_handle.as_ref() {

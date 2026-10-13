@@ -147,13 +147,12 @@ async fn start_track_inner(
     let is_playing = super::settings::transport_intent_is_playing(&state_guard);
     let source_guard =
         expected_runtime.map(|(expected, _)| expected.lock_playback_source_identity());
-    if let Some((_, expected_source)) = expected_runtime {
-        if source_guard
+    if let Some((_, expected_source)) = expected_runtime
+        && source_guard
             .as_ref()
             .is_none_or(|current| !std::sync::Arc::ptr_eq(current, expected_source))
-        {
-            return Err(StartError::Superseded);
-        }
+    {
+        return Err(StartError::Superseded);
     }
     let job =
         player::build_playback_preparation(track, Some(&stream_info), crossfade_ms, user_quality)

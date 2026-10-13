@@ -174,7 +174,7 @@ impl PlaybackEngine {
         let fallback_config = device
             .default_output_config()
             .map(|config| config.config())
-            .unwrap_or_else(|_| output_config.clone());
+            .unwrap_or_else(|_| *output_config);
         match Self::start_with_output_config(
             config,
             command_tx,
@@ -437,14 +437,14 @@ impl PlaybackEngine {
         let fallback_config = device
             .default_output_config()
             .map(|config| config.config())
-            .unwrap_or_else(|_| output_config.clone());
+            .unwrap_or_else(|_| *output_config);
         // A new mix rate requires a fresh decoder. Never reinterpret already
         // buffered PCM at a different rate during a live stream swap.
         let fallback_config =
             if fallback_config.sample_rate == shared_plan.stream_config.sample_rate {
                 fallback_config
             } else {
-                shared_plan.stream_config.clone()
+                shared_plan.stream_config
             };
         let (stream, actual_rate) = build_started_output_stream_with_rate_fallback(
             device,
