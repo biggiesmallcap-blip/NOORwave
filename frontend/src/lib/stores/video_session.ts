@@ -1,6 +1,8 @@
 import { derived, get, writable } from 'svelte/store';
 import { api } from '$lib/api/client';
 import type { TidalSearchVideo, TidalVideoMixItem } from '$lib/api/client';
+import type { ExploreMode, VideoChannel } from '$lib/api/video_explore_types';
+import { tuneStart } from '$lib/video/onair/clock';
 
 export type VideoSessionItem = TidalSearchVideo | TidalVideoMixItem;
 export type VideoSessionSource = 'none' | 'direct' | 'search' | 'mix';
@@ -31,6 +33,9 @@ export interface VideoSessionState {
 	/** Last reported playback position, kept so returning to /videos resumes
 	 *  the picture in sync with the audio that never stopped. */
 	positionMs: number;
+	/** Where the current video's first load starts, in seconds. A channel
+	 *  tune-in lands mid-video at the scheduled offset; everything else is 0. */
+	startAtS: number;
 }
 
 /** Browse context the route hands to the controller when it starts a video:
@@ -44,10 +49,15 @@ export interface VideoPlayContext {
 	resetRadio?: boolean;
 	/** Library radio keeps the supplied opening queue and refills from the
 	 * listener's taste and recently played artists instead of one fixed artist. */
-	radioScope?: 'artist' | 'library' | 'station';
+	radioScope?: 'artist' | 'library' | 'station' | 'channel';
 	/** Station mode: refills come from this station instead of artist radio. */
 	stationId?: string;
 	stationNonce?: string;
+	/** Channel mode (On Air): refills come from the channel's next endpoint. */
+	channelId?: string;
+	channelNonce?: string;
+	/** The tuned channel, for the stage's bug and the dial's "on air" mark. */
+	channel?: VideoChannel;
 }
 
 export interface PreloadedVideoStream {
@@ -88,6 +98,7 @@ const initialState: VideoSessionState = {
 	streamExpiresAt: null,
 	playing: false,
 	positionMs: 0,
+	startAtS: 0,
 };
 
 function findCurrentIndex(queue: VideoSessionItem[], current: VideoSessionItem | null): number {
@@ -258,16 +269,33 @@ let radioSeedVideoId: number | null = null;
 let radioStationId: string | null = null;
 let radioStationTitle: string | null = null;
 let radioStationNonce = '';
+let radioChannelId: string | null = null;
+let radioChannelNonce = '';
+/** The session's "more / less like this" presses on a channel, by artist.
+ *  They ride along with every channel refill until the session ends. */
+let tasteMore: number[] = [];
+let tasteLess: number[] = [];
+const TASTE_CAP = 64;
 
 const onAirStation = writable<string | null>(null);
 /** The station whose refills feed the current session, for "On air" marks. */
 export const videoStationOnAir = { subscribe: onAirStation.subscribe };
 
+const onAirChannel = writable<VideoChannel | null>(null);
+/** The On Air channel feeding the current session, or null. Like stations,
+ *  a channel is only on air while the session is still continuous: a shelf
+ *  or a single video picked after tuning takes the set off the channel. */
+export const videoChannelOnAir = derived([session, onAirChannel], ([$session, $channel]) =>
+	$session.active && $session.continuous ? $channel : null);
+
 function clearStation() {
 	radioStationId = null;
 	radioStationTitle = null;
 	radioStationNonce = '';
+	radioChannelId = null;
+	radioChannelNonce = '';
 	onAirStation.set(null);
+	onAirChannel.set(null);
 }
 let lastRefillBuilding = false;
 
@@ -283,6 +311,10 @@ interface WatchRecord {
 	durationMs: number | null;
 	finished: boolean;
 	completed: boolean;
+	/** Where this play started (a channel tune-in joins mid-video). Watched
+	 *  time counts from here, so a zap two seconds after tuning in at 50%
+	 *  still reads as a zap and not as half a video watched. */
+	startMs: number;
 }
 
 let watch: WatchRecord | null = null;
@@ -310,7 +342,7 @@ function finishWatch(completed: boolean) {
  *  timeupdate does not re-render every subscriber. */
 export function noteVideoProgress(positionMs: number, durationMs?: number) {
 	if (!watch || watch.finished || !Number.isFinite(positionMs)) return;
-	watch.watchedMs = Math.max(watch.watchedMs, positionMs);
+	watch.watchedMs = Math.max(watch.watchedMs, positionMs - watch.startMs);
 	if (durationMs && Number.isFinite(durationMs) && durationMs > 0) watch.durationMs = durationMs;
 }
 
@@ -328,10 +360,10 @@ function sourceFor(item: VideoSessionItem, ctx: VideoPlayContext): VideoSessionS
 /** Log a started video so the editorial builder can hold it out of the next few
  *  rotations, then report how much of it was watched. Fire-and-forget: a
  *  dropped write only costs a repeat pick. */
-function recordWatch(item: VideoSessionItem) {
+function recordWatch(item: VideoSessionItem, startMs = 0) {
 	if (watch && watch.videoId !== item.tidal_id) finishWatch(false);
 	const record: WatchRecord = {
-		videoId: item.tidal_id, historyId: null, watchedMs: 0,
+		videoId: item.tidal_id, historyId: null, watchedMs: 0, startMs,
 		durationMs: item.duration_ms ?? null, finished: false, completed: false,
 	};
 	watch = record;
@@ -357,7 +389,7 @@ function recordWatch(item: VideoSessionItem) {
 export async function playVideo(
 	item: VideoSessionItem,
 	ctx: VideoPlayContext,
-	opts: { preloaded?: PreloadedVideoStream | null; step?: boolean } = {}
+	opts: { preloaded?: PreloadedVideoStream | null; step?: boolean; startAtS?: number } = {}
 ): Promise<boolean> {
 	// Re-selecting the video that is already playing (returning to /videos with
 	// its ?videoId= still in the URL, a stale jump request, clicking its own
@@ -370,9 +402,13 @@ export async function playVideo(
 		radioSeenSongs = [item];
 		radioRefill = null;
 		const station = ctx.radioScope === 'station' ? ctx.stationId ?? null : null;
+		const channel = ctx.radioScope === 'channel' ? ctx.channelId ?? null : null;
 		radioStationId = station;
 		onAirStation.set(station);
-		radioStationTitle = station ? ctx.sourceLabel : null;
+		radioChannelId = channel;
+		radioChannelNonce = channel ? ctx.channelNonce ?? Math.random().toString(36).slice(2) : '';
+		onAirChannel.set(channel ? ctx.channel ?? null : null);
+		radioStationTitle = station ? ctx.sourceLabel : channel ? ctx.channel?.title ?? ctx.sourceLabel : null;
 		radioStationNonce = station ? ctx.stationNonce ?? Math.random().toString(36).slice(2) : '';
 		radioSeedVideoId = !ctx.radioScope || ctx.radioScope === 'artist' ? item.tidal_id : null;
 	}
@@ -425,7 +461,8 @@ export async function playVideo(
 		error: null,
 		streamUrl: opts.preloaded?.url ?? null,
 		streamExpiresAt: opts.preloaded?.expiresAt ?? null,
-		positionMs: 0,
+		startAtS: opts.startAtS && opts.startAtS > 0 ? opts.startAtS : 0,
+		positionMs: opts.startAtS && opts.startAtS > 0 ? Math.round(opts.startAtS * 1000) : 0,
 	});
 
 	try {
@@ -444,7 +481,7 @@ export async function playVideo(
 			radioSeenSongs.push(item);
 			radioSeenSongs = radioSeenSongs.slice(-128);
 		}
-		recordWatch(item);
+		recordWatch(item, opts.startAtS && opts.startAtS > 0 ? opts.startAtS * 1000 : 0);
 		if (ctx.continuous) void refillVideoRadio(Boolean(ctx.resetRadio));
 		return true;
 	} catch (err) {
@@ -469,7 +506,14 @@ export function refillVideoRadio(force = false): Promise<number> {
 	const excluded = state.queue.map((v) => v.tidal_id);
 	const recentArtists = state.queue.slice(Math.max(0, state.currentIndex - 8), state.currentIndex + 1)
 		.map((v) => v.artist_id).filter((id): id is number => id != null);
-	const request: Promise<{ items: VideoSessionItem[]; building: boolean; exhausted: boolean }> = radioStationId
+	const request: Promise<{ items: VideoSessionItem[]; building: boolean; exhausted: boolean }> = radioChannelId
+		? api.getVideoChannelNext(radioChannelId, {
+			exclude_video_ids: [...new Set([...excluded, ...radioSeenIds.slice(-256)])],
+			session_nonce: radioChannelNonce,
+			more_artist_ids: [...tasteMore],
+			less_artist_ids: [...tasteLess],
+		}).then(({ items, exhausted }) => ({ items, building: false, exhausted }))
+		: radioStationId
 		? api.getVideoStationNext(radioStationId, {
 			exclude_video_ids: excluded,
 			recent_video_ids: radioSeenIds.slice(-128),
@@ -562,6 +606,67 @@ export async function playVideoStation(
 		autoplay: true, continuous: true, resetRadio: true,
 		radioScope: 'station', stationId: station.id, stationNonce,
 	});
+}
+
+/** The scheduled video's runtime: the channel's own program length when the
+ *  tune answered with what is on now, else the video's duration. */
+function scheduledDuration(channel: VideoChannel, video: VideoSessionItem): number | null {
+	if (channel.now && channel.now.video.tidal_id === video.tidal_id && channel.now.duration_s > 0) return channel.now.duration_s;
+	return video.duration_ms != null && video.duration_ms > 0 ? video.duration_ms / 1000 : null;
+}
+
+/** "12 Bay Area Rap": how a tuned channel reads in the queue panel. */
+export function channelSourceLabel(channel: Pick<VideoChannel, 'no' | 'title'>): string {
+	return `${String(channel.no).padStart(2, '0')} ${channel.title}`;
+}
+
+/** Tune in to an On Air channel. The channel is on a clock, so this joins
+ *  the scheduled video where the schedule is now (offset_s) rather than at
+ *  0:00; past 80% of it, the next scheduled item starts instead. The rest of
+ *  the schedule is queued and refills come from the channel. Zaps and holds
+ *  are recorded by the usual watch history. */
+export async function playVideoChannel(id: string, opts: { explore?: ExploreMode } = {}): Promise<boolean> {
+	const tune = await api.tuneVideoChannel(id, opts.explore ? { explore: opts.explore } : {});
+	const scheduled = tune.video;
+	const start = tuneStart(tune.offset_s, scheduledDuration(tune.channel, scheduled));
+	const rest = tune.queue.filter((item) => item.tidal_id !== scheduled.tidal_id);
+	const skip = start.skip && rest.length > 0;
+	const queue = skip ? rest : [scheduled, ...rest];
+	const first = queue[0];
+	if (!first) return false;
+	// Nothing after it to skip to: join the tail anyway, it is what is on.
+	const startAtS = skip ? 0 : start.skip ? Math.max(0, tune.offset_s) : start.startAt;
+	return playVideo(first, {
+		queue,
+		source: 'mix',
+		sourceLabel: channelSourceLabel(tune.channel),
+		autoplay: true,
+		continuous: true,
+		resetRadio: true,
+		radioScope: 'channel',
+		channelId: tune.channel.id || id,
+		channelNonce: Math.random().toString(36).slice(2),
+		channel: tune.channel,
+	}, { startAtS });
+}
+
+/** "More / less like this" for an artist while a channel is on air. Both go
+ *  with every later refill; "less" also drops that artist's upcoming picks
+ *  now (the one playing stays). Returns how many upcoming videos it dropped. */
+export function noteChannelTaste(artistId: number, more: boolean): number {
+	tasteMore = tasteMore.filter((id) => id !== artistId);
+	tasteLess = tasteLess.filter((id) => id !== artistId);
+	if (more) tasteMore = [...tasteMore, artistId].slice(-TASTE_CAP);
+	else tasteLess = [...tasteLess, artistId].slice(-TASTE_CAP);
+	if (more) return 0;
+	const state = get(session);
+	const dropped = state.queue.filter((video, index) => index > state.currentIndex && video.artist_id === artistId);
+	if (dropped.length === 0) return 0;
+	// An in-flight refill must not bring them back.
+	radioSeenIds = [...radioSeenIds, ...dropped.map((video) => video.tidal_id)].slice(-256);
+	const droppedIds = new Set(dropped.map((video) => video.tidal_id));
+	update({ queue: state.queue.filter((video) => !droppedIds.has(video.tidal_id)) });
+	return dropped.length;
 }
 
 /** Re-fetch the current video's stream (expiry / network recovery). */
@@ -660,6 +765,8 @@ export function clearVideoSession() {
 	radioSeenSongs = [];
 	radioRefill = null;
 	radioSeedVideoId = null;
+	tasteMore = [];
+	tasteLess = [];
 	clearStation();
 	session.set({ ...initialState, autoplay: loadAutoplayPreference() });
 }

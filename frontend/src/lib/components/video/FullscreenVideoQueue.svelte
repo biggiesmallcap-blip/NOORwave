@@ -5,7 +5,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import VideoQueueList from './VideoQueueList.svelte';
-	import { videoSession, videoSessionUpcoming } from '$lib/stores/video_session';
+	import { videoChannelOnAir, videoSession, videoSessionUpcoming } from '$lib/stores/video_session';
 
 	let { onClose }: { onClose: () => void } = $props();
 
@@ -34,7 +34,10 @@
 >
 	<header>
 		<h2 class="t-section">Queue</h2>
-		<span class="t-meta">{$videoSessionUpcoming.length} up next</span>
+		<span class="t-meta">
+			{#if $videoChannelOnAir}<span class="channel">{String($videoChannelOnAir.no).padStart(2, '0')} {$videoChannelOnAir.title}</span>{/if}
+			{$videoSessionUpcoming.length} up next
+		</span>
 		<button type="button" class="close" onclick={onClose} aria-label="Close video queue" title="Close queue (Q)">&#x2715;</button>
 	</header>
 	<div class="queue-settings">
@@ -43,7 +46,8 @@
 			aria-pressed={$videoSession.continuous}
 			onclick={() => $videoSession.continuous ? videoSession.stopRadio() : videoSession.startRadio()}
 		>
-			{$videoSession.continuous ? 'Stop radio' : 'Start radio'}
+			<!-- On a channel, stopping its refills is leaving the channel. -->
+			{$videoChannelOnAir ? 'Leave channel' : $videoSession.continuous ? 'Stop radio' : 'Start radio'}
 		</button>
 		<button
 			type="button"
@@ -104,6 +108,12 @@
 	button:focus-visible {
 		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
+	}
+
+	.channel {
+		margin-right: var(--space-2);
+		font-family: var(--font-mono);
+		color: var(--text-secondary);
 	}
 
 	.close {

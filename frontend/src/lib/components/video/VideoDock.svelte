@@ -17,6 +17,7 @@
 		refreshVideoStream,
 		refillVideoRadio,
 		reportVideoEnded,
+		videoChannelOnAir,
 		videoPanelAnchor,
 		videoSession,
 		videoSessionUpcoming,
@@ -37,6 +38,7 @@
 	import { hasNativeVideoFullscreen, setNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';
 	import { videoFullscreenDimMs, videoFullscreenGrowMs, videoFullscreenStyle } from '$lib/stores/video_fullscreen_style';
 	import { loadSavedVideos, savedVideoIds, savingVideo, toggleSavedVideo } from '$lib/stores/saved_videos';
+	import OnAirStage from '$lib/video/onair/OnAirStage.svelte';
 
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. Where it sits:
@@ -608,6 +610,31 @@
 		previousPlace = next;
 	});
 
+	// --- On Air: the broadcast layer on the stage ---
+	// While a channel is on air the stage (watch page or fullscreen) draws the
+	// channel bug and lower thirds and takes the remote's keys. The corner and
+	// panel players stay plain. The player reports position at 4 Hz; only the
+	// broadcast layer reads it.
+	let broadcast = $derived($videoChannelOnAir !== null && (place === 'full' || place === 'expanded'));
+	let stagePositionS = $state(0);
+	let stageDurationS = $state(0);
+	let stageVideoId: number | null = null;
+
+	$effect(() => {
+		const id = $videoSession.current?.tidal_id ?? null;
+		if (id === stageVideoId) return;
+		stageVideoId = id;
+		stagePositionS = $videoSession.startAtS;
+		const ms = $videoSession.current?.duration_ms;
+		stageDurationS = ms != null && ms > 0 ? ms / 1000 : 0;
+	});
+
+	function handleProgress(positionMs: number, durationMs: number) {
+		noteVideoProgress(positionMs, durationMs);
+		stagePositionS = positionMs / 1000;
+		if (Number.isFinite(durationMs) && durationMs > 0) stageDurationS = durationMs / 1000;
+	}
+
 	// --- Prefetch the next stream for gapless autoplay ---
 	let prefetched = $state<PreloadedVideoStream & { videoId: number } | null>(null);
 	let prefetchSeq = 0;
@@ -728,7 +755,9 @@
 				variant={place === 'full' || expanded ? 'full' : 'mini'}
 				fullscreenActive={expanded}
 				onFullscreenToggle={toggleExpanded}
-				onProgress={noteVideoProgress}
+				onProgress={handleProgress}
+				startAt={$videoSession.startAtS}
+				{broadcast}
 				autoplayNext={$videoSession.autoplay}
 				hasNext={hasNext}
 				hasPrevious={hasPrevious}
@@ -745,6 +774,18 @@
 				onToggleSaved={() => void toggleSavedVideo($videoSession.current)}
 			/>
 		</div>
+
+		{#if broadcast && $videoChannelOnAir}
+			<OnAirStage
+				channel={$videoChannelOnAir}
+				current={$videoSession.current}
+				upNext={upNext}
+				positionS={stagePositionS}
+				durationS={stageDurationS}
+				startedAtS={$videoSession.startAtS}
+				fullscreen={expanded}
+			/>
+		{/if}
 
 		{#if expanded}
 			<!-- Fullscreen: the player's own controls only. -->
@@ -1081,7 +1122,7 @@
 	/* Controls sit out the glide, so the transform's scale never shows
 	   stretched buttons or text, and the pill morph, so they never pile up
 	   in a half-open window. */
-	.video-dock:is(.morphing, .unfolding) :global(:is(.controls, .top-meta, .up-next-pill)),
+	.video-dock:is(.morphing, .unfolding) :global(:is(.controls, .top-meta, .up-next-pill, .onair-stage)),
 	.video-dock:is(.morphing, .unfolding) .mini-chrome {
 		/* Beats the hover reveal: the pointer is usually on the dock. */
 		opacity: 0 !important;

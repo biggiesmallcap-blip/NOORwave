@@ -26,39 +26,22 @@ describe('Videos tab browse state', () => {
 		expect(source).not.toContain('<ScopeTabs');
 	});
 
-	test('daily picks lead as the featured row and play through the shared video queue', () => {
-		expect(source).toContain("discoverSets.find((s) => s.slug === 'daily-picks')");
-		expect(source).toContain('<GuideFeature label={`Daily picks: ${dailySet.title}`}');
-		expect(source).not.toContain('<ChartMural');
+	test('the tab is the On Air dial: channels on a clock, tuned in from a pick', () => {
+		// The shelf landing became On Air (docs/plans/2026-10-14-atlas-and-air.md);
+		// its own contract lives in src/lib/video/onair/onair_contract.test.ts.
+		expect(source).toContain('<ChannelCard {channel} {slot}');
+		expect(source).toContain('<ChannelRow {channel} {slot}');
+		expect(source).toContain('await tuneChannel(channel);');
+		expect(source).not.toContain('<GuideRow');
+		expect(source).not.toContain('VideoSetShelf');
 		expect(playCollection).toContain('export async function playFromShelf');
 		expect(playCollection).toContain('const ok = await playVideo(video, {');
-	});
-
-	test('every other built set is a guide row; a frame plays the set from that video', () => {
-		expect(source).toContain("discoverSets.filter((s) => s.slug !== 'daily-picks'");
-		expect(source).toContain('{#each shelfSets as set, index (set.slug)}');
-		expect(source).toContain('<GuideRow');
-		expect(source).toContain('onplay={(startWith) => playSetFrom(set, startWith)}');
-		expect(source).not.toContain('VideoSetShelf');
-	});
-
-	test('shelf playback uses the full row while browse radio uses the library mix', () => {
-		const shelfPlay = source.slice(source.indexOf('function playFromSet'), source.indexOf('function playBrowseMix'));
-		expect(shelfPlay).toContain('playFromShelf(video, set.items, set.title, { autoplay: true })');
-		const browsePlay = source.slice(source.indexOf('function playBrowseMix'), source.indexOf('async function handleDeepLink'));
-		expect(browsePlay).toContain("playFromShelf(first, browseMix, 'Video radio', { autoplay: true, continuous: true, radioScope: 'library' })");
-		expect(source).toContain('onclick={() => dailySet && playFromSet(dailySet, 0)}>Play all</button>');
 	});
 
 	test("TIDAL's editorial modules stay on their own tab", () => {
 		expect(source).not.toContain("api.getTidalPage('videos')");
 		expect(source).not.toContain('<TidalDiscoverShelves');
 		expect(playCollection).toContain('export function playEditorialItem(item: TidalHomeItem, modules: TidalHomeModule[]): boolean');
-	});
-
-	test('landing chips only appear when there is nothing to browse', () => {
-		expect(source).toContain('{#if !hasBrowseContent && !loadingBrowse}');
-		expect(source).toContain('onclick={() => videoSectionQuery.set(item)}');
 	});
 
 	test('old deep links move to the watch page or play their collection', () => {
@@ -98,7 +81,8 @@ describe('Video section flow', () => {
 		expect(header).toContain('{#snippet field()}');
 		expect(header.indexOf('<SearchField')).toBeLessThan(header.indexOf('{#snippet tabs()}'));
 		expect(header).toContain('<ScopeTabs tabs={VIDEO_TABS} current={tab} label="Video pages" replaceState />');
-		expect(section).toContain("{ id: 'editorial', href: '/videos/editorial', label: 'TIDAL editorial' }");
+		// Editorial lives under the Archive tab since the Atlas and Air tabs.
+		expect(section).toContain("'/videos/editorial': 'archive',");
 	});
 
 	test('Back is unconditional and returns to where the listener came from', () => {
@@ -108,7 +92,7 @@ describe('Video section flow', () => {
 	});
 
 	test('the field filters likes on Liked and searches TIDAL everywhere else', () => {
-		expect(layout).toContain("let searchingTidal = $derived(query.length > 0 && tab !== 'liked');");
+		expect(layout).toContain('let searchingTidal = $derived(query.length > 0 && !onLiked);');
 		expect(layout).toContain('<VideoSearchResults />');
 		expect(layout).toContain('<div class="section-body" hidden={searchingTidal}>');
 		expect(layout).toContain('Search all of TIDAL for');
