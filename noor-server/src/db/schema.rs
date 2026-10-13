@@ -79,7 +79,27 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_075,
     MIGRATION_076,
     MIGRATION_077,
+    MIGRATION_078,
 ];
+
+// Atlas Picture: one thumbnail per map artist (its best programmable cut)
+// and the dominant colour of that thumbnail, filled slowly in the background
+// by services::video_intel::pictures. `art` is the TIDAL image path without
+// a size. Rows are re-seeded from the map after every intel build.
+// Runs inside the >= 69 migration transaction: no BEGIN/COMMIT here.
+const MIGRATION_078: &str = r#"
+CREATE TABLE IF NOT EXISTS video_artist_pictures (
+    artist_tidal_id INTEGER PRIMARY KEY,
+    video_id INTEGER,
+    art TEXT,
+    rgb INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'failed')),
+    tries INTEGER NOT NULL DEFAULT 0,
+    fetched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_video_artist_pictures_status
+    ON video_artist_pictures(status, tries);
+"#;
 
 // Radio continuation and one queue-source switch.
 // - radio_seed_*: the seed and blend of the radio that built the queue, so
