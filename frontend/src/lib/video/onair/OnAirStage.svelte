@@ -323,11 +323,12 @@
 		font-size: var(--font-size-2xl);
 		color: #fff;
 	}
+	/* Long names wrap to a second line, right aligned, instead of losing
+	   their end. */
 	.bug-name {
-		max-width: 22ch;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		max-width: 30ch;
+		text-align: right;
+		text-wrap: balance;
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-semibold);
 		text-transform: uppercase;
@@ -391,11 +392,16 @@
 		pointer-events: auto;
 		animation: lt-in var(--motion-slow) 80ms both;
 	}
+	/* The title wraps (two lines at most, balanced) rather than cutting off
+	   mid-word. */
 	.lt-song {
 		max-width: 100%;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		text-wrap: balance;
 		font-family: var(--font-display);
 		font-size: var(--font-size-2xl);
 		font-style: italic;
@@ -436,7 +442,7 @@
 	}
 	.fullscreen .lower-third { bottom: clamp(96px, 13%, 168px); }
 	.fullscreen .lt-artist { font-size: var(--font-size-md); }
-	.fullscreen .lt-song { font-size: var(--font-size-4xl); }
+	.fullscreen .lt-song { font-size: var(--font-size-3xl); }
 	.fullscreen .lt-meta { font-size: var(--font-size-sm); }
 	.fullscreen .lt-why { font-size: var(--font-size-xs); }
 
