@@ -1472,11 +1472,16 @@ export class AtlasRenderer {
 				const dimmed = this.selectedScene >= 0 && this.selectedScene !== label.index ? 0.45 : 1;
 				const alpha = label.alpha * dimmed * reveal;
 				const name = scene.name.toUpperCase();
+				const cx = x + box.width / 2;
+				// A soft dark pool under the name, so it reads over a busy cluster.
+				const shadeW = box.width + box.size * 3.4;
+				const shadeH = box.height + box.size * 2.4;
+				ctx.globalAlpha = alpha * 0.85;
+				ctx.drawImage(labelShade(), cx - shadeW / 2, y + box.height / 2 - shadeH / 2, shadeW, shadeH);
 				ctx.globalAlpha = alpha;
 				ctx.font = `650 ${box.size}px ${SCENE_FONT}`;
 				ctx.letterSpacing = SCENE_TRACKING;
 				ctx.textAlign = 'center';
-				const cx = x + box.width / 2;
 				ctx.strokeStyle = STAGE.textHalo;
 				ctx.lineWidth = 3;
 				ctx.strokeText(name, cx, y);
@@ -1499,6 +1504,13 @@ export class AtlasRenderer {
 				const fade = pinnedLabel ? 1 : this.labelFade;
 				ctx.globalAlpha = label.alpha * reveal * fade * (this.selectedScene >= 0 && data.scene[label.index] !== this.selectedScene ? 0.5 : 1);
 				ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+				if (pinnedLabel) {
+					const w = ctx.measureText(label.text).width;
+					const alpha = ctx.globalAlpha;
+					ctx.globalAlpha = alpha * 0.9;
+					ctx.drawImage(labelShade(), x - 18, y - 9, w + 36, ARTIST_FONT_PX + 20);
+					ctx.globalAlpha = alpha;
+				}
 				ctx.strokeStyle = STAGE.textHalo;
 				ctx.lineWidth = 2.5;
 				ctx.strokeText(label.text, x, y + 1);
@@ -1509,6 +1521,30 @@ export class AtlasRenderer {
 		ctx.globalAlpha = 1;
 		ctx.textBaseline = 'alphabetic';
 	}
+}
+
+/** The soft dark pool drawn under major labels: one radial sprite, made
+ *  once and stretched to each label, so it costs a drawImage per name. */
+let LABEL_SHADE: HTMLCanvasElement | null = null;
+function labelShade(): HTMLCanvasElement {
+	if (LABEL_SHADE) return LABEL_SHADE;
+	const size = 128;
+	const canvas = document.createElement('canvas');
+	canvas.width = size;
+	canvas.height = size;
+	const g = canvas.getContext('2d');
+	if (g) {
+		const r = size / 2;
+		const grad = g.createRadialGradient(r, r, 0, r, r, r);
+		grad.addColorStop(0, 'rgba(4, 5, 10, 0.62)');
+		grad.addColorStop(0.5, 'rgba(4, 5, 10, 0.42)');
+		grad.addColorStop(0.8, 'rgba(4, 5, 10, 0.12)');
+		grad.addColorStop(1, 'rgba(4, 5, 10, 0)');
+		g.fillStyle = grad;
+		g.fillRect(0, 0, size, size);
+	}
+	LABEL_SHADE = canvas;
+	return canvas;
 }
 
 const STAR_LAYERS: [HTMLCanvasElement | null, number, number][] = [
