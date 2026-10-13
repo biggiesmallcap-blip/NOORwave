@@ -28,6 +28,7 @@
 		startPlaylistRadio,
 	} from '$lib/stores/player';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
+	import NewPlaylistDialog from '$lib/components/playlist/NewPlaylistDialog.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
@@ -204,6 +205,7 @@
 	// ─── Page state ───────────────────────────────────────────────────────────
 	let playlists = $state<Playlist[]>([]);
 	let playlistTracksById = $state<Record<number, Track[]>>({});
+	let newPlaylistOpen = $state(false);
 	let isLoading = $state(true);
 	let loadError = $state('');
 	let playlistQuery = $state('');
@@ -1190,7 +1192,8 @@
 	>
 		{#snippet actions()}
 			<button class="btn btn-glass" onclick={loadPlaylists}>Refresh</button>
-			<button class="btn btn-primary" onclick={openNew}>New smart playlist</button>
+			<button class="btn btn-secondary" onclick={openNew}>New smart playlist</button>
+			<button class="btn btn-primary" onclick={() => (newPlaylistOpen = true)}>New playlist</button>
 		{/snippet}
 	</PageHeader>
 
@@ -1352,9 +1355,17 @@
 			{/each}
 		</div>
 	{:else}
-		<EmptyState title="No playlists yet" copy="Connect TIDAL and sync to pull playlists, or create a smart playlist above." />
+		<EmptyState title="No playlists yet" copy="Create one and add tracks to it, build a smart playlist from rules, or sync your TIDAL playlists.">
+			{#snippet actions()}
+				<button class="btn btn-primary" onclick={() => (newPlaylistOpen = true)}>New playlist</button>
+			{/snippet}
+		</EmptyState>
 	{/if}
 </div>
+
+{#if newPlaylistOpen}
+	<NewPlaylistDialog onClose={() => (newPlaylistOpen = false)} />
+{/if}
 
 <!-- ─── Rule Editor Drawer ──────────────────────────────────────────────────── -->
 {#if editorOpen}

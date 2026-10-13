@@ -72,4 +72,29 @@ describe('playlist detail page contracts', () => {
 		expect(detail).toContain('size={320}');
 		expect(detail).toContain('size={640}');
 	});
+
+	test('selection is by position, so one copy of a repeated track is one row', () => {
+		expect(detail).toContain('selected={$selectedPositions.has(index)}');
+		expect(detail).toContain('selection.select([index], additive)');
+		expect(detail).not.toContain('has(track.id)');
+	});
+
+	test('a failed or overlapping reorder never leaves an order the server lacks', () => {
+		expect(detail).toContain('canDrag: () => editable && !busy');
+		expect(detail).toContain('if (!ok) tracks = previous;');
+	});
+
+	test('failures show the server sentence, not ApiError text', () => {
+		expect(detail).toContain('showToast(failureText(failure, reason)');
+		expect(detail).not.toContain('`${failure}: ${reason}`');
+	});
+
+	test('a regular playlist can be created from /playlists', () => {
+		const list = readFileSync(join(here, '+page.svelte'), 'utf8');
+		const dialog = read('lib/components/playlist/NewPlaylistDialog.svelte');
+		expect(list).toContain('<NewPlaylistDialog');
+		expect(list).toContain('>New playlist</button>');
+		expect(dialog).toContain('api.createPlaylist(trimmed)');
+		expect(dialog).toContain('goto(`/playlists/${playlist.id}`)');
+	});
 });

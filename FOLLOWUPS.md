@@ -10,6 +10,24 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### tidal: confirm the playlist move toIndex convention live
+
+`move_playlist_item` sends TIDAL's `toIndex` measured after lifting the item
+out, the same convention the local move uses. TIDAL does not document it and
+it has never been checked against the real API. Next check: on a throwaway
+TIDAL playlist with a video in it, move an item down and up from NOORwave and
+compare the order in the TIDAL app; if TIDAL counts before the lift, adjust
+`tidal_move_target` in playlist_routes.rs (downward moves gain one).
+Spawned by: the playlist TIDAL write-safety branch (bsc/playlist-tidal-write-safety).
+
+### playlists: let the picker create a playlist directly
+
+The Add to playlist picker's empty state links to /playlists, which now has a
+New playlist button, but the user still loses their place. Open
+`NewPlaylistDialog` from the picker and add the pending tracks to the new
+playlist. Left out to avoid conflicting with the picker rewrite in PR #360.
+Spawned by: the playlist TIDAL write-safety branch (bsc/playlist-tidal-write-safety).
+
 ### remote: browser reconnect timer loses its receiver
 
 Source: the Library loading browser regression, before its WebSocket fixture was

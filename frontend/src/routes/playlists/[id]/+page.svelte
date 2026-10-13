@@ -3,7 +3,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import type { Snapshot } from './$types';
-	import { api, type Playlist, type Track } from '$lib/api/client';
+	import { api, ApiError, type Playlist, type Track } from '$lib/api/client';
 	import { cachedApi } from '$lib/cache/api_queries';
 	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
 	import { wsMessages } from '$lib/api/ws';
@@ -51,8 +51,11 @@
 
 	let pendingDelete = $state(false);
 
+	// Keyed by position, not track id: a playlist can hold the same track twice,
+	// and selecting one copy must not select (and remove) the other.
 	const selection = createSelection();
-	const selectedIds = selection.ids;
+	const selectedPositions = selection.ids;
+	const lastSelected = selection.lastId;
 
 	export const snapshot: Snapshot<{ scrollY: number }> = {
 		capture: () => ({ scrollY: captureScroll() }),
@@ -97,6 +100,8 @@
 			if (seq !== loadSeq) return;
 			allPlaylists = listData.playlists;
 			playlist = listData.playlists.find((p) => p.id === playlistId) ?? null;
+			// Positions mean something else once the order changes underneath.
+			if (trackOrder(trackData.tracks) !== trackOrder(tracks)) selection.clear();
 			tracks = trackData.tracks;
 			if (!playlist) error = 'That playlist no longer exists.';
 		} catch (reason) {
@@ -105,6 +110,19 @@
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
+	}
+
+	function trackOrder(list: Track[]) {
+		return list.map((track) => track.id).join(',');
+	}
+
+	// Playlist routes answer in sentences ("This playlist changed on TIDAL.
+	// Refresh it and try again."). Show those; never "ApiError: ...".
+	function failureText(failure: string, reason: unknown) {
+		if (reason instanceof ApiError && reason.status !== 500 && !/^API error/i.test(reason.message)) {
+			return `${failure}. ${reason.message}`;
+		}
+		return `${failure}. Try again.`;
 	}
 
 	/**
@@ -123,7 +141,7 @@
 			await load();
 			return true;
 		} catch (reason) {
-			showToast(`${failure}: ${reason}`, 'error');
+			showToast(failureText(failure, reason), 'error');
 			return false;
 		} finally {
 			busy = false;
@@ -148,11 +166,7 @@
 	}
 
 	async function removeSelected() {
-		const ids = new Set($selectedIds);
-		const positions = tracks
-			.map((track, index) => (ids.has(track.id) ? index : -1))
-			.filter((index) => index >= 0);
-		await removePositions(positions);
+		await removePositions([...$selectedPositions].sort((a, b) => a - b));
 	}
 
 	// ─── Reorder ──────────────────────────────────────────────────────────────
@@ -161,20 +175,25 @@
 	const drag = createDragReorder({
 		indexOf: (position) => position,
 		length: () => tracks.length,
-		canDrag: () => editable,
+		canDrag: () => editable && !busy,
 		onDrop: (position, toIndex) => moveTrack(position, toIndex),
 	});
 	const dragState = drag.state;
 
 	async function moveTrack(from: number, to: number) {
-		if (from < 0 || from === to) return;
+		if (busy || from < 0 || from === to) return;
 		// Optimistic: the drop indicator already showed the user where it lands,
 		// so snapping back on a slow round trip would read as a dropped input.
+		// A failed move does snap back, so the list never shows an order the
+		// server (or TIDAL) does not have.
+		const previous = tracks;
 		const next = [...tracks];
 		const [moved] = next.splice(from, 1);
 		next.splice(Math.min(Math.max(to, 0), next.length), 0, moved);
 		tracks = next;
-		await mutate(() => api.movePlaylistTrack(playlistId, from, to), 'Could not reorder');
+		selection.clear();
+		const ok = await mutate(() => api.movePlaylistTrack(playlistId, from, to), 'Could not reorder');
+		if (!ok) tracks = previous;
 	}
 
 	// ─── Rename / delete ──────────────────────────────────────────────────────
@@ -265,17 +284,17 @@
 
 	function handleSelect(event: MouseEvent | KeyboardEvent, index: number) {
 		const additive = event.ctrlKey || event.metaKey;
-		if (event.shiftKey && $selectedIds.size > 0) {
-			// Range-select from the first already-selected row to this one.
-			const anchor = tracks.findIndex((track) => $selectedIds.has(track.id));
+		const anchor = $lastSelected;
+		if (event.shiftKey && anchor !== null) {
+			// Range-select from the last clicked row to this one.
 			const [from, to] = anchor <= index ? [anchor, index] : [index, anchor];
 			selection.select(
-				tracks.slice(from, to + 1).map((track) => track.id),
+				Array.from({ length: to - from + 1 }, (_, offset) => from + offset),
 				true,
 			);
 			return;
 		}
-		selection.select([tracks[index].id], additive);
+		selection.select([index], additive);
 	}
 </script>
 
@@ -388,8 +407,8 @@
 			</div>
 		{/if}
 
-		{#if $selectedIds.size > 0 && editable}
-			<SelectionBar summary={`${$selectedIds.size} selected`} sticky>
+		{#if $selectedPositions.size > 0 && editable}
+			<SelectionBar summary={`${$selectedPositions.size} selected`} sticky>
 				{#snippet actions()}
 					<button class="btn btn-glass btn-sm" onclick={() => selection.clear()}>Clear</button>
 					<button class="btn btn-sm danger-solid" disabled={busy} onclick={() => void removeSelected()}>
@@ -424,7 +443,7 @@
 							{index}
 							isCurrent={$currentTrack?.id === track.id}
 							isPlaying={$isPlaying && $currentTrack?.id === track.id}
-							selected={$selectedIds.has(track.id)}
+							selected={$selectedPositions.has(index)}
 							onSelect={editable ? (event) => handleSelect(event, index) : undefined}
 							onRowClick={() => void playAll(track.id)}
 							menuOptions={trackMenuOptions(index)}
