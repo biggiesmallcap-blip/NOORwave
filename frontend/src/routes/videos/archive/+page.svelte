@@ -20,6 +20,7 @@
 		type ArchiveLenses,
 	} from '$lib/video/archive/lenses';
 	import { playFromList } from '$lib/video/archive/play';
+	import { gridColumns } from '$lib/video/related_feed';
 
 	// Archive: find one thing. Lenses over every song in the catalog (one
 	// tile per song, its best cut on the face), with live counts on each lens.
@@ -64,8 +65,14 @@
 
 	let openSong = $state<ArchiveSong | null>(null);
 	let sentinel = $state<HTMLDivElement | null>(null);
-	let topSentinel = $state<HTMLDivElement | null>(null);
 	let gridEl = $state<HTMLDivElement | null>(null);
+	// After a jump, placeholder tiles stand in above the loaded songs for the
+	// songs before them (up to three pages, whole rows), so a fast flick up runs
+	// into shimmering tiles that turn into songs, never the page's top.
+	let columns = $state(4);
+	let above = $derived(
+		feedState.base > 0 ? Math.ceil(Math.min(feedState.base, PAGE_SIZE * 3) / columns) * columns : 0
+	);
 	/** Index into `jumps` of the section at the top of the screen. */
 	let section = $state(-1);
 	/** Offset in the whole result of the first song on screen. */
@@ -121,6 +128,21 @@
 		return gridEl?.closest<HTMLElement>('main.workspace') ?? null;
 	}
 
+	/** The song tiles in the grid, without placeholders or skeletons. */
+	function songTiles(): HTMLElement[] {
+		return gridEl ? [...gridEl.querySelectorAll<HTMLElement>(':scope > .rise-in-card')] : [];
+	}
+
+	$effect(() => {
+		const grid = gridEl;
+		if (!grid) return;
+		const measure = () => (columns = gridColumns(getComputedStyle(grid).gridTemplateColumns));
+		const observer = new ResizeObserver(measure);
+		observer.observe(grid);
+		measure();
+		return () => observer.disconnect();
+	});
+
 	/** Jump the list to a section: load from there when it is not loaded,
 	 *  then bring that row to the top. */
 	async function jump(offset: number) {
@@ -129,7 +151,7 @@
 		if (index === null) return;
 		dockHidden = false;
 		await tick();
-		const tile = gridEl?.children[index] as HTMLElement | undefined;
+		const tile = songTiles()[index];
 		ownScroll = true;
 		tile?.scrollIntoView({ block: 'start', behavior: 'auto' });
 		updateSection();
@@ -144,13 +166,13 @@
 			return;
 		}
 		const top = scroller()?.getBoundingClientRect().top ?? 0;
-		const tiles = grid.children;
+		const tiles = songTiles();
 		let lo = 0;
 		let hi = tiles.length - 1;
 		let first = 0;
 		while (lo <= hi) {
 			const mid = (lo + hi) >> 1;
-			if ((tiles[mid] as HTMLElement).getBoundingClientRect().bottom > top + 8) {
+			if (tiles[mid].getBoundingClientRect().bottom > top + 8) {
 				first = mid;
 				hi = mid - 1;
 			} else lo = mid + 1;
@@ -228,32 +250,43 @@
 	}
 
 	// Earlier pages come in above without moving what is on screen. The
-	// browser's own scroll anchoring does not hold at scroll offset 0 (the
-	// very top), where the new rows would push the list down, leave the top
-	// sentinel in view and pull in page after page back to the start. So
-	// the first row on screen is noted before the prepend and put back to
-	// the same height after it.
+	// browser's own scroll anchoring does not hold at scroll offset 0 and
+	// does not know placeholders turn into songs, so the first song tile is
+	// measured right before the prepend lands (not when it was asked for:
+	// the listener may have scrolled on meanwhile) and put back at the same
+	// height after it. Placeholders above it then turn into songs in place.
 	let earlierAnchor: { key: string; top: number } | null = null;
+	let prepending = false;
 
 	function loadEarlier() {
-		const grid = gridEl;
-		const el = scroller();
-		if (grid && el) {
-			const top = el.getBoundingClientRect().top;
-			for (const tile of grid.children) {
-				const rect = (tile as HTMLElement).getBoundingClientRect();
-				const key = (tile as HTMLElement).dataset.key;
-				if (rect.bottom > top && key) {
-					earlierAnchor = { key, top: rect.top };
-					break;
-				}
-			}
-		}
+		if (feedState.loadingEarlier || feedState.base <= 0) return;
+		prepending = true;
 		feed.loadEarlier();
 	}
 
+	$effect.pre(() => {
+		void feedState.items;
+		if (!prepending || feedState.loadingEarlier) return;
+		prepending = false;
+		const el = scroller();
+		if (!el) return;
+		const top = el.getBoundingClientRect().top;
+		for (const tile of songTiles()) {
+			const rect = tile.getBoundingClientRect();
+			const key = tile.dataset.key;
+			if (rect.bottom > top && key) {
+				earlierAnchor = { key, top: rect.top };
+				return;
+			}
+		}
+		// Everything on screen is placeholders: hold the first song tile.
+		const first = songTiles()[0];
+		if (first?.dataset.key) earlierAnchor = { key: first.dataset.key, top: first.getBoundingClientRect().top };
+	});
+
 	$effect(() => {
 		void feedState.base;
+		void feedState.items;
 		const anchor = earlierAnchor;
 		const el = scroller();
 		if (!anchor || !el || feedState.loadingEarlier) return;
@@ -266,16 +299,25 @@
 		}
 	});
 
-	// Scrolling up past the first loaded row brings the page before it in.
+	// Scrolling up toward the first loaded song brings the page before it
+	// in, well ahead (1500 px), so the placeholders are rarely seen for
+	// long. Not right after a jump, only once the listener scrolls up.
 	$effect(() => {
-		if (!topSentinel || !earlierArmed || feedState.base <= 0 || feedState.loadingEarlier) return;
+		const grid = gridEl;
+		void above;
+		void items;
+		if (!grid || !earlierArmed || feedState.base <= 0 || feedState.loadingEarlier) return;
 		const observer = new IntersectionObserver(
 			(entries) => {
 				if (entries.some((entry) => entry.isIntersecting)) loadEarlier();
 			},
-			{ rootMargin: '600px 0px' }
+			{ root: scroller(), rootMargin: '1500px 0px 0px 0px' }
 		);
-		observer.observe(topSentinel);
+		void tick().then(() => {
+			const first = grid.querySelector(':scope > .rise-in-card');
+			if (first) observer.observe(first);
+			grid.querySelectorAll(':scope > .placeholder-above').forEach((el) => observer.observe(el));
+		});
 		return () => observer.disconnect();
 	});
 
@@ -379,13 +421,14 @@
 	{:else}
 		<div class="results" class:railed={showRail}>
 			<div class="list">
-				{#if feedState.base > 0}
-					<div class="sentinel" bind:this={topSentinel} aria-hidden="true"></div>
-					<button type="button" class="earlier" disabled={feedState.loadingEarlier} onclick={loadEarlier}>
-						{feedState.loadingEarlier ? 'Loading earlier songs...' : `${feedState.base.toLocaleString()} songs before these`}
-					</button>
-				{/if}
 				<div class="grid" class:dimmed={refreshing} bind:this={gridEl}>
+					{#each Array(above) as _, i (i)}
+						<div class="tile-skeleton placeholder-above" aria-hidden="true">
+							<div class="sk-art"></div>
+							<div class="sk-line"></div>
+							<div class="sk-line short"></div>
+						</div>
+					{/each}
 					{#each items as song, index (song.song_key)}
 						<div class="rise-in-card" data-key={song.song_key} style={`--rise-index: ${index % 24}`}>
 							<ArchiveTile {song} onplay={play} onversions={(picked) => (openSong = picked)} />
@@ -523,11 +566,15 @@
 
 	/* The results and, for the A-Z and year sorts, the jump rail beside
 	   them. */
+	/* overflow-anchor: the page holds the place across a prepend itself
+	   (see earlierAnchor); the browser's own anchoring would move the
+	   scroll too, and its move reads as the listener scrolling down. */
 	.results {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
 		gap: var(--space-4);
 		min-width: 0;
+		overflow-anchor: none;
 	}
 
 	.results.railed {
@@ -546,28 +593,6 @@
 		scroll-margin-top: calc(var(--dock-h, 0px) + var(--space-4));
 	}
 
-	.earlier {
-		justify-self: center;
-		height: var(--control-h);
-		padding: 0 16px;
-		border: 1px solid var(--border-subtle);
-		border-radius: 999px;
-		background: none;
-		color: var(--text-secondary);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		cursor: pointer;
-	}
-
-	.earlier:hover:not(:disabled) {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-
-	.earlier:disabled {
-		cursor: wait;
-		opacity: 0.7;
-	}
 
 	.grid {
 		display: grid;
@@ -604,6 +629,12 @@
 	@keyframes refresh-sweep {
 		from { transform: translateX(-100%); }
 		to { transform: translateX(250%); }
+	}
+
+	/* Placeholders above a jumped list show at once: they are scrolled
+	   into, not waited for. */
+	.tile-skeleton.placeholder-above {
+		animation: none;
 	}
 
 	/* Skeleton in the tile's exact geometry, shown after 150ms. */
