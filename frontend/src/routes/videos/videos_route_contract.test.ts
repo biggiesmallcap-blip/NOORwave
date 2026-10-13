@@ -46,7 +46,7 @@ describe('watch page contract', () => {
 		expect(watch).toContain('event.preventDefault();');
 		expect(watch).toContain('event.stopPropagation();');
 		expect(watch).toContain('buildArtistMenu({ tidal_id: current.artist_id');
-		expect(watch).toContain('await api.setVideoSaved(item, saved)');
+		expect(watch).toContain('toggleSavedVideo(current)');
 		expect(watch).toContain('clearVideoSession()');
 		expect(watch).not.toContain('$:');
 	});

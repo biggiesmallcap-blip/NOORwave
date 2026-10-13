@@ -170,6 +170,15 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain('.video-dock:is(.morphing, .unfolding) .mini-chrome');
 	});
 
+	test('fullscreen shows a heart that shares saved state with the watch page', () => {
+		// Fullscreen hides the watch page's Save pill, so the player carries
+		// its own, backed by the same store so both always agree.
+		expect(dock).toContain('onToggleSaved={() => void toggleSavedVideo($videoSession.current)}');
+		expect(dock).toContain('if (expanded) void loadSavedVideos();');
+		expect(player).toContain('class="fs-pill heart"');
+		expect(player).toContain("aria-label={saved ? 'Remove video from likes' : 'Save video to likes'}");
+	});
+
 	test('frees the exclusive device when a video starts playing', () => {
 		expect(dock).toContain('api.releaseExclusivePlayback()');
 		expect(client).toContain("'/api/playback/exclusive/release'");
