@@ -508,11 +508,31 @@ export class AtlasRenderer {
 		this.artOf = new Array(data.count).fill(null);
 		const p = this.pictures;
 		if (p) {
+			// Per scene, the mean of the colours read so far: an artist not
+			// read yet takes its scene's colour once three of its artists
+			// are, so clusters colour up long before every thumbnail is read.
+			const sums = data.scenes.map(() => [0, 0, 0, 0]);
 			for (let n = 0; n < p.ids.length; n++) {
 				const i = data.indexById.get(p.ids[n]);
 				if (i === undefined) continue;
-				this.pictureOf[i] = pictureBucket(p.rgb[n]);
+				const rgb = p.rgb[n];
+				this.pictureOf[i] = pictureBucket(rgb);
 				this.artOf[i] = p.art[n] || null;
+				const s = data.scene[i];
+				if (s >= 0) {
+					const sum = sums[s];
+					sum[0] += (rgb >> 16) & 255;
+					sum[1] += (rgb >> 8) & 255;
+					sum[2] += rgb & 255;
+					sum[3] += 1;
+				}
+			}
+			const sceneBucket = sums.map(([r, g, b, n]) =>
+				n >= 3 ? pictureBucket((Math.round(r / n) << 16) | (Math.round(g / n) << 8) | Math.round(b / n)) : PICTURE_UNKNOWN
+			);
+			for (let i = 0; i < data.count; i++) {
+				const s = data.scene[i];
+				if (s >= 0 && this.pictureOf[i] === PICTURE_UNKNOWN) this.pictureOf[i] = sceneBucket[s];
 			}
 		}
 		this.lookVersion += 1;

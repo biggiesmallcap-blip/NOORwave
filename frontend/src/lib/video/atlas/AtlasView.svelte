@@ -992,13 +992,19 @@
 		</button>
 		{#if legendOpen}
 			{#if $atlasLook === 'picture'}
-				<p class="legend-copy">Every artist in the colour of its own videos' artwork. Zoom in close and the dots become the pictures.</p>
+				<p class="legend-copy">Every artist in the colour of its own videos' artwork; one not read yet takes its scene's colour. Zoom in close and the dots become the pictures.</p>
 				<ul class="legend-rows">
 					<li>
 						<span class="swatch picture" aria-hidden="true"></span>
 						<span class="l-name">Artwork</span>
-						<span class="l-help">{pictures && pictures.ready < pictures.total ? 'Reading in the background' : 'Read for every artist on the map'}</span>
-						<span class="l-count">{pictures ? `${formatCount(pictures.ready)}` : '...'}</span>
+						<span class="l-help">
+							{!pictures || pictures.ready === 0
+								? 'Not read yet: it is read in the background'
+								: pictures.ready < pictures.total
+									? `Reading: ${formatCount(pictures.total - pictures.ready)} to go`
+									: 'Read for every artist on the map'}
+						</span>
+						<span class="l-count">{formatCount(pictures?.ready ?? 0)}</span>
 					</li>
 					<li><span class="swatch l0" aria-hidden="true"></span><span class="l-name">Uncharted</span><span class="l-help">{LIGHT_HELP[0]}</span><span class="l-count">{formatCount(data.lightCounts[0])}</span></li>
 				</ul>
