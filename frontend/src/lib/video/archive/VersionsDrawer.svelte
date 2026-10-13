@@ -349,7 +349,7 @@
 		border-radius: 999px;
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-semibold);
-		line-height: 1.2;
+		line-height: var(--line-height-tight);
 	}
 
 	.cut {

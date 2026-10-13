@@ -91,8 +91,9 @@ describe('Video section flow', () => {
 		expect(layout.slice(0, layout.indexOf('<CommandHeader')).split('<div class="video-section">')[1]).not.toContain('{#if');
 	});
 
-	test('the field filters likes on Liked and searches TIDAL everywhere else', () => {
-		expect(layout).toContain('let searchingTidal = $derived(query.length > 0 && !onLiked);');
+	test('the field filters in place on Liked, Archive and Atlas and searches TIDAL everywhere else', () => {
+		expect(layout).toContain('let filtersInPlace = $derived(onLiked || onArchive || onAtlas);');
+		expect(layout).toContain('let searchingTidal = $derived(query.length > 0 && !filtersInPlace);');
 		expect(layout).toContain('<VideoSearchResults />');
 		expect(layout).toContain('<div class="section-body" hidden={searchingTidal}>');
 		expect(layout).toContain('Search all of TIDAL for');
