@@ -1,3 +1,10 @@
+<script lang="ts" module>
+	// The artists this listening session has passed through, oldest first,
+	// for the Atlas mini map's trail. Module scope, so it survives leaving
+	// and reopening the watch page.
+	let sessionTrail: number[] = [];
+</script>
+
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto, replaceState } from '$app/navigation';
@@ -33,6 +40,8 @@
 	} from '$lib/video/related_feed';
 	import type { ExploreVideo } from '$lib/api/video_explore_types';
 	import StageRow from '$lib/video/archive/StageRow.svelte';
+	import AtlasMiniMap from '$lib/video/atlas/AtlasMiniMap.svelte';
+	import { cachedAtlas, loadAtlas, type LoadedAtlas } from '$lib/video/atlas/atlas_data';
 	import VersionsDrawer from '$lib/video/archive/VersionsDrawer.svelte';
 	import { CUT_LABELS, hueColor } from '$lib/video/archive/lenses';
 	import { concertLength, versionCaption } from '$lib/video/archive/versions';
@@ -87,6 +96,22 @@
 	let useFallback = $derived(stageSettled && needsFallback(stageRows));
 
 	let current = $derived($videoSession.current);
+
+	// The mini map only mounts once the Atlas is loaded and the artist on
+	// stage is on it, so an uncharted artist (or a cold map) leaves the slot
+	// empty and the rows keep the full width.
+	let atlas = $state<LoadedAtlas | null>(cachedAtlas());
+	let trail = $state<number[]>(sessionTrail);
+	let stageArtistId = $derived(current?.artist_id ?? null);
+	let onMap = $derived(stageArtistId != null && (atlas?.data.indexById.has(stageArtistId) ?? false));
+	$effect(() => {
+		const id = stageArtistId;
+		if (id == null) return;
+		if (!atlas) void loadAtlas().then((loaded) => (atlas = loaded)).catch(() => {});
+		if (sessionTrail[sessionTrail.length - 1] === id) return;
+		sessionTrail = [...sessionTrail.filter((seen) => seen !== id), id].slice(-10);
+		trail = sessionTrail;
+	});
 	let streamUrl = $derived($videoSession.streamUrl);
 	let loadingStream = $derived($videoSession.loading);
 	let hasSession = $derived(Boolean(current || streamUrl || loadingStream));
@@ -509,7 +534,7 @@
 				{/if}
 			</div>
 			<!-- The Atlas mini map mounts here. Empty, it takes no space. -->
-			<div class="atlas-minimap-slot"></div>
+			<div class="atlas-minimap-slot">{#if onMap}<AtlasMiniMap artistId={stageArtistId} {trail} />{/if}</div>
 		</div>
 	{/if}
 

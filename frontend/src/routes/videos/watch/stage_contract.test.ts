@@ -33,8 +33,10 @@ describe('watch page stage contract', () => {
 		expect(watch).toContain('href={`/videos/archive?scene=${scene.id}`}');
 	});
 
-	test('leaves the slot the Atlas mini map mounts into', () => {
-		expect(watch).toContain('<div class="atlas-minimap-slot"></div>');
+	test('mounts the Atlas mini map only when the artist on stage is on the map', () => {
+		expect(watch).toContain('<div class="atlas-minimap-slot">{#if onMap}<AtlasMiniMap artistId={stageArtistId} {trail} />{/if}</div>');
+		expect(watch).toContain('atlas?.data.indexById.has(stageArtistId)');
+		expect(watch).toContain('sessionTrail = [...sessionTrail.filter((seen) => seen !== id), id].slice(-10);');
 	});
 
 	test('row cards carry the shared video menu', () => {
