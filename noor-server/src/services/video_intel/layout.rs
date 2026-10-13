@@ -34,6 +34,10 @@ const WARM_ITERATIONS: usize = 300;
 const LINK_STRENGTH: f64 = 0.25;
 const GRAVITY: f64 = 0.012;
 const SETTLE_PASSES: usize = 800;
+/// Tries at a cold map; the one whose linked scenes sit closest wins.
+const COLD_ATTEMPTS: u64 = 8;
+/// Links each scene keeps for the layout (the union over scenes).
+const LINKS_PER_SCENE: usize = 6;
 /// Fraction of a disk's radius kept free at its centre, and the band an
 /// artist's radius jitters within.
 const CORE: f64 = 0.10;
@@ -167,12 +171,194 @@ fn push_apart(
     true
 }
 
+/// Each scene's strongest few links (their union): the scene graph is nearly
+/// complete, and a hundred faint pulls only blur the few that matter.
+fn strongest_links(links: &[SceneLink], n: usize) -> Vec<SceneLink> {
+    let mut per_scene: Vec<Vec<(f64, usize)>> = vec![Vec::new(); n];
+    for (index, link) in links.iter().enumerate() {
+        if link.a < n && link.b < n && link.a != link.b && link.weight > 0.0 {
+            per_scene[link.a].push((link.weight, index));
+            per_scene[link.b].push((link.weight, index));
+        }
+    }
+    let mut keep = vec![false; links.len()];
+    for list in &mut per_scene {
+        list.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (_, index) in list.iter().take(LINKS_PER_SCENE) {
+            keep[*index] = true;
+        }
+    }
+    links
+        .iter()
+        .zip(keep)
+        .filter(|(_, kept)| *kept)
+        .map(|(link, _)| *link)
+        .collect()
+}
+
+/// Grow the map from the biggest scene: each next scene is the one most
+/// strongly linked to those already placed, set down at their weighted
+/// centre (nudged by a hashed angle); unlinked scenes ring the outside.
+fn greedy_start(
+    order: &[usize],
+    radius: &[f64],
+    links: &[SceneLink],
+    ids: &[i64],
+) -> Vec<(f64, f64)> {
+    let n = order.len();
+    let mut pos = vec![(0.0, 0.0); n];
+    let mut placed = vec![false; n];
+    let mut pull = vec![0.0f64; n];
+    let mut extent: f64 = 0.0;
+    for step in 0..n {
+        let next = order
+            .iter()
+            .copied()
+            .filter(|i| !placed[*i])
+            .fold(None, |best: Option<usize>, i| match best {
+                Some(b) if pull[b] >= pull[i] => Some(b),
+                _ => Some(i),
+            })
+            .unwrap_or(order[step]);
+        let (angle, _) = unit_pair(ids[next]);
+        let (sx, sy, total) = links.iter().fold((0.0, 0.0, 0.0), |acc, link| {
+            let other = if link.a == next {
+                link.b
+            } else if link.b == next {
+                link.a
+            } else {
+                return acc;
+            };
+            if placed[other] {
+                (
+                    acc.0 + pos[other].0 * link.weight,
+                    acc.1 + pos[other].1 * link.weight,
+                    acc.2 + link.weight,
+                )
+            } else {
+                acc
+            }
+        });
+        pos[next] = if step == 0 {
+            (0.0, 0.0)
+        } else if total > 0.0 {
+            (
+                sx / total + (angle * TAU).cos() * radius[next],
+                sy / total + (angle * TAU).sin() * radius[next],
+            )
+        } else {
+            let out = extent + radius[next];
+            (out * (angle * TAU).cos(), out * (angle * TAU).sin())
+        };
+        placed[next] = true;
+        extent = extent.max((pos[next].0.powi(2) + pos[next].1.powi(2)).sqrt() + radius[next]);
+        for link in links {
+            if link.a == next {
+                pull[link.b] += link.weight;
+            } else if link.b == next {
+                pull[link.a] += link.weight;
+            }
+        }
+    }
+    pos
+}
+
+/// Springs on links (rest length: the disks touching), mild gravity,
+/// overlap pushes; cooling linearly. Only movable disks move.
+fn simulate(
+    pos: &mut [(f64, f64)],
+    radius: &[f64],
+    movable: &[bool],
+    links: &[SceneLink],
+    iterations: usize,
+    ids: &[i64],
+) {
+    let n = pos.len();
+    for step in 0..iterations {
+        let alpha = (1.0 - step as f64 / iterations as f64).max(0.02);
+        for link in links {
+            let (a, b) = (link.a, link.b);
+            if !movable[a] && !movable[b] {
+                continue;
+            }
+            let (dx, dy) = (pos[b].0 - pos[a].0, pos[b].1 - pos[a].1);
+            let d = (dx * dx + dy * dy).sqrt().max(1e-9);
+            let target = radius[a] + radius[b] + GAP;
+            let k = (d - target) / d * link.weight * alpha * LINK_STRENGTH;
+            let (wa, wb) = match (movable[a], movable[b]) {
+                (true, true) => {
+                    let total = radius[a] + radius[b];
+                    (radius[b] / total, radius[a] / total)
+                }
+                (true, false) => (1.0, 0.0),
+                _ => (0.0, 1.0),
+            };
+            pos[a].0 += dx * k * wa;
+            pos[a].1 += dy * k * wa;
+            pos[b].0 -= dx * k * wb;
+            pos[b].1 -= dy * k * wb;
+        }
+        for i in 0..n {
+            if movable[i] {
+                pos[i].0 -= pos[i].0 * GRAVITY * alpha;
+                pos[i].1 -= pos[i].1 * GRAVITY * alpha;
+            }
+        }
+        for i in 0..n {
+            for j in i + 1..n {
+                push_apart(pos, radius, movable, i, j, ids);
+            }
+        }
+    }
+}
+
+/// Everyone may move, just enough to clear overlaps.
+fn settle_overlaps(pos: &mut [(f64, f64)], radius: &[f64], ids: &[i64]) {
+    let n = pos.len();
+    let everyone = vec![true; n];
+    for _ in 0..SETTLE_PASSES {
+        let mut moved = false;
+        for i in 0..n {
+            for j in i + 1..n {
+                moved |= push_apart(pos, radius, &everyone, i, j, ids);
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+}
+
+/// Weighted link length relative to the map's size: lower means linked
+/// scenes sit closer together.
+fn link_length(pos: &[(f64, f64)], radius: &[f64], links: &[SceneLink]) -> f64 {
+    let n = pos.len().max(1) as f64;
+    let (cx, cy) = pos
+        .iter()
+        .fold((0.0, 0.0), |acc, p| (acc.0 + p.0 / n, acc.1 + p.1 / n));
+    let extent = pos
+        .iter()
+        .zip(radius)
+        .map(|(p, r)| ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt() + r)
+        .fold(0.0, f64::max)
+        .max(1e-9);
+    links
+        .iter()
+        .map(|link| {
+            let (a, b) = (pos[link.a], pos[link.b]);
+            link.weight * ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+        })
+        .sum::<f64>()
+        / extent
+}
+
 /// Place scene disks. Pure and deterministic.
 pub fn place_scenes(nodes: &[SceneNode], links: &[SceneLink]) -> Vec<Placement> {
     let n = nodes.len();
     if n == 0 {
         return Vec::new();
     }
+    let links = strongest_links(links, n);
     let ids: Vec<i64> = nodes.iter().map(|node| node.id).collect();
     let radius: Vec<f64> = nodes
         .iter()
@@ -194,7 +380,7 @@ pub fn place_scenes(nodes: &[SceneNode], links: &[SceneLink]) -> Vec<Placement> 
     let prev_scale = ratios.get(ratios.len() / 2).copied().unwrap_or(1.0);
 
     let mut pos = vec![(0.0f64, 0.0f64); n];
-    // Biggest first on a golden-angle spiral: a compact, deterministic start.
+    // Biggest first; a golden-angle spiral gives a compact start.
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|a, b| {
         nodes[*b]
@@ -225,7 +411,7 @@ pub fn place_scenes(nodes: &[SceneNode], links: &[SceneLink]) -> Vec<Placement> 
             }
             // Next to the kept scenes it links to, else just outside the map.
             let (mut sx, mut sy, mut total) = (0.0, 0.0, 0.0);
-            for link in links {
+            for link in &links {
                 let other = if link.a == i {
                     link.b
                 } else if link.b == i {
@@ -253,67 +439,45 @@ pub fn place_scenes(nodes: &[SceneNode], links: &[SceneLink]) -> Vec<Placement> 
                 )
             };
         }
+        if movable.iter().any(|m| *m) {
+            simulate(&mut pos, &radius, &movable, &links, WARM_ITERATIONS, &ids);
+        }
+        settle_overlaps(&mut pos, &radius, &ids);
     } else {
-        for (slot, &i) in order.iter().enumerate() {
-            pos[i] = spiral(slot);
-        }
-    }
-
-    let iterations = if warm {
-        WARM_ITERATIONS
-    } else {
-        COLD_ITERATIONS
-    };
-    let any_movable = movable.iter().any(|m| *m);
-    if any_movable {
-        for step in 0..iterations {
-            let alpha = (1.0 - step as f64 / iterations as f64).max(0.02);
-            for link in links {
-                let (a, b) = (link.a, link.b);
-                if !movable[a] && !movable[b] {
-                    continue;
+        // A cold map is drawn once and then kept for good, so it is worth a
+        // few tries: a greedy start that grows the map along its strongest
+        // links, then shuffled spirals; the try whose linked scenes sit
+        // closest (relative to the map's size) wins.
+        let everyone = vec![true; n];
+        let mut best: Option<(f64, Vec<(f64, f64)>)> = None;
+        for attempt in 0..COLD_ATTEMPTS {
+            let mut trial = if attempt == 0 {
+                greedy_start(&order, &radius, &links, &ids)
+            } else {
+                let mut shuffled = order.clone();
+                shuffled.sort_by_key(|i| hash64((ids[*i] as u64) ^ hash64(attempt)));
+                let mut trial = vec![(0.0, 0.0); n];
+                for (slot, &i) in shuffled.iter().enumerate() {
+                    trial[i] = spiral(slot);
                 }
-                let (dx, dy) = (pos[b].0 - pos[a].0, pos[b].1 - pos[a].1);
-                let d = (dx * dx + dy * dy).sqrt().max(1e-9);
-                let target = radius[a] + radius[b] + GAP;
-                let k = (d - target) / d * link.weight * alpha * LINK_STRENGTH;
-                let (wa, wb) = match (movable[a], movable[b]) {
-                    (true, true) => {
-                        let total = radius[a] + radius[b];
-                        (radius[b] / total, radius[a] / total)
-                    }
-                    (true, false) => (1.0, 0.0),
-                    _ => (0.0, 1.0),
-                };
-                pos[a].0 += dx * k * wa;
-                pos[a].1 += dy * k * wa;
-                pos[b].0 -= dx * k * wb;
-                pos[b].1 -= dy * k * wb;
-            }
-            for i in 0..n {
-                if movable[i] {
-                    pos[i].0 -= pos[i].0 * GRAVITY * alpha;
-                    pos[i].1 -= pos[i].1 * GRAVITY * alpha;
-                }
-            }
-            for i in 0..n {
-                for j in i + 1..n {
-                    push_apart(&mut pos, &radius, &movable, i, j, &ids);
-                }
+                trial
+            };
+            simulate(
+                &mut trial,
+                &radius,
+                &everyone,
+                &links,
+                COLD_ITERATIONS,
+                &ids,
+            );
+            settle_overlaps(&mut trial, &radius, &ids);
+            let score = link_length(&trial, &radius, &links);
+            if best.as_ref().is_none_or(|(s, _)| score < *s) {
+                best = Some((score, trial));
             }
         }
-    }
-    // Settle: everyone may move now, just enough to clear overlaps.
-    let everyone = vec![true; n];
-    for _ in 0..SETTLE_PASSES {
-        let mut moved = false;
-        for i in 0..n {
-            for j in i + 1..n {
-                moved |= push_apart(&mut pos, &radius, &everyone, i, j, &ids);
-            }
-        }
-        if !moved {
-            break;
+        if let Some((_, winner)) = best {
+            pos = winner;
         }
     }
 
