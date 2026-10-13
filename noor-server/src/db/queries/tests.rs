@@ -4462,3 +4462,49 @@ fn get_tracks_excluding_with_limit_maps_every_projected_column() {
     let excluded = get_tracks_excluding_with_limit(&conn, &[42], 50).expect("excluded");
     assert!(excluded.is_empty(), "id 42 must be excluded");
 }
+
+#[test]
+fn tidal_mix_sightings_feed_the_sighted_lane_with_their_source() {
+    use crate::services::learning::{
+        TIDAL_MIX_SIGHTING_SOURCE, has_fresh_tidal_mix_sightings, persist_tidal_mix_sightings,
+    };
+    let conn = Connection::open_in_memory().expect("in-memory db");
+    schema::run_migrations(&conn).expect("migrations");
+    conn.execute("INSERT INTO artists (id, name) VALUES (1, 'Artist')", [])
+        .expect("artist");
+    conn.execute(
+        "INSERT INTO tracks (id, title, artist_id, tidal_id) VALUES (1, 'Seed', 1, 900)",
+        [],
+    )
+    .expect("track");
+    let track = |id: i64, title: &str| -> crate::services::tidal::client::TidalTrack {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": title, "duration": 200,
+            "artist": { "id": 7, "name": "Outside", "picture": null },
+        }))
+        .expect("tidal track")
+    };
+    assert!(!has_fresh_tidal_mix_sightings(&conn, 1));
+    let now = chrono::Utc::now().naive_utc();
+    // TIDAL's mix leads with the seed itself; it is not a pick.
+    let mix = vec![
+        track(900, "Seed"),
+        track(901, "First"),
+        track(902, "Second"),
+    ];
+    let stored = persist_tidal_mix_sightings(&conn, 1, Some(900), mix, now).expect("persist");
+    assert_eq!(stored, 2);
+    assert!(has_fresh_tidal_mix_sightings(&conn, 1));
+
+    let rows = get_sighted_external_candidates(&conn, &[(1, 1.0)], 0.15, 10).expect("sighted");
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["First", "Second"]
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.source.as_deref() == Some(TIDAL_MIX_SIGHTING_SOURCE))
+    );
+}

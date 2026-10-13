@@ -34,6 +34,11 @@
 		 *  fullscreen, and mirrors the host's state for its chrome. */
 		fullscreenActive?: boolean;
 		onFullscreenToggle?: () => void;
+		/** Fullscreen heart: whether this video is in liked videos. Hidden
+		 *  without onToggleSaved. */
+		saved?: boolean;
+		savePending?: boolean;
+		onToggleSaved?: () => void;
 	};
 
 	let {
@@ -59,6 +64,9 @@
 		refreshStream,
 		fullscreenActive = false,
 		onFullscreenToggle,
+		saved = false,
+		savePending = false,
+		onToggleSaved,
 	}: Props = $props();
 
 	let container: HTMLDivElement | null = $state(null);
@@ -523,8 +531,15 @@
 	</div>
 
 	{#if fullscreen}
-		<button bind:this={queueButton} type="button" class="queue-toggle" onclick={() => handleControl('queue')}
-			aria-label="Video queue" aria-expanded={queueOpen} aria-controls="fullscreen-video-queue" title="Video queue (Q)">Queue</button>
+		<div class="fs-actions">
+			{#if onToggleSaved}
+				<button type="button" class="fs-pill heart" class:saved onclick={() => onToggleSaved?.()} disabled={savePending}
+					aria-pressed={saved} aria-label={saved ? 'Remove video from likes' : 'Save video to likes'}
+					title={saved ? 'Remove from liked videos' : 'Save to liked videos'}>{saved ? '♥' : '♡'}</button>
+			{/if}
+			<button bind:this={queueButton} type="button" class="fs-pill queue-toggle" onclick={() => handleControl('queue')}
+				aria-label="Video queue" aria-expanded={queueOpen} aria-controls="fullscreen-video-queue" title="Video queue (Q)">Queue</button>
+		</div>
 		{#if queueOpen}<FullscreenVideoQueue onClose={closeQueue} />{/if}
 	{/if}
 
@@ -750,7 +765,7 @@
 
 	.chrome-hidden .top-meta,
 	.chrome-hidden .controls,
-	.chrome-hidden .queue-toggle {
+	.chrome-hidden .fs-actions {
 		opacity: 0;
 		pointer-events: none;
 	}
@@ -831,12 +846,18 @@
 		border-radius: 0;
 	}
 
-	/* Same pill as the autoplay control; the title leaves room for it. */
-	.queue-toggle {
+	/* Same pills as the autoplay control; the title leaves room for them. */
+	.fs-actions {
 		position: absolute;
 		z-index: 3;
 		top: 14px;
 		right: 16px;
+		display: flex;
+		gap: 8px;
+		transition: opacity var(--motion-base);
+	}
+
+	.fs-pill {
 		height: 34px;
 		padding: 0 12px;
 		border: 1px solid rgba(255, 255, 255, 0.16);
@@ -845,16 +866,32 @@
 		color: rgba(255, 255, 255, 0.92);
 		font-size: var(--font-size-xs);
 		font-weight: 800;
-		transition: opacity var(--motion-base);
 	}
 
-	.queue-toggle:focus-visible {
+	.fs-pill.heart {
+		min-width: 34px;
+		padding: 0;
+		font-size: var(--font-size-sm);
+	}
+
+	.fs-pill.heart.saved {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: var(--text-on-accent);
+	}
+
+	.fs-pill:disabled {
+		cursor: wait;
+		opacity: 0.6;
+	}
+
+	.fs-pill:focus-visible {
 		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
 	}
 
 	.fullscreen .top-meta {
-		padding-right: 112px;
+		padding-right: 154px;
 	}
 
 	@keyframes up-next-drop {

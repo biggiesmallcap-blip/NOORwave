@@ -36,6 +36,7 @@
 	import { WATCH_PATH } from '$lib/video/section';
 	import { hasNativeVideoFullscreen, setNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';
 	import { videoFullscreenDimMs, videoFullscreenGrowMs, videoFullscreenStyle } from '$lib/stores/video_fullscreen_style';
+	import { loadSavedVideos, savedVideoIds, savingVideo, toggleSavedVideo } from '$lib/stores/saved_videos';
 
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. Where it sits:
@@ -291,6 +292,12 @@
 		}
 		expanded = false;
 	}
+
+	// Fullscreen shows a heart; refresh saved videos so it is right even when
+	// the video was saved elsewhere (the watch page, the liked wall).
+	$effect(() => {
+		if (expanded) void loadSavedVideos();
+	});
 
 	function toggleExpanded() {
 		// Already native (the setting may have changed since): leave natively.
@@ -733,6 +740,9 @@
 				onToggleAutoplay={toggleAutoplay}
 				onPlay={handlePlay}
 				refreshStream={refreshVideoStream}
+				saved={$videoSession.current ? $savedVideoIds.has($videoSession.current.tidal_id) : false}
+				savePending={$savingVideo}
+				onToggleSaved={() => void toggleSavedVideo($videoSession.current)}
 			/>
 		</div>
 

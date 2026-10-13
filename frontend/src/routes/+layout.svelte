@@ -355,6 +355,20 @@
 			.filter(Boolean)
 			.join(' - '),
 	);
+	// Hover text for the session chips: say what each does, since the names
+	// alone read as two equal switches when New only works inside Automix.
+	let automixTitle = $derived(
+		$automixEnabled
+			? 'Automix on: when your queue runs low, it adds songs from your library that fit what is playing. Click to turn off.'
+			: 'Automix off: playback stops when your queue ends. Click to keep it going with songs that fit what is playing.',
+	);
+	let discoverNewTitle = $derived(
+		!$automixEnabled
+			? 'Include new music: lets Automix also add songs from outside your library, from TIDAL mixes and Last.fm. Needs Automix on.'
+			: $automixDiscoverNew
+				? 'Include new music on: Automix also adds songs from outside your library, from TIDAL mixes and Last.fm. Click to stick to your library.'
+				: 'Include new music off: Automix only adds songs from your library. Click to also bring in new music from TIDAL and Last.fm.',
+	);
 	let liveVersionTitle = $derived(
 		updateAvailableVersion ? `View patch v${updateAvailableVersion}` : 'Server build',
 	);
@@ -1418,7 +1432,7 @@
 					<button
 						class="session-chip queue-automix-btn"
 						class:active={$automixEnabled}
-						title={$automixEnabled ? 'Automix on' : 'Automix off'}
+						title={automixTitle}
 						aria-label={$automixEnabled ? 'Disable automix' : 'Enable automix'}
 						aria-pressed={$automixEnabled}
 						onclick={() => void togglePlayerAutomix()}
@@ -1434,7 +1448,7 @@
 					<button
 						class="session-chip queue-discover-btn"
 						class:active={$automixDiscoverNew}
-						title={$automixDiscoverNew ? 'Include New: on - pulling in tracks outside your library' : 'Include New: off - tap to find new music during automix'}
+						title={discoverNewTitle}
 						aria-label={$automixDiscoverNew ? 'Disable discover new' : 'Enable discover new'}
 						aria-pressed={$automixDiscoverNew}
 						onclick={() => void setPlayerDiscoverNew(!$automixDiscoverNew)}

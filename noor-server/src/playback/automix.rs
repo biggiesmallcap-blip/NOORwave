@@ -291,8 +291,9 @@ pub fn ensure_automix_queue_depth(
         None
     };
 
-    // External picks ("Include new"): tracks Last.fm linked to this seed or
-    // its learned neighbors, gated like every other source. Their share
+    // External picks ("Include new"): tracks Last.fm or TIDAL's track mix
+    // linked to this seed or its learned neighbors (warmed in the background
+    // by server::radio_continuation), gated like every other source. Their share
     // follows how much the library knows about the playing track: a quarter of
     // the batch when its learned neighbors are well supported, three quarters
     // and first in line when they are not, since Last.fm is what knows the
@@ -311,7 +312,13 @@ pub fn ensure_automix_queue_depth(
     // External picks are optional; a failure here must never fail the refill
     // that next_track and peek_next_track depend on.
     let append_external = |slots: usize| -> usize {
-        match append_automix_external_candidates(conn, model_id, current_track.id, slots) {
+        match append_automix_external_candidates(
+            conn,
+            model_id,
+            current_track.id,
+            &session_seeds(current_track, &queue_items),
+            slots,
+        ) {
             Ok(appended) => appended,
             Err(error) => {
                 tracing::warn!(target: "noor.automix", %error, "external automix refill failed");
@@ -481,28 +488,34 @@ fn append_automix_external_candidates(
     conn: &Connection,
     model_id: Option<i64>,
     seed_track_id: i64,
+    session: &[(i64, f64)],
     limit: usize,
 ) -> Result<usize> {
-    // Seeds: the playing track, plus its strongest learned neighbors at a
-    // discount, so a seed Last.fm never looked up still reaches its scene.
-    let mut weighted_seeds = vec![(seed_track_id, 1.0)];
-    if let Some(model_id) = model_id {
+    // Seeds: the same session seeds as the library lane (anchor, playing
+    // track, queue tail), each with its strongest learned neighbors at a
+    // discount, so a seed never looked up still reaches its scene. Only
+    // stored picks are read; each track's were warmed when it played.
+    let mut weights: HashMap<i64, f64> = HashMap::new();
+    let mut add = |id: i64, weight: f64| {
+        let entry = weights.entry(id).or_insert(0.0);
+        *entry = entry.max(weight);
+    };
+    for &(seed, seed_weight) in session {
+        add(seed, seed_weight);
+        let Some(model_id) = model_id else { continue };
         // Best effort: without neighbors the seed's own links still count.
-        let neighbors = queries::get_track_neighbors(
-            conn,
-            model_id,
-            seed_track_id,
-            EXTERNAL_NEIGHBOR_SEEDS,
-            &[],
-        )
-        .unwrap_or_default();
+        let neighbors =
+            queries::get_track_neighbors(conn, model_id, seed, EXTERNAL_NEIGHBOR_SEEDS, &[])
+                .unwrap_or_default();
         for row in neighbors {
-            weighted_seeds.push((
+            add(
                 row.track_id,
-                EXTERNAL_NEIGHBOR_WEIGHT * row.score.clamp(0.0, 1.0),
-            ));
+                seed_weight * EXTERNAL_NEIGHBOR_WEIGHT * row.score.clamp(0.0, 1.0),
+            );
         }
     }
+    let mut weighted_seeds = weights.into_iter().collect::<Vec<_>>();
+    weighted_seeds.sort_by_key(|(id, _)| *id);
     let rows = queries::get_sighted_external_candidates(
         conn,
         &weighted_seeds,
@@ -551,7 +564,14 @@ fn append_automix_external_candidates(
     let mut appended = 0usize;
     for ranked in ranked {
         let row = ranked.row;
-        let reason = append_dj_reason("Last.fm similar", ranked.score, &ranked.reasons);
+        let label = if row.source.as_deref()
+            == Some(crate::services::learning::TIDAL_MIX_SIGHTING_SOURCE)
+        {
+            "TIDAL mix"
+        } else {
+            "Last.fm similar"
+        };
+        let reason = append_dj_reason(label, ranked.score, &ranked.reasons);
         if let Err(error) = queue::append_external_track(
             conn,
             &queue::ExternalTrackInsert {

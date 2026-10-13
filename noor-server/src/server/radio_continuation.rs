@@ -3,9 +3,10 @@
 //! automix, whose queue-source chip and session anchors would steer it away
 //! from the station the listener picked.
 //!
-//! The same watcher warms automix's Last.fm lane: when a track starts under
-//! automix with "Include new" on, its Last.fm matches are fetched live if
-//! none are stored yet, so the next top-up can use them.
+//! The same watcher warms automix's "Include new" lane: when a track starts
+//! under automix with it on, the track's Last.fm matches and TIDAL track mix
+//! are fetched live if none are stored yet, so the next top-up can use them.
+//! TIDAL's mix keeps the lane working for listeners without Last.fm.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -254,8 +255,8 @@ async fn top_up_inner(state: &SharedState) -> anyhow::Result<usize> {
 }
 
 /// Automix (not a radio) with "Include new" on: the playing track's Last.fm
-/// matches feed the next top-up.
-fn wants_lastfm_matches(conn: &Connection) -> bool {
+/// matches and TIDAL mix feed the next top-up.
+fn wants_new_matches(conn: &Connection) -> bool {
     let flags = conn
         .query_row(
             "SELECT automix_enabled, automix_discover_new OR automix_allow_external
@@ -267,21 +268,28 @@ fn wants_lastfm_matches(conn: &Connection) -> bool {
     flags == (true, true) && !radio_queue_active(conn)
 }
 
-async fn warm_lastfm_matches(state: &SharedState, track_id: i64) {
-    let (db, lastfm) = {
-        let g = state.read().await;
-        let lastfm = crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db);
-        (g.db.clone(), lastfm)
-    };
-    let Some(lastfm) = lastfm else { return };
+async fn warm_new_matches(state: &SharedState, track_id: i64) {
+    let db = state.read().await.db.clone();
     if !db
-        .with_conn(|conn| Ok(wants_lastfm_matches(conn)))
+        .with_conn(|conn| Ok(wants_new_matches(conn)))
         .unwrap_or(false)
     {
         return;
     }
-    match crate::services::learning::refresh_lastfm_sightings_for_track(&db, &lastfm, track_id)
-        .await
+    // Independent lanes: one failing or missing never blocks the other.
+    tokio::join!(
+        warm_lastfm_matches(state, &db, track_id),
+        warm_tidal_mix(state, &db, track_id)
+    );
+}
+
+async fn warm_lastfm_matches(state: &SharedState, db: &crate::db::Database, track_id: i64) {
+    let lastfm = {
+        let g = state.read().await;
+        crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db)
+    };
+    let Some(lastfm) = lastfm else { return };
+    match crate::services::learning::refresh_lastfm_sightings_for_track(db, &lastfm, track_id).await
     {
         Ok(stored) if stored > 0 => {
             tracing::info!(target: "noor.automix", track_id, stored, "stored Last.fm matches for automix")
@@ -293,8 +301,42 @@ async fn warm_lastfm_matches(state: &SharedState, track_id: i64) {
     }
 }
 
+/// TIDAL's track mix for the playing track, stored as external picks. Best
+/// effort: no TIDAL session, a non-TIDAL track or no mix just stores nothing.
+async fn warm_tidal_mix(state: &SharedState, db: &crate::db::Database, track_id: i64) {
+    use crate::services::learning::{has_fresh_tidal_mix_sightings, persist_tidal_mix_sightings};
+    if db
+        .with_conn(|conn| Ok(has_fresh_tidal_mix_sightings(conn, track_id)))
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let seed = crate::server::routes::TidalMixSeed::Track(track_id);
+    let (mix, seed_tidal_id) = match crate::server::routes::fetch_seed_tidal_mix(state, db, seed)
+        .await
+    {
+        Ok(found) => found,
+        Err(reason) => {
+            tracing::debug!(target: "noor.automix", track_id, reason, "no TIDAL mix for automix");
+            return;
+        }
+    };
+    let now = chrono::Utc::now().naive_utc();
+    match db
+        .with_conn(move |conn| persist_tidal_mix_sightings(conn, track_id, seed_tidal_id, mix, now))
+    {
+        Ok(stored) if stored > 0 => {
+            tracing::info!(target: "noor.automix", track_id, stored, "stored TIDAL mix for automix")
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(target: "noor.automix", track_id, %error, "storing TIDAL mix failed")
+        }
+    }
+}
+
 /// Watch queue and track changes: top the radio up when it runs low, and warm
-/// automix's Last.fm lane for the track that just started.
+/// automix's "Include new" lane for the track that just started.
 pub fn spawn(state: SharedState) {
     tokio::spawn(async move {
         let mut event_rx = {
@@ -311,7 +353,7 @@ pub fn spawn(state: SharedState) {
                     Ok(AppEvent::TrackChanged { track_id }) => {
                         deadline.get_or_insert(Instant::now() + DEBOUNCE);
                         let state = state.clone();
-                        tokio::spawn(async move { warm_lastfm_matches(&state, track_id).await });
+                        tokio::spawn(async move { warm_new_matches(&state, track_id).await });
                     }
                     Ok(AppEvent::QueueUpdated) => {
                         deadline.get_or_insert(Instant::now() + DEBOUNCE);

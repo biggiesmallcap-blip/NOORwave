@@ -718,6 +718,10 @@ pub struct ExternalCandidateNeighborRow {
     pub audio_score: f64,
     pub metadata_score: f64,
     pub reason_json: Option<String>,
+    /// Sighting lane that scored the row (`lastfm_similar`, `tidal_mix`, ...);
+    /// only set by `get_sighted_external_candidates`.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2186,7 +2190,9 @@ pub fn get_sighted_external_candidates(
     let sql = format!(
         "WITH w(seed_id, weight) AS (VALUES {values})
          SELECT c.id, c.tidal_id, c.title, c.artist_name, c.duration_ms,
-                MAX(COALESCE(s.similarity, 0) * w.weight) AS score
+                MAX(COALESCE(s.similarity, 0) * w.weight) AS score,
+                -- SQLite takes a bare column from the row that won MAX().
+                s.source
          FROM external_track_candidate_sightings s
          JOIN w ON w.seed_id = s.seed_track_id
          JOIN external_track_candidates c ON c.id = s.candidate_id
@@ -2213,6 +2219,7 @@ pub fn get_sighted_external_candidates(
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, f64>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2220,7 +2227,7 @@ pub fn get_sighted_external_candidates(
         .into_iter()
         .enumerate()
         .map(
-            |(rank, (candidate_id, tidal_id, title, artist_name, duration_ms, score))| {
+            |(rank, (candidate_id, tidal_id, title, artist_name, duration_ms, score, source))| {
                 ExternalCandidateNeighborRow {
                     candidate_id,
                     tidal_id,
@@ -2232,6 +2239,7 @@ pub fn get_sighted_external_candidates(
                     audio_score: 0.0,
                     metadata_score: 0.0,
                     reason_json: None,
+                    source,
                 }
             },
         )
@@ -2277,6 +2285,7 @@ pub fn get_external_candidate_neighbors(
                     audio_score: row.get(7)?,
                     metadata_score: row.get(8)?,
                     reason_json: row.get(9)?,
+                    source: None,
                 })
             },
         )?

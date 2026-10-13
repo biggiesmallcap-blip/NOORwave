@@ -3,7 +3,7 @@
 	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api, type TidalSearchVideo } from '$lib/api/client';
-	import { likeSongForVideo, likeSongOnVideoSave } from '$lib/videos/like_song_for_video';
+	import { loadSavedVideos, savedVideoIds, savingVideo, toggleSavedVideo } from '$lib/stores/saved_videos';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
@@ -39,9 +39,6 @@
 	// returns to the tab the video was picked on.
 
 	let stageAnchor = $state<HTMLDivElement | null>(null);
-	let savedVideoIds = $state<Set<number>>(new Set());
-	let savingVideo = $state(false);
-	let savedVideoChanges = 0;
 	let relatedVideos = $state<(TidalSearchVideo & { why?: string })[]>([]);
 	let relatedLoading = $state(false);
 	let relatedRequest = 0;
@@ -67,39 +64,7 @@
 	let streamUrl = $derived($videoSession.streamUrl);
 	let loadingStream = $derived($videoSession.loading);
 	let hasSession = $derived(Boolean(current || streamUrl || loadingStream));
-	let videoIsSaved = $derived(current ? savedVideoIds.has(current.tidal_id) : false);
-
-	// Settings > Library: saving a video can also like its song.
-	async function likeSongAfterSave(item: TidalSearchVideo) {
-		try {
-			const title = await likeSongForVideo(item);
-			showToast(title ? `Also liked the song "${title}".` : 'No matching song to like on TIDAL.');
-		} catch {
-			showToast('Could not like the song for this video.', 'error');
-		}
-	}
-
-	async function toggleSavedVideo() {
-		const item = current;
-		if (!item || savingVideo) return;
-		savingVideo = true;
-		const saved = !savedVideoIds.has(item.tidal_id);
-		try {
-			const result = await api.setVideoSaved(item, saved);
-			if (!result.ok) throw new Error('Could not save video.');
-			const next = new Set(savedVideoIds);
-			if (saved) next.add(item.tidal_id);
-			else next.delete(item.tidal_id);
-			savedVideoChanges += 1;
-			savedVideoIds = next;
-			showToast(saved ? 'Saved to liked videos.' : 'Removed from liked videos.');
-			if (saved && $likeSongOnVideoSave === 'on') void likeSongAfterSave(item);
-		} catch (err) {
-			showToast(err instanceof Error ? err.message : 'Could not update liked videos.', 'error');
-		} finally {
-			savingVideo = false;
-		}
-	}
+	let videoIsSaved = $derived(current ? $savedVideoIds.has(current.tidal_id) : false);
 
 	async function playRelated(video: TidalSearchVideo) {
 		if (!assertOnline()) {
@@ -211,10 +176,7 @@
 	}
 
 	onMount(() => {
-		const changesAtLoad = savedVideoChanges;
-		void api.getSavedVideos().then(({ items }) => {
-			if (savedVideoChanges === changesAtLoad) savedVideoIds = new Set(items.map((item) => item.tidal_id));
-		}).catch(() => {});
+		void loadSavedVideos();
 		void audioSettings.load();
 		openFromUrl();
 	});
@@ -388,8 +350,8 @@
 							class:saved={videoIsSaved}
 							aria-pressed={videoIsSaved}
 							aria-label={videoIsSaved ? 'Remove video from likes' : 'Save video to likes'}
-							disabled={savingVideo}
-							onclick={() => void toggleSavedVideo()}
+							disabled={$savingVideo}
+							onclick={() => void toggleSavedVideo(current)}
 						><span aria-hidden="true">{videoIsSaved ? '♥' : '♡'}</span> {videoIsSaved ? 'Saved' : 'Save'}</button>
 						<button type="button" class="pill-btn" aria-label="Stop and close the video" onclick={closeVideo}>Close</button>
 					</div>
