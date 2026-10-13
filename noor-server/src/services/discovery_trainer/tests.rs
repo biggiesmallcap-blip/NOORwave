@@ -1167,6 +1167,45 @@ fn library_sequences_count_as_structure_not_co_listen() {
 }
 
 #[test]
+fn library_structure_is_not_counted_as_support() {
+    // Support count drives edge confidence as if it were observed behavior.
+    // Album, playlist and favorites membership is structure, not behavior.
+    let count = |input: &TrainerInput| {
+        let (_, _, co_count, _) = build_behavioral_embeddings(input, None, None);
+        co_count
+            .get(&1)
+            .and_then(|row| row.get(&2))
+            .copied()
+            .unwrap_or(0)
+    };
+
+    let mut structure = behavioral_input(vec![vec![1, 2]]);
+    structure.sequences[0].label = "favorites".to_string();
+    assert_eq!(count(&structure), 0, "favorites sequence");
+
+    let mut album_evidence = behavioral_input(Vec::new());
+    album_evidence.evidence_groups = vec![TrainerEvidenceGroup {
+        label: "album".to_string(),
+        base_weight: 1.0,
+        edges: vec![TrainerEdge {
+            event_id: "album:1:2".to_string(),
+            from_track_id: 1,
+            to_track_id: 2,
+            weight: 1.0,
+            evidence_kind: EvidenceKind::AlbumAdjacency,
+        }],
+    }];
+    assert_eq!(count(&album_evidence), 0, "album adjacency evidence");
+
+    let listening = behavioral_input(vec![vec![1, 2]]);
+    assert_eq!(count(&listening), 1, "listen_history sequence");
+
+    let mut lastfm = album_evidence.clone();
+    lastfm.evidence_groups[0].edges[0].evidence_kind = EvidenceKind::LastfmDirectSimilarity;
+    assert_eq!(count(&lastfm), 1, "Last.fm direct similarity");
+}
+
+#[test]
 fn engaged_tracks_outrank_transient_catalog_rows_at_equal_similarity() {
     let (mut tracks, behavioral, audio, fusion) = make_test_input(3, 16);
     tracks[1].play_count = 4; // engaged
