@@ -95,6 +95,7 @@ mod tidal_home_routes;
 mod tidal_library;
 mod tidal_match;
 mod tidal_sync_routes;
+mod video_atlas_looks_routes;
 mod video_atlas_routes;
 mod video_channel_routes;
 mod video_discovery_routes;
@@ -785,6 +786,14 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/videos/atlas/scenes/{id}",
             get(video_atlas_routes::get_video_atlas_scene),
+        )
+        .route(
+            "/api/videos/atlas/pictures",
+            get(video_atlas_looks_routes::get_video_atlas_pictures),
+        )
+        .route(
+            "/api/videos/atlas/you",
+            get(video_atlas_looks_routes::get_video_atlas_you),
         )
         .route(
             "/api/videos/atlas/probe",

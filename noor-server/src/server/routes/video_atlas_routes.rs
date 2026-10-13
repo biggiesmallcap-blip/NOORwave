@@ -28,7 +28,7 @@ use crate::services::video_radio::video_song_key;
 use crate::services::video_sets::{VideoCandidate, VideoSetItem};
 use crate::services::video_stations::to_item;
 
-type ApiError = (StatusCode, Json<Value>);
+pub(super) type ApiError = (StatusCode, Json<Value>);
 
 const BEST_CUTS: usize = 8;
 const NEIGHBORS: usize = 12;
@@ -47,7 +47,7 @@ fn internal(err: anyhow::Error) -> ApiError {
 
 /// Run a read on its own connection off the async runtime; in-memory test
 /// databases fall back to the shared one.
-async fn read<T, F>(state: &SharedState, f: F) -> Result<T, ApiError>
+pub(super) async fn read<T, F>(state: &SharedState, f: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce(&Connection) -> anyhow::Result<T> + Send + 'static,

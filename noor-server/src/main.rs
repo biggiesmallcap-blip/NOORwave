@@ -997,6 +997,9 @@ async fn main() -> Result<()> {
 
     // Atlas and Air: derived video tables rebuild in the background.
     services::video_intel::job::spawn(state.clone());
+    // Atlas Picture: one thumbnail colour per map artist, at the discovery
+    // setting's pace.
+    services::video_intel::pictures::spawn(state.clone());
 
     // Radio similarity index auto-rebuild.
     //

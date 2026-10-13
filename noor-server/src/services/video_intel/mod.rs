@@ -10,6 +10,8 @@
 //! Ownership while Atlas and Air is built in parallel:
 //! - catalog worker: cuts, songs, concerts, era, link, census, job, build
 //! - atlas worker: scenes, louvain, spread, layout, light
+//! - atlas looks: pictures (Picture's thumbnail colours, its own background
+//!   job), you (footprints, trails, frontier)
 
 pub mod archive;
 pub mod build;
@@ -22,6 +24,8 @@ pub mod layout;
 pub mod light;
 pub mod link;
 pub mod louvain;
+pub mod pictures;
 pub mod scenes;
 pub mod songs;
 pub mod spread;
+pub mod you;
