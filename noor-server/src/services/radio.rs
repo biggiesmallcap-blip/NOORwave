@@ -1,12 +1,15 @@
 //! Song Radio orchestrator.
 //!
-//! Given a seed (track | album | artist), fans out to three sources in parallel:
-//!   - Library: embedding neighbors via discovery_learning::radio_from_neighbors
-//!   - Last.fm: track.getSimilar resolved to Tidal IDs (Task 3)
-//!   - Engine:  external_discovery_engine (slot exists; v1 produces empty)
+//! Given a seed (track | album | artist), gathers candidates from three lanes:
+//!   - Library: learned neighbors (`learning::radio_from_neighbors`)
+//!   - Last.fm: track.getSimilar (artist fallback); Adventurous adds two-hop sightings
+//!   - Engine:  the precomputed `track_similarity` index
 //!
-//! Applies a blend (Familiar/Mixed/Adventurous), ISRC-dedups with library
-//! preference, tags each result with provenance, returns a queue.
+//! Dedups by artist and title with a library preference, applies the blend
+//! (Familiar/Mixed/Adventurous), taste and genre signals and the artist cap,
+//! and tags each result with provenance. TIDAL's own mix fills in for cold
+//! seeds (`radio_routes::add_tidal_mix_fallback`); the queue builder's shared
+//! gate drops recent plays, skips and versions already queued.
 
 use crate::db::Database;
 use crate::metadata::lastfm::LastFmClient;
