@@ -138,8 +138,12 @@ export async function loadStage(
 		if (isCurrent()) onRows(patch);
 	};
 
+	// One song lookup feeds two rows: the versions/concert rows, and the
+	// artist for the exploring rows when a cold link carried only the video id.
+	const songLookup = findSong(client, video).catch(() => null);
+
 	const songTask = (async () => {
-		const song = await findSong(client, video);
+		const song = await songLookup;
 		if (!song) return;
 		const ordered = orderVersions(song.versions);
 		const others = ordered.filter((version) => version.video.tidal_id !== video.tidal_id);
@@ -156,8 +160,8 @@ export async function loadStage(
 	})().catch(() => {});
 
 	const atlasTask = (async () => {
-		if (video.artist_id == null) return;
-		const artistId = video.artist_id;
+		const artistId = video.artist_id ?? (await songLookup)?.artist_id ?? null;
+		if (artistId == null) return;
 		let card: AtlasArtistCard;
 		try {
 			card = await cached(artistCache, artistId, () => client.getVideoAtlasArtist(artistId));

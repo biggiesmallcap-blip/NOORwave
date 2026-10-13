@@ -138,6 +138,23 @@ describe('stage rows', () => {
 		expect(rows.versions).toBeNull();
 	});
 
+	test('a cold link without an artist id takes the artist from the song', async () => {
+		const bare = { ...current, artist_id: null };
+		const song: SongVersionsResponse = {
+			song_key: 'id:5:swear it again', title: 'Swear It Again', artist_id: 5, artist_name: 'Westlife', song_year: null,
+			versions: [{ video: bare, cut: 'live', cut_year: null, label: 'Live', concert: null, best: true }],
+		};
+		const askedArtists: number[] = [];
+		let rows: StageRows = { ...EMPTY_STAGE };
+		await loadStage(client({
+			getVideoSongByVideo: async () => song,
+			getVideoAtlasArtist: async (id) => { askedArtists.push(id); return card(id); },
+			getVideoAtlasScene: async () => ({ scene: { id: 9 } as never, top_artists: [], sample: [video(700, 7)] }),
+		}), bare, (patch) => (rows = { ...rows, ...patch }));
+		expect(askedArtists[0]).toBe(5);
+		expect(rows.scene?.videos.map((v) => v.tidal_id)).toEqual([700]);
+	});
+
 	test('a stale video never writes rows', async () => {
 		let rows: StageRows = { ...EMPTY_STAGE };
 		await loadStage(
