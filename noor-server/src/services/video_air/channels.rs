@@ -674,14 +674,21 @@ pub fn era_coverage(universe: &Universe) -> f64 {
     }
 }
 
-/// The decade Rewind plays today: decades with enough hours take turns day
-/// by day. None while era coverage is under half the pool.
+/// The decade Rewind plays today: past decades with enough hours take turns
+/// day by day. The decade we are in is never one of them: Rewind looks back,
+/// and the current decade is what every other channel already plays. None
+/// while era coverage is under half the pool.
 pub fn rewind_decade(universe: &Universe, day: &str) -> Option<i32> {
     if !universe.facets || era_coverage(universe) < ERA_NEED_COVERAGE {
         return None;
     }
+    let this_decade = day
+        .get(..4)
+        .and_then(|year| year.parse::<i32>().ok())
+        .map_or(i32::MAX, |year| year.div_euclid(10) * 10);
     let decades: Vec<i32> = decade_seconds(universe)
         .into_iter()
+        .filter(|(decade, _)| *decade < this_decade)
         .filter(|(_, seconds)| *seconds as f64 / 3600.0 >= FIXED_NEED_HOURS)
         .map(|(decade, _)| decade)
         .collect();
@@ -1197,6 +1204,30 @@ mod tests {
         let pool = planned.pool.unwrap();
         let songs: usize = pool.buckets.iter().map(|b| b.units.len()).sum();
         assert_eq!(songs, 500, "only 1980s songs");
+    }
+
+    #[test]
+    fn rewind_never_plays_the_decade_we_are_in() {
+        let mut videos = Vec::new();
+        for n in 0..1000 {
+            videos.push(video(n, 100 + n % 60, Cut::Official, n as u64));
+        }
+        let mut u = universe(videos);
+        // Most dated songs are from this decade; a smaller past decade
+        // still clears the hours bar on its own.
+        for n in 0..1000u64 {
+            let year = if n < 700 { 2023 } else { 1994 };
+            u.songs.insert(
+                n,
+                SongRow {
+                    best_video: None,
+                    year: Some(year),
+                },
+            );
+        }
+        for day in ["2026-10-14", "2026-10-15", "2026-10-16"] {
+            assert_eq!(rewind_decade(&u, day), Some(1990), "{day}");
+        }
     }
 
     #[test]
