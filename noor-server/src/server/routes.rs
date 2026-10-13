@@ -1628,6 +1628,45 @@ mod version_match_tests {
         let results = vec![track(1, "American Pie", "Madonna", None, "LOSSLESS")];
         assert_eq!(pick("Don McLean", "American Pie", results), None);
     }
+
+    #[test]
+    fn matching_title_cannot_carry_a_different_artist() {
+        let results = vec![track(1, "Sanctuary", "Crystal Lake", None, "LOSSLESS")];
+        assert_eq!(pick("Crystal Voices", "Sanctuary", results), None);
+    }
+
+    #[test]
+    fn different_artist_with_a_longer_title_is_rejected() {
+        let results = vec![track(
+            1,
+            "The Path of the Metal Turtle",
+            "David Kuckhermann",
+            None,
+            "LOSSLESS",
+        )];
+        assert_eq!(pick("David Hickey", "The Path", results), None);
+    }
+
+    #[test]
+    fn extended_artist_credit_still_resolves() {
+        let results = vec![track(
+            7,
+            "Echos of Angels",
+            "Crystal Voices - Deborah Van Dyke & Valerie Farnsworth",
+            None,
+            "LOSSLESS",
+        )];
+        assert_eq!(pick("Crystal Voices", "Echos of Angels", results), Some(7));
+    }
+
+    #[test]
+    fn requested_artist_wins_over_higher_quality_wrong_artist() {
+        let results = vec![
+            track(1, "Sanctuary", "Crystal Lake", None, "HI_RES_LOSSLESS"),
+            track(2, "Sanctuary", "Crystal Voices", None, "LOSSLESS"),
+        ];
+        assert_eq!(pick("Crystal Voices", "Sanctuary", results), Some(2));
+    }
 }
 
 async fn next_track(
