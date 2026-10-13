@@ -1659,6 +1659,26 @@ export interface RadioResponse {
 
 export type RadioBlend = 'familiar' | 'mixed' | 'adventurous';
 
+/** A row in the blind radio comparison: a `TidalPlayable`, plus the library id
+ * when the pick is a library track (`tidal_id` is 0 for a local-only file). */
+export interface RadioCompareTrack extends TidalPlayable {
+	local_id: number | null;
+}
+
+/** One station design's first tracks for a seed. `arm` is hidden until reveal. */
+export interface RadioCompareArm {
+	arm: string;
+	tracks: RadioCompareTrack[];
+	/** Why the list is short or empty, in plain words. */
+	note: string | null;
+}
+
+export interface RadioCompareResult {
+	seed: RadioCompareTrack;
+	blend: RadioBlend;
+	arms: RadioCompareArm[];
+}
+
 export type RadioSource = 'library' | 'lastfm' | 'engine' | 'tidal';
 
 export interface RadioCandidate {

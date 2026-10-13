@@ -37,6 +37,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
 	{ id: 'downloads', category: 'library', label: 'Downloads', keywords: 'download folder flac mp3 aac m4a format quality save disk source' },
 	{ id: 'discovery-engine', category: 'library', label: 'Discovery', keywords: 'training learning intensity safety engine model refresh retrain stop cost watchdog' },
 	{ id: 'radio-similarity-index', category: 'library', label: 'Radio index', keywords: 'radio similarity neighbours pairs index build rebuild last built' },
+	{ id: 'radio-blind-test', category: 'library', label: 'Radio blind test', keywords: 'radio compare comparison blind test station tidal last.fm lastfm a/b quality' },
 	{ id: 'portable-snapshot', category: 'library', label: 'Enrichment transfer', keywords: 'export import snapshot portable transfer backup metadata' },
 	{ id: 'database-size', category: 'library', label: 'Database storage', keywords: 'database size disk space vacuum compact shrink storage big large noor.db' },
 	{ id: 'clear-non-library-entries', category: 'library', label: 'Remove unused recommendations', keywords: 'clear non-library cleanup purge orphan' },

@@ -3013,7 +3013,10 @@
 				</div>
 				<button class="btn btn-glass" onclick={() => void loadRadioSimilarityStatus()}>Refresh status</button>{#if radioSimilarityLabel}
 					<p class="galaxy-refresh-label">{radioSimilarityLabel}</p>
-				{/if}</details><details data-setting-id="portable-snapshot" class="glass-tile section-panel"><summary>Enrichment transfer</summary><div class="stat-grid inner-metrics">
+				{/if}</details><details data-setting-id="radio-blind-test" class="glass-tile section-panel"><summary>Radio blind test</summary><p class="setting-status">Compare stations for the same seed without knowing which is which: today's station, Last.fm alone and TIDAL's own radio. Nothing is queued until you press Play.</p>
+				<div class="action-row">
+					<button class="btn btn-primary" onclick={() => void goto('/radio-compare')}>Open blind test</button>
+				</div></details><details data-setting-id="portable-snapshot" class="glass-tile section-panel"><summary>Enrichment transfer</summary><div class="stat-grid inner-metrics">
 					<div class="info-row"><span>Snapshot checked</span><strong>{portableSnapshot?.checked_rows?.toLocaleString() ?? '0'}</strong></div>
 					<div class="info-row"><span>Snapshot genres</span><strong>{portableSnapshot?.genre_rows?.toLocaleString() ?? '0'}</strong></div>
 					<div class="info-row"><span>Last.fm checked</span><strong>{portableSnapshot?.lastfm_checked_rows?.toLocaleString() ?? '0'}</strong></div>

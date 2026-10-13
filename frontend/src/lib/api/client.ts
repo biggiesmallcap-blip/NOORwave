@@ -96,6 +96,8 @@ import type {
 	DiscoveryTrainingSafetyProfile,
 	RadioResponse,
 	RadioBlend,
+	RadioCompareResult,
+	RadioCompareTrack,
 	RadioQueue,
 	HomeReleasesResponse,
 	TidalMixesResponse,
@@ -1602,6 +1604,30 @@ export const api = {
 		return fetchApi('/api/radio/start', undefined, {
 			method: 'POST',
 			body: JSON.stringify(params),
+		});
+	},
+
+	/** Blind comparison: each station design's first tracks for one seed.
+	 * Read-only: nothing is queued or played. */
+	radioCompare(seedTrackId: number, blend?: RadioBlend) {
+		return fetchApi<RadioCompareResult>('/api/radio/compare', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ seed_track_id: seedTrackId, blend }),
+		});
+	},
+
+	radioCompareSeeds() {
+		return fetchApi<{ seeds: RadioCompareTrack[] }>('/api/radio/compare/seeds');
+	},
+
+	getRadioCompareSession() {
+		return fetchApi<{ session: unknown }>('/api/radio/compare/session');
+	},
+
+	saveRadioCompareSession(session: unknown) {
+		return fetchApi<{ ok: boolean }>('/api/radio/compare/session', undefined, {
+			method: 'PUT',
+			body: JSON.stringify(session),
 		});
 	},
 
