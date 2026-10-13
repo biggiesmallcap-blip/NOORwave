@@ -510,6 +510,8 @@ pub fn build(conn: &Connection) -> Result<usize> {
 }
 
 /// Share of charted artists (with a scene) that carry at least one genre.
+/// The census computes the same number for the app; this one serves tests.
+#[cfg(test)]
 pub fn coverage(conn: &Connection) -> Result<f64> {
     let (charted, covered): (i64, i64) = conn.query_row(
         "SELECT COUNT(*), COALESCE(SUM(genres_json <> '[]'), 0)

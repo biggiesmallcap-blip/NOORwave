@@ -28,7 +28,7 @@ const KEEP_RUN_ROWS: i64 = 250;
 /// Bump when a stage's rules change (markers, best-cut order, era): the job
 /// treats a build from another version as due, so an app update rebuilds
 /// the derived tables on its own.
-pub const BUILD_VERSION: &str = "1";
+pub const BUILD_VERSION: &str = "2";
 pub const BUILD_VERSION_KEY: &str = "video_intel.build_version";
 
 fn start(conn: &Connection, stage: &str) -> Result<i64> {

@@ -26,6 +26,9 @@ pub const EDGE_SOURCES: [&str; 4] = ["tidal", "lastfm", "featured", "colist"];
 
 const GRAPH_TTL: Duration = Duration::from_secs(600);
 const NEXT_ID_KEY: &str = "video_intel.scene_next_id";
+/// How many graph edges the last scene build saw; the intel job rebuilds
+/// when the crawler has grown that by enough (an artist it just charted).
+pub const BUILT_EDGES_KEY: &str = "video_intel.built_edges";
 const EXEMPLARS: usize = 4;
 const STABLE_JACCARD: f64 = 0.5;
 const SECOND_SCENE_SHARE: f64 = 0.3;
@@ -1189,9 +1192,32 @@ fn write(conn: &Connection, plan: &ScenePlan) -> Result<()> {
     Ok(())
 }
 
+/// Edge rows the graph is built from.
+pub fn edge_rows(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM video_related_artists
+          WHERE source IN ('tidal', 'lastfm', 'featured', 'colist')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// The edge count the last scene build saw, if any build recorded one.
+pub fn built_edges(conn: &Connection) -> Result<Option<i64>> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = ?1",
+            [BUILT_EDGES_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.and_then(|v| v.parse().ok()))
+}
+
 /// Rebuild this stage's rows. Returns the number of scenes written.
 pub fn build(conn: &Connection) -> Result<usize> {
     let artists = load_artist_videos(conn)?;
+    let edges = edge_rows(conn)?;
     let graph = ArtistGraph::load(conn)?;
     let popularity = load_popularity(conn)?;
     let previous = load_previous(conn)?;
@@ -1205,6 +1231,11 @@ pub fn build(conn: &Connection) -> Result<usize> {
         &SceneParams::default(),
     );
     write(conn, &plan)?;
+    conn.execute(
+        "INSERT INTO server_config (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![BUILT_EDGES_KEY, edges.to_string()],
+    )?;
     store_graph(cache_key(conn), Arc::new(graph));
     Ok(plan.scenes.len())
 }
