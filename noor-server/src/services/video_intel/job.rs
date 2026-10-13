@@ -3,10 +3,10 @@
 //! blocks boot; progress is visible in the census.
 //!
 //! Two minutes after boot, then every six hours, the job rebuilds when the
-//! tables were never built, the last build is over a day old, or the catalog
-//! grew 1% or more since, or an app update changed the build rules
-//! (`build::BUILD_VERSION`). One build at a time; `kick` (the rebuild route)
-//! skips the checks. A shipped install heals itself this way: every derived
+//! tables were never built, the last build is over a day old, the catalog
+//! or the artist graph grew 1% or more since, or an app update changed the
+//! build rules (`build::BUILD_VERSION`). One build at a time; `kick` (the
+//! rebuild route) skips the checks. A shipped install heals itself this way: every derived
 //! row is recomputed from the catalog, nothing needs a migration backfill.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-use super::{archive, build};
+use super::{archive, build, scenes};
 use crate::SharedState;
 use crate::db::Database;
 
@@ -62,7 +62,15 @@ pub fn due(conn: &Connection) -> Result<bool> {
     let catalog: i64 =
         conn.query_row("SELECT COUNT(*) FROM video_catalog", [], |row| row.get(0))?;
     let built_from = built_from.unwrap_or(0);
-    Ok(catalog as f64 >= built_from.max(1) as f64 * GROWTH && catalog > built_from)
+    if catalog as f64 >= built_from.max(1) as f64 * GROWTH && catalog > built_from {
+        return Ok(true);
+    }
+    // The crawler charting artists adds edges without adding videos.
+    let Some(built_edges) = scenes::built_edges(conn)? else {
+        return Ok(false);
+    };
+    let edges = scenes::edge_rows(conn)?;
+    Ok(edges as f64 >= built_edges.max(1) as f64 * GROWTH && edges > built_edges)
 }
 
 /// Releases the single-flight flag on drop, panics included.
@@ -174,6 +182,30 @@ mod tests {
         )
         .unwrap();
         assert!(due(&conn).unwrap(), "built by older rules");
+    }
+
+    #[test]
+    fn graph_growth_is_due_like_catalog_growth() {
+        let conn = conn();
+        add(&conn, 1, 7, "One", 200, None, None);
+        let edge = |seed: i64| {
+            conn.execute(
+                "INSERT INTO video_related_artists (seed_tidal_id, related_tidal_id, name, source, weight)
+                 VALUES (?1, ?2, 'x', 'lastfm', 0.9)",
+                [seed, seed + 1],
+            )
+            .unwrap();
+        };
+        for seed in 0..100 {
+            edge(1000 + seed * 2);
+        }
+        build::build_all(&conn).unwrap();
+        assert!(!due(&conn).unwrap(), "fresh");
+        edge(5000);
+        assert!(
+            due(&conn).unwrap(),
+            "the crawler charted someone: 1% more edges"
+        );
     }
 
     #[test]
