@@ -28,6 +28,18 @@ pub async fn run_if_idle(state: SharedState) {
     spawn_musicbrainz_if_idle(state).await;
 }
 
+/// Enrichment rewrote genre rows, which the radio similarity index reads: mark
+/// it for the next hourly rebuild. The auto path emits no `LibrarySynced` (that
+/// would loop back into another enrichment pass), so genre-only changes used
+/// to wait for the 7-day age rebuild.
+fn mark_genres_changed(db: &crate::db::Database) {
+    if let Err(error) =
+        db.with_conn(|conn| Ok(crate::services::radio_similarity::bump_change_gen(conn)?))
+    {
+        warn!(target: "noor.auto_enrich", %error, "could not mark the radio similarity index stale");
+    }
+}
+
 async fn spawn_lastfm_if_idle(state: SharedState) {
     use crate::services::lastfm;
     use crate::services::lastfm::enrichment::EnrichmentMode;
@@ -104,6 +116,7 @@ async fn spawn_lastfm_if_idle(state: SharedState) {
     let api_key = creds.api_key.clone();
     let started_at_atom_cleanup = started_at_atom.clone();
     tokio::spawn(async move {
+        let db = state.read().await.db.clone();
         let progress_tx = event_tx.clone();
         let artist_tx = event_tx.clone();
         let total_atom_cb = total_atom.clone();
@@ -141,6 +154,7 @@ async fn spawn_lastfm_if_idle(state: SharedState) {
         match result {
             Ok(_) => {
                 info!(target: "noor.auto_enrich", service = "lastfm", "auto-enrichment complete");
+                mark_genres_changed(&db);
                 // Galaxy listens for MusicBrainzEnriched on the WS to schedule
                 // a refresh. Reusing it (rather than adding a LastFmEnriched
                 // variant) matches the existing manual-trigger handler at
@@ -186,6 +200,7 @@ async fn spawn_musicbrainz_if_idle(state: SharedState) {
     running.store(true, Ordering::SeqCst);
 
     tokio::spawn(async move {
+        let db = state.read().await.db.clone();
         let progress_tx = event_tx.clone();
         let result = musicbrainz::run_enrichment(
             state,
@@ -203,6 +218,7 @@ async fn spawn_musicbrainz_if_idle(state: SharedState) {
         match result {
             Ok(_) => {
                 info!(target: "noor.auto_enrich", service = "musicbrainz", "auto-enrichment complete");
+                mark_genres_changed(&db);
                 let _ = event_tx.send(AppEvent::MusicBrainzEnriched);
                 // Deliberately NOT re-emitting LibrarySynced from the auto path
                 // to avoid a feedback loop where MB completion would re-trigger
@@ -213,4 +229,27 @@ async fn spawn_musicbrainz_if_idle(state: SharedState) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_enrichment_marks_the_similarity_index_stale() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        mark_genres_changed(&db);
+        let generation: i64 = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM server_config
+                     WHERE key = 'radio_similarity_change_gen'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(generation, 1);
+    }
 }
