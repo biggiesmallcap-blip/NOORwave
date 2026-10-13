@@ -47,7 +47,7 @@ cpal = { version = "=0.18.2", features = ["realtime"] }
 # Sample-rate conversion. Used when a track's native rate doesn't match the
 # device rate (or when sample-rate-follow is off). Polyphase FFT resampler:
 # steeper filter than linear interpolation, no audible aliasing.
-rubato = "0.16"
+rubato = "5.0"
 
 # Crypto (token encryption)
 aes-gcm = "0.11"
