@@ -39,6 +39,8 @@ export const STAGE = {
 	text: 'rgba(236, 239, 247, 0.92)',
 	textDim: 'rgba(200, 206, 222, 0.62)',
 	textShadow: 'rgba(3, 4, 9, 0.82)',
+	/** A thin dark halo behind names, enough to read them over stars. */
+	textHalo: 'rgba(4, 5, 10, 0.55)',
 	uncharted: 'hsla(222, 12%, 66%, 0.34)',
 	route: '#ffe6a8',
 	trail: 'rgba(255, 236, 196, 0.55)',
@@ -48,40 +50,42 @@ function hsla(h: number, s: number, l: number, a = 1): string {
 	return `hsla(${h.toFixed(1)}, ${s}%, ${l}%, ${a})`;
 }
 
-/** Core colour for a point of `light` in a scene of `hue` (null = uncharted). */
+/** The warm white every lit artist shares: "known" reads the same in every scene. */
+export const LIT_COLOR = 'hsla(40, 62%, 90%, 1)';
+
+/**
+ * Core colour for a point of `light` in a scene of `hue` (null = uncharted).
+ * Restrained on purpose: hue says where, saturation stays low enough that no
+ * scene shouts, and light (in the knowledge look) is the one bright accent.
+ */
 export function pointColor(look: AtlasLook, hue: number | null, light: Light): string {
 	if (hue === null || light === 0) return STAGE.uncharted;
 	if (look === 'place') {
-		if (light === 3) return hsla(hue, 92, 80, 1);
-		if (light === 2) return hsla(hue, 82, 66, 1);
-		return hsla(hue, 70, 60, 0.82);
+		if (light === 3) return hsla(hue, 46, 80, 1);
+		if (light === 2) return hsla(hue, 42, 68, 0.95);
+		return hsla(hue, 34, 60, 0.78);
 	}
-	if (light === 3) return hsla(hue, 100, 91, 1);
-	if (light === 2) return hsla(hue, 86, 64, 0.96);
-	return hsla(hue, 20, 64, 0.3);
+	if (light === 3) return LIT_COLOR;
+	if (light === 2) return hsla(hue, 40, 66, 0.88);
+	return hsla(hue, 12, 60, 0.3);
 }
 
-/** Glow colour (the centre stop of a glow sprite); null = no glow. */
+/** Glow colour (the centre stop of a glow sprite); null = no glow. Only lit
+ *  artists glow, and only in the knowledge look. */
 export function glowColor(look: AtlasLook, hue: number | null, light: Light): string | null {
-	if (hue === null || light === 0) return null;
-	if (look === 'place') return hsla(hue, 90, 62, 1);
-	if (light === 3) return hsla(hue, 100, 78, 1);
-	if (light === 2) return hsla(hue, 90, 60, 1);
-	return hsla(hue, 40, 55, 1);
+	if (hue === null || light !== 3 || look !== 'light') return null;
+	return 'hsla(40, 70%, 78%, 1)';
 }
 
-/** How strongly a point's glow shows, 0..1. Hubs always glow a little. */
+/** How strongly a point's glow shows, 0..1: a soft halo on lit hubs only. */
 export function glowStrength(look: AtlasLook, light: Light, hub: boolean): number {
-	if (light === 0) return 0;
-	if (look === 'place') return hub ? 0.55 : 0;
-	if (light === 3) return hub ? 0.95 : 0.7;
-	if (light === 2) return hub ? 0.5 : 0;
-	return hub ? 0.2 : 0;
+	if (look !== 'light' || light !== 3) return 0;
+	return hub ? 0.32 : 0;
 }
 
-/** Hue-tinted label colour for a scene name. */
+/** Scene name colour: near white with a breath of the scene's hue. */
 export function sceneLabelColor(hue: number, alpha = 1): string {
-	return hsla(hue, 70, 84, alpha);
+	return hsla(hue, 22, 84, alpha);
 }
 
 /** Point radius in CSS px at fit zoom: area grows with videos. */
@@ -113,7 +117,7 @@ export function formatHours(hours: number): string {
 /** Swatch for a light state in cards and the legend. */
 export function lightSwatch(light: Light, hue: number | null): string {
 	if (light === 0 || hue === null) return 'hsl(222, 10%, 58%)';
-	if (light === 3) return 'hsl(40, 100%, 92%)';
-	if (light === 2) return hsla(hue, 86, 64, 1);
-	return hsla(hue, 18, 52, 1);
+	if (light === 3) return LIT_COLOR;
+	if (light === 2) return hsla(hue, 40, 66, 1);
+	return hsla(hue, 12, 52, 1);
 }

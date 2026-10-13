@@ -45,7 +45,9 @@ import {
 } from './style';
 
 const TAU = Math.PI * 2;
-const SCENE_FONT = '"Newsreader", "Iowan Old Style", Georgia, serif';
+const SCENE_FONT = '"Manrope", "Segoe UI", system-ui, sans-serif';
+/** Scene names read like a chart's region names: small caps, spaced out. */
+const SCENE_TRACKING = '0.16em';
 const BODY_FONT = '"Manrope", "Segoe UI", system-ui, sans-serif';
 const MONO_FONT = '"JetBrains Mono", "Cascadia Code", monospace';
 const ARTIST_FONT_PX = 11;
@@ -194,8 +196,8 @@ function buildNebula(data: AtlasData, look: AtlasLook): NebulaTexture {
 	ctx.globalCompositeOperation = 'lighter';
 
 	const place = look === 'place';
-	const sat = place ? 80 : 42;
-	const lightness = place ? 58 : 50;
+	const sat = place ? 44 : 26;
+	const lightness = place ? 52 : 46;
 
 	// Halos: the scene's whole extent, very faint.
 	for (const scene of data.scenes) {
@@ -203,8 +205,8 @@ function buildNebula(data: AtlasData, look: AtlasLook): NebulaTexture {
 		const cy = (scene.y - y0) * k;
 		const r = scene.r * 1.45 * k;
 		const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-		g.addColorStop(0, `hsla(${scene.hue}, ${sat}%, ${lightness}%, ${place ? 0.2 : 0.13})`);
-		g.addColorStop(0.55, `hsla(${scene.hue}, ${sat}%, ${lightness - 8}%, ${place ? 0.07 : 0.05})`);
+		g.addColorStop(0, `hsla(${scene.hue}, ${sat}%, ${lightness}%, ${place ? 0.1 : 0.07})`);
+		g.addColorStop(0.55, `hsla(${scene.hue}, ${sat}%, ${lightness - 8}%, ${place ? 0.035 : 0.025})`);
 		g.addColorStop(1, `hsla(${scene.hue}, ${sat}%, ${lightness - 10}%, 0)`);
 		ctx.fillStyle = g;
 		ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
@@ -225,7 +227,7 @@ function buildNebula(data: AtlasData, look: AtlasLook): NebulaTexture {
 			continue;
 		}
 		const r = (7 + 1.5 * Math.sqrt(v)) * k;
-		ctx.globalAlpha = (place ? 0.05 : 0.038) + Math.log1p(v) * (place ? 0.012 : 0.009);
+		ctx.globalAlpha = (place ? 0.03 : 0.022) + Math.log1p(v) * (place ? 0.007 : 0.005);
 		ctx.drawImage(stamps[s], cx - r, cy - r, r * 2, r * 2);
 	}
 	ctx.globalAlpha = 1;
@@ -306,6 +308,12 @@ export class AtlasRenderer {
 	private obstacles: ScreenBox[] = [];
 	/** The last plan used the reduced in-motion candidate set. */
 	private labelsPartial = false;
+	/** The camera moved within the last moments: labels hold still and artist
+	 *  names step aside until it settles, then everything is placed once. */
+	private inMotion = false;
+	private lastMoveAt = -Infinity;
+	private labelFade = 1;
+	private labelFadeStart = 0;
 
 	// Motion.
 	private raf = 0;
@@ -461,7 +469,7 @@ export class AtlasRenderer {
 			'requestIdleCallback' in window ? (cb) => window.requestIdleCallback(cb, { timeout: 500 }) : (cb) => setTimeout(cb, 30);
 		const step = () => {
 			if (this.destroyed || token !== this.warmToken || this.data !== data) return;
-			this.ctx.font = `600 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+			this.ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
 			const end = Math.min(order.length, at + 300);
 			for (; at < end; at++) {
 				const i = order[at];
@@ -549,7 +557,6 @@ export class AtlasRenderer {
 			list.push(i);
 			sprites.push(glowSprite(color));
 			alphas.push(strength);
-			if (this.look === 'light' && light === 3 && (data.rankInScene[i] < 12 || data.videos[i] >= 40)) sparks.push(i);
 		}
 		// Draw small glows first so big ones sit on top.
 		const order = list.map((_, k) => k).sort((a, b) => data.videos[list[a]] - data.videos[list[b]]);
@@ -831,13 +838,14 @@ export class AtlasRenderer {
 		const dt = this.lastFrame ? Math.min(64, now - this.lastFrame) : 16;
 		this.lastFrame = now;
 		let animating = false;
+		let cameraMoving = false;
 		const data = this.data;
 
 		if (data && this.flight) {
 			const t = clamp((now - this.flight.start) / this.flight.plan.duration, 0, 1);
 			this.flight.plan.at(easeInOutCubic(t), this.camera);
 			if (t >= 1) this.flight = null;
-			else animating = true;
+			else animating = cameraMoving = true;
 		}
 		if (data && this.glide) {
 			const f = approach(dt, 55);
@@ -848,7 +856,7 @@ export class AtlasRenderer {
 			if (Math.abs(this.glide.scale - cam.scale) / cam.scale < 0.002) {
 				copyCamera(this.glide, cam);
 				this.glide = null;
-			} else animating = true;
+			} else animating = cameraMoving = true;
 			constrainCamera(cam, data.bounds, this.viewport);
 		}
 		if (data && this.fling.active) {
@@ -859,7 +867,7 @@ export class AtlasRenderer {
 			this.fling.vy *= decay;
 			constrainCamera(this.camera, data.bounds, this.viewport);
 			if (Math.hypot(this.fling.vx, this.fling.vy) < 0.01) this.fling.active = false;
-			else animating = true;
+			else animating = cameraMoving = true;
 		}
 		if (this.reveal < 1) {
 			this.reveal = clamp((now - this.revealStart) / 900, 0, 1);
@@ -881,15 +889,24 @@ export class AtlasRenderer {
 		if (moved) {
 			copyCamera(this.camera, this.lastCam);
 			this.labelsStale = true;
+			this.lastMoveAt = now;
 		}
-		// Re-plan labels at most ~11 times a second while moving, and once when
-		// the camera settles, so motion never pays for placement every frame.
-		if (!animating && this.labelsPartial) this.labelsStale = true;
-		if (data && this.labelsStale && (!animating || now - this.labelsAt > 90)) {
-			this.computeLabels(animating);
+		// While the camera moves (a glide, a flight, a fling or a drag) labels
+		// are not re-placed at all: scene names ride along with the map and
+		// artist names step aside. Placement runs once, when it settles, and
+		// the names fade back in.
+		this.inMotion = cameraMoving || now - this.lastMoveAt < 140;
+		if (data && this.labelsStale && !this.inMotion) {
+			this.computeLabels(false);
 			this.labelsAt = now;
 			this.labelsStale = false;
-			this.labelsPartial = animating;
+			this.labelsPartial = false;
+			this.labelFade = this.reducedMotion ? 1 : 0;
+			this.labelFadeStart = now;
+		}
+		if (this.labelFade < 1) {
+			this.labelFade = clamp((now - this.labelFadeStart) / 180, 0, 1);
+			if (this.labelFade < 1) animating = true;
 		}
 		this.draw(now);
 		this.dirty = false;
@@ -931,15 +948,17 @@ export class AtlasRenderer {
 		const maxVideos = data.scenes.reduce((m, sc) => Math.max(m, sc.videos), 0);
 		const size = sceneFontSize(scene.videos, maxVideos, this.compact);
 		const ctx = this.ctx;
-		ctx.font = `italic 500 ${size}px ${SCENE_FONT}`;
-		const nameW = ctx.measureText(scene.name).width;
+		ctx.font = `650 ${size}px ${SCENE_FONT}`;
+		ctx.letterSpacing = SCENE_TRACKING;
+		const nameW = ctx.measureText(scene.name.toUpperCase()).width;
+		ctx.letterSpacing = '0px';
 		const meta =
 			withMeta && !this.compact
 				? `${scene.channel_no != null ? `CH ${scene.channel_no}   ` : ''}${formatCount(scene.artists)} ARTISTS   ${formatHours(scene.hours).toUpperCase()}`
 				: '';
 		ctx.font = `500 ${META_FONT_PX}px ${MONO_FONT}`;
 		const metaW = meta ? ctx.measureText(meta).width : 0;
-		const box = { width: Math.max(nameW, metaW), height: size * 1.1 + (meta ? META_FONT_PX + 5 : 0), size, meta };
+		const box = { width: Math.max(nameW, metaW), height: size * 1.25 + (meta ? META_FONT_PX + 6 : 0), size, meta };
 		this.sceneBoxes[slot] = box;
 		return box;
 	}
@@ -968,7 +987,7 @@ export class AtlasRenderer {
 			fitScale: this.fitScale,
 			measureArtist: (i, text) => {
 				if (this.artistWidth[i] < 0) {
-					ctx.font = `600 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+					ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
 					this.artistWidth[i] = ctx.measureText(text).width;
 				}
 				return this.artistWidth[i];
@@ -992,7 +1011,7 @@ export class AtlasRenderer {
 		if (current < 0) return out;
 		const name = this.names.get(data.ids[current]);
 		if (name) {
-			this.ctx.font = `600 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+			this.ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
 			const width = this.ctx.measureText(name).width;
 			const r = this.baseR[current] * growth;
 			const p = this.screenOf(current);
@@ -1051,7 +1070,7 @@ export class AtlasRenderer {
 		if (neb) {
 			const zoomFade = clamp(1.12 - Math.log2(Math.max(1, k)) * 0.13, 0.42, 1);
 			ctx.globalCompositeOperation = 'lighter';
-			ctx.globalAlpha = (this.look === 'place' ? 0.95 : 0.66) * zoomFade * reveal;
+			ctx.globalAlpha = (this.look === 'place' ? 0.55 : 0.4) * zoomFade * reveal;
 			ctx.imageSmoothingEnabled = true;
 			ctx.imageSmoothingQuality = 'high';
 			const x = (neb.x0 - cam.cx) * scale + halfW;
@@ -1452,20 +1471,23 @@ export class AtlasRenderer {
 				const box = this.sceneBox(label.index, label.height > this.sceneBox(label.index, false).height + 1);
 				const dimmed = this.selectedScene >= 0 && this.selectedScene !== label.index ? 0.45 : 1;
 				const alpha = label.alpha * dimmed * reveal;
+				const name = scene.name.toUpperCase();
 				ctx.globalAlpha = alpha;
-				ctx.font = `italic 500 ${box.size}px ${SCENE_FONT}`;
+				ctx.font = `650 ${box.size}px ${SCENE_FONT}`;
+				ctx.letterSpacing = SCENE_TRACKING;
 				ctx.textAlign = 'center';
 				const cx = x + box.width / 2;
-				ctx.strokeStyle = STAGE.textShadow;
-				ctx.lineWidth = this.compact ? 2.5 : 3.5;
-				ctx.strokeText(scene.name, cx, y);
+				ctx.strokeStyle = STAGE.textHalo;
+				ctx.lineWidth = 3;
+				ctx.strokeText(name, cx, y);
 				ctx.fillStyle = sceneLabelColor(scene.hue);
-				ctx.fillText(scene.name, cx, y);
-				if (box.meta) {
+				ctx.fillText(name, cx, y);
+				ctx.letterSpacing = '0px';
+				if (box.meta && !this.inMotion) {
 					ctx.font = `500 ${META_FONT_PX}px ${MONO_FONT}`;
-					ctx.globalAlpha = alpha * 0.8;
+					ctx.globalAlpha = alpha * 0.75 * this.labelFade;
 					ctx.lineWidth = 2.5;
-					const my = y + box.size * 1.1 + 3;
+					const my = y + box.size * 1.25 + 3;
 					ctx.strokeText(box.meta, cx, my);
 					ctx.fillStyle = STAGE.textDim;
 					ctx.fillText(box.meta, cx, my);
@@ -1473,10 +1495,12 @@ export class AtlasRenderer {
 				ctx.textAlign = 'start';
 			} else {
 				const pinnedLabel = label.index === this.selectedArtist || label.index === this.hover;
-				ctx.globalAlpha = label.alpha * reveal * (this.selectedScene >= 0 && data.scene[label.index] !== this.selectedScene ? 0.5 : 1);
-				ctx.font = `600 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
-				ctx.strokeStyle = STAGE.textShadow;
-				ctx.lineWidth = this.compact ? 2.5 : 3;
+				if (this.inMotion && !pinnedLabel) continue;
+				const fade = pinnedLabel ? 1 : this.labelFade;
+				ctx.globalAlpha = label.alpha * reveal * fade * (this.selectedScene >= 0 && data.scene[label.index] !== this.selectedScene ? 0.5 : 1);
+				ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+				ctx.strokeStyle = STAGE.textHalo;
+				ctx.lineWidth = 2.5;
 				ctx.strokeText(label.text, x, y + 1);
 				ctx.fillStyle = pinnedLabel ? '#ffffff' : STAGE.text;
 				ctx.fillText(label.text, x, y + 1);

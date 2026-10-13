@@ -172,10 +172,10 @@
 	}
 
 	.where {
-		font-family: var(--font-display);
-		font-style: italic;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-medium);
+		text-transform: uppercase;
+		letter-spacing: 0.14em;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;

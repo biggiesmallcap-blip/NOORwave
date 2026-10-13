@@ -679,7 +679,7 @@
 		// Canvas text needs the web fonts loaded before it measures labels.
 		if (document.fonts) {
 			void Promise.all([
-				document.fonts.load('italic 500 20px Newsreader'),
+				document.fonts.load('650 14px Manrope'),
 				document.fonts.load('600 11px Manrope'),
 				document.fonts.load('500 10px "JetBrains Mono"'),
 			])
@@ -1058,11 +1058,12 @@
 		background: var(--stage-glass);
 		border: 1px solid var(--stage-line);
 		backdrop-filter: blur(var(--blur-overlay, 14px));
-		color: hsl(var(--hue), 70%, 84%);
-		font-family: var(--font-display);
-		font-style: italic;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-medium);
+		color: hsl(var(--hue), 22%, 84%);
+		font-family: var(--font-body);
+		text-transform: uppercase;
+		letter-spacing: 0.14em;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.here-dot {
@@ -1189,8 +1190,6 @@
 
 	.r-meta {
 		color: var(--stage-text-3);
-		font-family: var(--font-display);
-		font-style: italic;
 		font-size: var(--font-size-xs);
 		white-space: nowrap;
 	}

@@ -40,7 +40,9 @@ export function sceneLift(k: number): number {
 /** Scene label font size in CSS px, by the scene's share of the biggest scene. */
 export function sceneFontSize(videos: number, maxVideos: number, compact = false): number {
 	const share = maxVideos > 0 ? Math.sqrt(Math.max(0, videos) / maxVideos) : 0;
-	return Math.round((compact ? 10 : 12.5) + share * (compact ? 5 : 12));
+	// Small caps carry weight on their own; the range stays narrow so big
+	// scenes lead without shouting.
+	return Math.round((compact ? 8.5 : 9.5) + share * (compact ? 3 : 5));
 }
 
 export interface PlannedLabel {
