@@ -16,6 +16,7 @@
 	import { openContextMenu, openMenuAtElement } from '$lib/stores/context_menu';
 	import { buildTidalCollectionMenu } from '$lib/player/tidal_collection_menu';
 	import { saveTidalPlaylist } from '$lib/player/save_tidal_playlist';
+	import { actionErrorMessage } from '$lib/utils/describe_error';
 
 	let { id, kind, title, subtitle = null, artworkUrl = null, onClose }: {
 		id: string; kind: 'mix' | 'playlist'; title: string;
@@ -81,7 +82,7 @@
 			showToast(`Saved ${saved.name} to NOORwave and TIDAL`, 'success');
 		} catch (reason) {
 			console.error(`Could not save TIDAL ${kind} ${id}`, reason);
-			showToast(`Couldn't save ${title}. Try again.`, 'error');
+			showToast(actionErrorMessage(reason, `Couldn't save ${title}. Try again.`), 'error');
 		} finally {
 			saving = false;
 		}

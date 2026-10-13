@@ -15,6 +15,7 @@
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import ErrorState from '$lib/components/ui/ErrorState.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import { actionErrorMessage } from '$lib/utils/describe_error';
 
 	let { title, getTrackIds }: { title: string; getTrackIds: () => Promise<number[]> } = $props();
 
@@ -62,7 +63,7 @@
 			close();
 		} catch (reason) {
 			console.error(`Could not add to playlist ${playlist.id}`, reason);
-			addError = `Couldn't add to ${playlist.name}. Try again.`;
+			addError = actionErrorMessage(reason, `Couldn't add to ${playlist.name}. Try again.`);
 		} finally {
 			busy = false;
 		}
