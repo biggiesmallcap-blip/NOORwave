@@ -1,23 +1,30 @@
-//! Map layout: scene disks from a force layout of the scene graph, artists
-//! inside their disk by rank and hashed angle, uncharted artists on an outer
-//! ring, warm-started so nothing jumps between builds.
+//! Map layout: scene disks from a force layout of the scene graph, each
+//! scene's artists from a force layout of its own internal edges, uncharted
+//! artists on an outer ring, warm-started so nothing jumps between builds.
 //!
-//! The map is a 1000 x 1000 square, origin top-left. Scene disks live inside
-//! a circle of radius 400 around the centre; the uncharted ring runs from
-//! 425 to 470. A disk's radius is proportional to sqrt(videos). Hue is the
-//! angle of a scene's centre around the map centre, so color is place.
+//! The map is a 1000 x 1000 square, origin top-left. Scenes live inside a
+//! circle of radius 400 around the centre; the uncharted ring runs from 425
+//! to 470. A scene's footprint (area-equivalent radius) grows with
+//! sqrt(videos); its artists form an organic cloud of about that area,
+//! knotted where sub-communities are, eased (never cut) inside a bound of
+//! `PACK` footprints, and that bound is the `r` scenes pack by, so clouds
+//! never overlap. Hue is the angle of a scene's centre around the map
+//! centre, so color is place.
 //!
 //! Warm start: when most scenes continue from the last build, those keep
 //! their positions and only new scenes are simulated; a final overlap pass
-//! moves anyone just enough to make room for growth. On unchanged data a
-//! rebuild reproduces the previous map exactly.
+//! moves anyone just enough to make room for growth. Inside a scene,
+//! remembered artists stay where they were and newcomers settle among their
+//! neighbours. On unchanged data a rebuild reproduces the previous map
+//! exactly.
 
 use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::{PI, TAU};
 
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
+use super::louvain::{self, Csr};
 use super::scenes::{self, ArtistGraph};
 use crate::services::video_discovery::names::name_key;
 
@@ -38,10 +45,34 @@ const SETTLE_PASSES: usize = 800;
 const COLD_ATTEMPTS: u64 = 8;
 /// Links each scene keeps for the layout (the union over scenes).
 const LINKS_PER_SCENE: usize = 6;
-/// Fraction of a disk's radius kept free at its centre, and the band an
-/// artist's radius jitters within.
-const CORE: f64 = 0.10;
-const SPREAD: f64 = 0.86;
+/// A scene's artists may reach this many footprints (the area-equivalent
+/// radius from sqrt(videos)) from its centre; the scene's `r` on the map,
+/// the radius scenes pack by, is this bound, so clouds never overlap.
+pub const PACK: f64 = 1.12;
+/// Share of the bound past which points are eased in rather than cut.
+const SOFT_KNEE: f64 = 0.55;
+const INNER_ITERATIONS: usize = 150;
+/// Pull toward the scene centre per unit of distance, the pull of a
+/// knot's centre on its members, and how hard knots push each other apart.
+const INNER_GRAVITY: f64 = 0.08;
+const KNOT_COHESION: f64 = 0.6;
+const KNOT_REPULSION: f64 = 0.6;
+/// Sub-communities smaller than this are loners, not knots.
+const MIN_KNOT: usize = 3;
+/// A newcomer's offset from its neighbours, as a share of the footprint
+/// each artist would get.
+const INNER_SPACING: f64 = 0.55;
+/// Cloud reach (the radius three quarters of a scene's artists sit within,
+/// in footprints) for sparse and densely linked scenes: tight scenes look
+/// tight.
+const INNER_REACH_SPARSE: f64 = 0.78;
+const INNER_REACH_DENSE: f64 = 0.64;
+/// Above this share of newcomers a scene relaxes as a whole.
+const RESHAPE_SHARE: f64 = 0.25;
+/// Marks which interior layout the stored positions came from; anything
+/// else is laid out cold once.
+const LAYOUT_VERSION_KEY: &str = "video_intel.layout_version";
+const LAYOUT_VERSION: &str = "organic-1";
 
 /// splitmix64: a fixed, well-mixed hash so positions never depend on the
 /// standard library's hasher.
@@ -360,9 +391,10 @@ pub fn place_scenes(nodes: &[SceneNode], links: &[SceneLink]) -> Vec<Placement> 
     }
     let links = strongest_links(links, n);
     let ids: Vec<i64> = nodes.iter().map(|node| node.id).collect();
+    // Disks are the scenes' bounds: PACK footprints of sqrt(videos).
     let radius: Vec<f64> = nodes
         .iter()
-        .map(|node| (node.videos.max(1) as f64).sqrt())
+        .map(|node| (node.videos.max(1) as f64).sqrt() * PACK)
         .collect();
     let inherited: Vec<bool> = nodes
         .iter()
@@ -547,25 +579,329 @@ pub fn place_scenes(nodes: &[SceneNode], links: &[SceneLink]) -> Vec<Placement> 
         .collect()
 }
 
-/// Members inside their disk: rank 0 (the hub) near the centre, the last
-/// at the rim, each at its own hashed angle.
-pub fn place_members(scene: &Placement, ranked: &[i64]) -> Vec<(i64, f64, f64)> {
-    let n = ranked.len().max(1) as f64;
-    ranked
+// --------------------------------------------------------------- scene interiors
+
+/// Ordinal edge strength: provider weights pile up at a few values, so only
+/// their order within the scene counts, spread over 0.3..1.
+fn ordinal_links(edges: &[(usize, usize, f64)], n: usize) -> Vec<(usize, usize, f64)> {
+    let mut levels: Vec<f64> = edges.iter().map(|e| e.2).collect();
+    levels.sort_by(f64::total_cmp);
+    levels.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    let ordinal = |weight: f64| {
+        if levels.len() <= 1 {
+            return 1.0;
+        }
+        let rank = levels.partition_point(|level| *level < weight - 1e-9);
+        0.3 + 0.7 * rank as f64 / (levels.len() - 1) as f64
+    };
+    edges
         .iter()
-        .enumerate()
-        .map(|(rank, id)| {
-            let (angle, wobble) = unit_pair(*id);
-            let fraction = ((rank as f64 + 0.5) / n).sqrt();
-            let dist = scene.r * (CORE + SPREAD * fraction) * (0.94 + 0.06 * wobble);
-            let theta = angle * TAU;
-            (
-                *id,
-                scene.x + dist * theta.cos(),
-                scene.y + dist * theta.sin(),
-            )
-        })
+        .filter(|(a, b, _)| a != b && *a < n && *b < n)
+        .map(|(a, b, w)| (*a, *b, ordinal(*w)))
         .collect()
+}
+
+/// Two-level force layout of one scene, in footprint units (the scene's
+/// area-equivalent radius is 1):
+/// - artists: springs on internal edges (weight is ordinal), repulsion
+///   between artists closer than two spacings (a sorted grid keeps it
+///   linear), so neighbourhoods hold together and nobody overlaps;
+/// - knots (the scene's sub-communities): each member is drawn to its
+///   knot's centre, and knots repel each other by size, so sub-communities
+///   form separate clumps instead of one even disk;
+/// - a pull toward the scene centre that grows with distance, so loners
+///   settle in the gaps and at the edges rather than drifting off.
+///
+/// Displacement per step is capped by a cooling temperature. Deterministic:
+/// fixed orders everywhere, hashed directions for exact overlaps.
+fn simulate_inner(
+    pos: &mut [(f64, f64)],
+    links: &[(usize, usize, f64)],
+    knots: &[Option<u32>],
+    spacing: f64,
+    iterations: usize,
+    t0: f64,
+    ids: &[i64],
+) {
+    let n = pos.len();
+    let cutoff = 2.0 * spacing;
+    let (k2, cut2) = (spacing * spacing, cutoff * cutoff);
+    let knot_count = knots
+        .iter()
+        .flatten()
+        .map(|k| *k as usize + 1)
+        .max()
+        .unwrap_or(0);
+    let mut knot_size = vec![0.0f64; knot_count];
+    for k in knots.iter().flatten() {
+        knot_size[*k as usize] += 1.0;
+    }
+    let live: Vec<usize> = (0..knot_count).filter(|k| knot_size[*k] > 0.0).collect();
+    let mut centre = vec![(0.0f64, 0.0f64); knot_count];
+    let mut push = vec![(0.0f64, 0.0f64); knot_count];
+    let mut disp = vec![(0.0f64, 0.0f64); n];
+    let mut cells: Vec<(i64, i64, usize)> = Vec::with_capacity(n);
+    for step in 0..iterations {
+        let t = t0 * (1.0 - step as f64 / iterations as f64) + t0 * 0.02;
+        for d in disp.iter_mut() {
+            *d = (0.0, 0.0);
+        }
+        // Artist repulsion, local.
+        cells.clear();
+        cells.extend((0..n).map(|i| {
+            (
+                (pos[i].0 / cutoff).floor() as i64,
+                (pos[i].1 / cutoff).floor() as i64,
+                i,
+            )
+        }));
+        cells.sort_unstable();
+        for &(cx, cy, i) in &cells {
+            for gx in cx - 1..=cx + 1 {
+                let start = cells.partition_point(|c| (c.0, c.1) < (gx, cy - 1));
+                for &(ox, oy, j) in &cells[start..] {
+                    if ox != gx || oy > cy + 1 {
+                        break;
+                    }
+                    if j == i {
+                        continue;
+                    }
+                    let (dx, dy) = (pos[i].0 - pos[j].0, pos[i].1 - pos[j].1);
+                    let d2 = dx * dx + dy * dy;
+                    if d2 >= cut2 {
+                        continue;
+                    }
+                    if d2 < 1e-18 {
+                        let (angle, _) = unit_pair(ids[i].wrapping_mul(7919) ^ ids[j]);
+                        disp[i].0 += spacing * (angle * TAU).cos();
+                        disp[i].1 += spacing * (angle * TAU).sin();
+                        continue;
+                    }
+                    let f = k2 / d2;
+                    disp[i].0 += dx * f;
+                    disp[i].1 += dy * f;
+                }
+            }
+        }
+        // Edge springs.
+        for &(a, b, w) in links {
+            let (dx, dy) = (pos[a].0 - pos[b].0, pos[a].1 - pos[b].1);
+            let f = w * (dx * dx + dy * dy).sqrt() / spacing;
+            disp[a].0 -= dx * f;
+            disp[a].1 -= dy * f;
+            disp[b].0 += dx * f;
+            disp[b].1 += dy * f;
+        }
+        // Knots: cohesion toward their centre, repulsion between knots.
+        for c in centre.iter_mut() {
+            *c = (0.0, 0.0);
+        }
+        for (i, knot) in knots.iter().enumerate() {
+            if let Some(k) = knot {
+                let size = knot_size[*k as usize];
+                centre[*k as usize].0 += pos[i].0 / size;
+                centre[*k as usize].1 += pos[i].1 / size;
+            }
+        }
+        for p in push.iter_mut() {
+            *p = (0.0, 0.0);
+        }
+        for (x, &a) in live.iter().enumerate() {
+            for &b in &live[x + 1..] {
+                let (mut dx, mut dy) = (centre[a].0 - centre[b].0, centre[a].1 - centre[b].1);
+                let mut d2 = dx * dx + dy * dy;
+                if d2 < 1e-18 {
+                    let (angle, _) = unit_pair((a as i64) * 104_729 + b as i64);
+                    dx = spacing * (angle * TAU).cos();
+                    dy = spacing * (angle * TAU).sin();
+                    d2 = k2;
+                }
+                let f = KNOT_REPULSION * k2 * knot_size[a] * knot_size[b] / d2;
+                push[a].0 += dx * f / knot_size[a];
+                push[a].1 += dy * f / knot_size[a];
+                push[b].0 -= dx * f / knot_size[b];
+                push[b].1 -= dy * f / knot_size[b];
+            }
+        }
+        for (i, knot) in knots.iter().enumerate() {
+            if let Some(k) = knot {
+                let k = *k as usize;
+                disp[i].0 += push[k].0 - (pos[i].0 - centre[k].0) * KNOT_COHESION;
+                disp[i].1 += push[k].1 - (pos[i].1 - centre[k].1) * KNOT_COHESION;
+            }
+        }
+        // Gravity, then move.
+        for i in 0..n {
+            disp[i].0 -= pos[i].0 * INNER_GRAVITY;
+            disp[i].1 -= pos[i].1 * INNER_GRAVITY;
+            let len = (disp[i].0 * disp[i].0 + disp[i].1 * disp[i].1).sqrt();
+            if len > 0.0 {
+                let s = len.min(t) / len;
+                pos[i].0 += disp[i].0 * s;
+                pos[i].1 += disp[i].1 * s;
+            }
+        }
+    }
+}
+
+/// The scene's sub-communities (Louvain over its internal edges); members
+/// of groups under `MIN_KNOT` are loners (None).
+fn knots_of(links: &[(usize, usize, f64)], n: usize) -> Vec<Option<u32>> {
+    let edges: Vec<(u32, u32, f64)> = links
+        .iter()
+        .map(|(a, b, w)| (*a as u32, *b as u32, *w))
+        .collect();
+    let labels = louvain::louvain(&Csr::from_edges(n, &edges), 1.0);
+    let mut size = vec![0usize; n];
+    for label in &labels {
+        size[*label as usize] += 1;
+    }
+    labels
+        .into_iter()
+        .map(|label| (size[label as usize] >= MIN_KNOT).then_some(label))
+        .collect()
+}
+
+/// Ease a point (footprint units) inside the scene's bound: unchanged up to
+/// the knee, then squeezed smoothly so nothing reaches `PACK`.
+fn soft_clip(p: (f64, f64)) -> (f64, f64) {
+    let rho = (p.0 * p.0 + p.1 * p.1).sqrt();
+    let knee = SOFT_KNEE * PACK;
+    if rho <= knee {
+        return p;
+    }
+    let room = PACK - knee;
+    let eased = knee + room * ((rho - knee) / room).tanh();
+    (p.0 * eased / rho, p.1 * eased / rho)
+}
+
+/// One scene's own layout, in bound units (the scene's `r` is 1, nothing
+/// reaches it). `ids` are the members hubs first; `edges` the scene's
+/// internal edges (local indices, provider weight); `prev` where each
+/// member sat last build, if it was in this scene.
+///
+/// Cold (nothing remembered): hubs start at the centre, everyone else
+/// outward at a hashed angle; the scene's sub-communities (Louvain over its
+/// own edges) become knots and `simulate_inner` pulls each knot together
+/// and the knots apart, so the outline follows them; the cloud is centred,
+/// scaled so three quarters of it sits within the footprint (denser scenes
+/// a little tighter) and its outliers eased in. Warm with few newcomers:
+/// everyone remembered stays where they were and newcomers sit by their
+/// neighbours, so an unchanged scene comes back bit for bit. Warm with many
+/// newcomers (over `RESHAPE_SHARE`): the whole scene relaxes from where it
+/// was.
+pub fn inner_layout(
+    ids: &[i64],
+    edges: &[(usize, usize, f64)],
+    prev: &[Option<(f64, f64)>],
+) -> Vec<(f64, f64)> {
+    let n = ids.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let remembered: Vec<Option<(f64, f64)>> =
+        (0..n).map(|i| prev.get(i).copied().flatten()).collect();
+    let known = remembered.iter().filter(|p| p.is_some()).count();
+    let newcomers = n - known;
+    let reshape = known > 0 && newcomers as f64 > RESHAPE_SHARE * n as f64;
+    let refine = known > 0 && !reshape;
+    if refine && newcomers == 0 {
+        return remembered.into_iter().flatten().collect();
+    }
+    if known == 0 && n == 1 {
+        return vec![(0.0, 0.0)];
+    }
+    let links = ordinal_links(edges, n);
+    let mut neighbours: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for &(a, b, w) in &links {
+        neighbours[a].push((b, w));
+        neighbours[b].push((a, w));
+    }
+    let density = 2.0 * links.iter().map(|l| l.2).sum::<f64>() / n as f64;
+    let spacing = (PI / n as f64).sqrt() * INNER_SPACING;
+
+    // Starting points, in footprint units.
+    let mut pos = vec![(0.0f64, 0.0f64); n];
+    let mut placed = vec![false; n];
+    for (i, p) in remembered.iter().enumerate() {
+        if let Some((x, y)) = p {
+            pos[i] = (x * PACK, y * PACK);
+            placed[i] = true;
+        }
+    }
+    for i in 0..n {
+        if placed[i] {
+            continue;
+        }
+        let (angle, wobble) = unit_pair(ids[i]);
+        let theta = angle * TAU;
+        pos[i] = if known == 0 {
+            // Cold: by rank, hubs in the middle.
+            let rho = 0.8 * ((i as f64 + 0.5) / n as f64).sqrt();
+            (rho * theta.cos(), rho * theta.sin())
+        } else {
+            // A newcomer starts next to the neighbours already down.
+            let (mut sx, mut sy, mut total) = (0.0, 0.0, 0.0);
+            for &(j, w) in &neighbours[i] {
+                if placed[j] {
+                    sx += pos[j].0 * w;
+                    sy += pos[j].1 * w;
+                    total += w;
+                }
+            }
+            if total > 0.0 {
+                (
+                    sx / total + spacing * theta.cos(),
+                    sy / total + spacing * theta.sin(),
+                )
+            } else {
+                let rho = 0.85 * wobble.sqrt();
+                (rho * theta.cos(), rho * theta.sin())
+            }
+        };
+        placed[i] = true;
+    }
+
+    if refine {
+        // Remembered artists stay put; newcomers sit by their neighbours,
+        // eased inside the bound.
+        for (i, p) in pos.iter_mut().enumerate() {
+            if remembered[i].is_none() {
+                *p = soft_clip(*p);
+            }
+        }
+    } else {
+        // Cold starts far from the layout's own scale, a reshape close to it.
+        let t0 = if reshape { 0.03 } else { 0.1 };
+        let knots = knots_of(&links, n);
+        simulate_inner(&mut pos, &links, &knots, spacing, INNER_ITERATIONS, t0, ids);
+        let count = n as f64;
+        let (cx, cy) = pos.iter().fold((0.0, 0.0), |acc, p| {
+            (acc.0 + p.0 / count, acc.1 + p.1 / count)
+        });
+        for p in pos.iter_mut() {
+            p.0 -= cx;
+            p.1 -= cy;
+        }
+        // Scale by the radius three quarters of the artists sit within, so a
+        // few far loners cannot shrink the whole scene.
+        let mut radii: Vec<f64> = pos.iter().map(|p| (p.0 * p.0 + p.1 * p.1).sqrt()).collect();
+        radii.sort_by(f64::total_cmp);
+        let reach = radii[(radii.len() * 3) / 4];
+        let target = INNER_REACH_SPARSE
+            - (INNER_REACH_SPARSE - INNER_REACH_DENSE) * ((density - 1.0) / 5.0).clamp(0.0, 1.0);
+        if reach > 1e-12 {
+            let scale = target / reach;
+            for p in pos.iter_mut() {
+                p.0 *= scale;
+                p.1 *= scale;
+            }
+        }
+        for p in pos.iter_mut() {
+            *p = soft_clip(*p);
+        }
+    }
+    pos.into_iter().map(|(x, y)| (x / PACK, y / PACK)).collect()
 }
 
 /// Ring group of a name: '#' for digits, a-z, '~' for everything else.
@@ -628,8 +964,63 @@ struct SceneRow {
     prev: Option<(f64, f64, f64)>,
 }
 
+/// What one scene's interior layout needs.
+struct Interior {
+    ids: Vec<i64>,
+    edges: Vec<(usize, usize, f64)>,
+    prev: Vec<Option<(f64, f64)>>,
+}
+
+/// One row of video_artist_facets as the layout reads it.
+struct ArtistRow {
+    id: i64,
+    name: String,
+    scene: Option<i64>,
+    videos: i64,
+    x: Option<f64>,
+    y: Option<f64>,
+}
+
+/// The scene's members (ranked, hubs first), its internal edges and where
+/// each member sat inside it last build. A remembered position counts only
+/// when it lies inside this scene's previous bound.
+fn interior(
+    ranked: Vec<i64>,
+    graph: &ArtistGraph,
+    previous_spot: &HashMap<i64, (f64, f64)>,
+    scene_prev: Option<(f64, f64, f64)>,
+) -> Interior {
+    let local: HashMap<i64, usize> = ranked.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let mut edges = Vec::new();
+    for (i, id) in ranked.iter().enumerate() {
+        for (neighbour, weight, _) in graph.neighbors(*id) {
+            if let Some(&j) = local.get(&neighbour)
+                && j > i
+            {
+                edges.push((i, j, weight));
+            }
+        }
+    }
+    let prev = ranked
+        .iter()
+        .map(|id| {
+            let (px, py, pr) = scene_prev?;
+            let (x, y) = previous_spot.get(id)?;
+            let rel = ((x - px) / pr, (y - py) / pr);
+            (rel.0 * rel.0 + rel.1 * rel.1 <= 1.0 + 1e-9).then_some(rel)
+        })
+        .collect();
+    Interior {
+        ids: ranked,
+        edges,
+        prev,
+    }
+}
+
 /// Rebuild this stage's rows. Returns the number of artists placed.
 pub fn build(conn: &Connection) -> Result<usize> {
+    use rayon::prelude::*;
+
     let scenes: Vec<SceneRow> = conn
         .prepare("SELECT scene_id, video_count, artist_count, x, y, r FROM video_scenes ORDER BY scene_id")?
         .query_map([], |row| {
@@ -642,24 +1033,45 @@ pub fn build(conn: &Connection) -> Result<usize> {
             })
         })?
         .collect::<Result<_, _>>()?;
-    let artists: Vec<(i64, String, Option<i64>, i64)> = conn
-        .prepare("SELECT artist_tidal_id, name, scene_id, videos FROM video_artist_facets ORDER BY artist_tidal_id")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+    let artists: Vec<ArtistRow> = conn
+        .prepare(
+            "SELECT artist_tidal_id, name, scene_id, videos, x, y FROM video_artist_facets
+              ORDER BY artist_tidal_id",
+        )?
+        .query_map([], |row| {
+            Ok(ArtistRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                scene: row.get(2)?,
+                videos: row.get(3)?,
+                x: row.get(4)?,
+                y: row.get(5)?,
+            })
+        })?
         .collect::<Result<_, _>>()?;
     let graph = scenes::cached_graph(conn)?;
     let popularity: HashMap<i64, i64> = conn
         .prepare("SELECT artist_tidal_id, popularity FROM video_artist_state WHERE popularity IS NOT NULL")?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<_, _>>()?;
+    // Interiors from another layout version are redrawn cold, once.
+    let version: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_config WHERE key = ?1",
+            [LAYOUT_VERSION_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let remember_interiors = version.as_deref() == Some(LAYOUT_VERSION);
 
     let index_of_scene: HashMap<i64, usize> =
         scenes.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
     let scene_index_of: HashMap<i64, usize> = artists
         .iter()
-        .filter_map(|(id, _, scene, _)| {
-            scene
+        .filter_map(|a| {
+            a.scene
                 .and_then(|s| index_of_scene.get(&s))
-                .map(|i| (*id, *i))
+                .map(|i| (a.id, *i))
         })
         .collect();
     let artists_per_scene: Vec<i64> = scenes.iter().map(|s| s.artists).collect();
@@ -674,22 +1086,49 @@ pub fn build(conn: &Connection) -> Result<usize> {
         .collect();
     let placements = place_scenes(&nodes, &links);
 
+    let previous_spot: HashMap<i64, (f64, f64)> = if remember_interiors {
+        artists
+            .iter()
+            .filter_map(|a| Some((a.id, (a.x?, a.y?))))
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let mut members: Vec<Vec<(f64, i64)>> = vec![Vec::new(); scenes.len()];
     let mut uncharted = Vec::new();
-    for (id, name, _, videos) in &artists {
-        match scene_index_of.get(id) {
+    for artist in &artists {
+        match scene_index_of.get(&artist.id) {
             Some(&scene) => members[scene].push((
-                scenes::exemplar_score(*videos, graph.degree(*id), popularity.get(id).copied()),
-                *id,
+                scenes::exemplar_score(
+                    artist.videos,
+                    graph.degree(artist.id),
+                    popularity.get(&artist.id).copied(),
+                ),
+                artist.id,
             )),
-            None => uncharted.push((*id, name.clone())),
+            None => uncharted.push((artist.id, artist.name.clone())),
         }
     }
+    let interiors: Vec<Interior> = members
+        .into_iter()
+        .enumerate()
+        .map(|(scene, mut list)| {
+            list.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            let ranked = list.into_iter().map(|(_, id)| id).collect();
+            interior(ranked, &graph, &previous_spot, scenes[scene].prev)
+        })
+        .collect();
+    // Scenes are independent: lay them out in parallel, collect in order.
+    let shapes: Vec<Vec<(f64, f64)>> = interiors
+        .par_iter()
+        .map(|inner| inner_layout(&inner.ids, &inner.edges, &inner.prev))
+        .collect();
+
     let mut spots = Vec::with_capacity(artists.len());
-    for (scene, list) in members.iter_mut().enumerate() {
-        list.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        let ranked: Vec<i64> = list.iter().map(|(_, id)| *id).collect();
-        spots.extend(place_members(&placements[scene], &ranked));
+    for ((inner, shape), place) in interiors.iter().zip(&shapes).zip(&placements) {
+        for (id, (x, y)) in inner.ids.iter().zip(shape) {
+            spots.push((*id, place.x + x * place.r, place.y + y * place.r));
+        }
     }
     spots.extend(place_ring(&uncharted));
 
@@ -706,6 +1145,11 @@ pub fn build(conn: &Connection) -> Result<usize> {
         for (id, x, y) in &spots {
             update.execute(params![id, x, y])?;
         }
+        tx.execute(
+            "INSERT INTO server_config (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![LAYOUT_VERSION_KEY, LAYOUT_VERSION],
+        )?;
     }
     tx.commit()?;
     Ok(spots.len())
@@ -823,21 +1267,107 @@ mod tests {
         assert!(moved < 60.0, "kept scenes moved {moved}");
     }
 
+    /// Two knots of ten (0..10 and 10..20) joined by one weak edge, plus
+    /// five loners (20..25).
+    fn two_knots() -> (Vec<i64>, Vec<(usize, usize, f64)>) {
+        let ids: Vec<i64> = (0..25).map(|i| 1000 + i).collect();
+        let mut edges = Vec::new();
+        for start in [0usize, 10] {
+            for a in start..start + 10 {
+                for b in a + 1..start + 10 {
+                    edges.push((a, b, if (a + b) % 3 == 0 { 0.9 } else { 0.8 }));
+                }
+            }
+        }
+        edges.push((9, 10, 0.3));
+        (ids, edges)
+    }
+
+    fn mean_distance(points: &[(f64, f64)], a: &[usize], b: &[usize]) -> f64 {
+        let mut total = 0.0;
+        let mut count = 0.0;
+        for &i in a {
+            for &j in b {
+                if i != j {
+                    total += ((points[i].0 - points[j].0).powi(2)
+                        + (points[i].1 - points[j].1).powi(2))
+                    .sqrt();
+                    count += 1.0;
+                }
+            }
+        }
+        total / count
+    }
+
     #[test]
-    fn members_fill_their_disk_hubs_inward() {
-        let scene = Placement {
-            x: 300.0,
-            y: 300.0,
-            r: 50.0,
-            hue: 0.0,
+    fn a_scene_interior_is_deterministic_bounded_and_knotted() {
+        let (ids, edges) = two_knots();
+        let none = vec![None; ids.len()];
+        let first = inner_layout(&ids, &edges, &none);
+        assert_eq!(first, inner_layout(&ids, &edges, &none));
+        assert!(first.iter().all(|p| p.0 * p.0 + p.1 * p.1 < 1.0));
+        let a: Vec<usize> = (0..10).collect();
+        let b: Vec<usize> = (10..20).collect();
+        let within = (mean_distance(&first, &a, &a) + mean_distance(&first, &b, &b)) / 2.0;
+        let across = mean_distance(&first, &a, &b);
+        assert!(within < 0.6 * across, "knots: {within} vs {across}");
+        // A lone artist sits at the centre; an empty scene has no shape.
+        assert_eq!(inner_layout(&ids[..1], &[], &[None]), vec![(0.0, 0.0)]);
+        assert!(inner_layout(&[], &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_remembered_scene_keeps_its_shape_and_newcomers_settle_near_friends() {
+        let (mut ids, mut edges) = two_knots();
+        let none = vec![None; ids.len()];
+        let first = inner_layout(&ids, &edges, &none);
+        let remembered: Vec<Option<(f64, f64)>> = first.iter().copied().map(Some).collect();
+        assert_eq!(
+            inner_layout(&ids, &edges, &remembered),
+            first,
+            "bit for bit"
+        );
+        // One newcomer tied to the first knot.
+        ids.push(2000);
+        for friend in 0..4 {
+            edges.push((friend, 25, 0.9));
+        }
+        let mut with_newcomer = remembered.clone();
+        with_newcomer.push(None);
+        let grown = inner_layout(&ids, &edges, &with_newcomer);
+        assert_eq!(&grown[..25], &first[..], "remembered artists stay put");
+        let newcomer = grown[25];
+        assert!(newcomer.0 * newcomer.0 + newcomer.1 * newcomer.1 < 1.0);
+        let to_a = mean_distance(&grown, &[25], &(0..10).collect::<Vec<_>>());
+        let to_b = mean_distance(&grown, &[25], &(10..20).collect::<Vec<_>>());
+        assert!(to_a < to_b);
+        // Many newcomers: the scene relaxes as a whole, still bounded and
+        // deterministic.
+        let mostly_new: Vec<Option<(f64, f64)>> =
+            (0..ids.len()).map(|i| (i < 8).then(|| first[i])).collect();
+        let reshaped = inner_layout(&ids, &edges, &mostly_new);
+        assert_eq!(reshaped, inner_layout(&ids, &edges, &mostly_new));
+        assert!(reshaped.iter().all(|p| p.0 * p.0 + p.1 * p.1 < 1.0));
+    }
+
+    #[test]
+    fn denser_scenes_draw_tighter_clouds() {
+        let ids: Vec<i64> = (0..40).collect();
+        let sparse: Vec<(usize, usize, f64)> = (0..39).map(|i| (i, i + 1, 0.8)).collect();
+        let mut dense = sparse.clone();
+        for a in 0..40 {
+            for step in [2, 3, 5, 7] {
+                dense.push((a, (a + step) % 40, 0.8));
+            }
+        }
+        let spread = |points: &[(f64, f64)]| {
+            (points.iter().map(|p| p.0 * p.0 + p.1 * p.1).sum::<f64>() / points.len() as f64).sqrt()
         };
-        let ranked: Vec<i64> = (1..=200).collect();
-        let spots = place_members(&scene, &ranked);
-        assert_eq!(spots, place_members(&scene, &ranked));
-        let dist = |s: &(i64, f64, f64)| ((s.1 - 300.0).powi(2) + (s.2 - 300.0).powi(2)).sqrt();
-        assert!(spots.iter().all(|s| dist(s) <= 50.0 + 1e-9));
-        assert!(dist(&spots[0]) < 10.0);
-        assert!(dist(&spots[199]) > 40.0);
+        let none = vec![None; 40];
+        assert!(
+            spread(&inner_layout(&ids, &dense, &none))
+                < spread(&inner_layout(&ids, &sparse, &none))
+        );
     }
 
     #[test]
@@ -903,6 +1433,49 @@ mod tests {
         for (a, b) in first.iter().zip(&second) {
             assert!((a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6);
         }
+        // Every charted artist inside its own scene's bound; bounds apart.
+        let scenes: Vec<(i64, f64, f64, f64)> = conn
+            .prepare("SELECT scene_id, x, y, r FROM video_scenes ORDER BY scene_id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let spots = |conn: &Connection| -> Vec<(i64, i64, f64, f64)> {
+            conn.prepare(
+                "SELECT artist_tidal_id, scene_id, x, y FROM video_artist_facets
+                  WHERE scene_id IS NOT NULL ORDER BY artist_tidal_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let placed = spots(&conn);
+        for (_, scene, x, y) in &placed {
+            let (_, cx, cy, r) = scenes.iter().find(|s| s.0 == *scene).unwrap();
+            assert!(((x - cx).powi(2) + (y - cy).powi(2)).sqrt() < *r);
+        }
+        let (a, b) = (scenes[0], scenes[1]);
+        assert!(((a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt() >= a.3 + b.3);
+        // A third build over the same data moves no artist at all.
+        build(&conn).unwrap();
+        for (before, after) in placed.iter().zip(spots(&conn)) {
+            assert!((before.2 - after.2).abs() < 1e-9 && (before.3 - after.3).abs() < 1e-9);
+        }
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM server_config WHERE key = ?1",
+                [LAYOUT_VERSION_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, LAYOUT_VERSION);
         let ring: (f64, f64) = conn
             .query_row(
                 "SELECT x, y FROM video_artist_facets WHERE artist_tidal_id = 13",

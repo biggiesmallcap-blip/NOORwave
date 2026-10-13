@@ -163,7 +163,9 @@ pub fn local_moves(graph: &Csr, resolution: f64, start: &[u32], pinned: &[bool])
     moved.iter().map(|c| original[*c as usize]).collect()
 }
 
-/// Weighted modularity of a partition at a resolution.
+/// Weighted modularity of a partition at a resolution (tests check that
+/// a partition beats the trivial one).
+#[cfg(test)]
 pub fn modularity(graph: &Csr, partition: &[u32], resolution: f64) -> f64 {
     let communities = partition.iter().map(|c| *c as usize + 1).max().unwrap_or(0);
     let mut internal = vec![0.0; communities];
