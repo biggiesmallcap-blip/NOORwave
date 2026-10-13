@@ -108,7 +108,7 @@ describe('On Air stage wiring', () => {
 	test('on air the player hands its title strip and up-next pill to the lower third', () => {
 		expect(player).toContain('{#if !broadcast}');
 		expect(player).toContain('upNextVisible && !broadcast');
-		expect(player).toContain('class:below-bug={broadcast}');
+		expect(player).not.toContain('class:below-bug');
 	});
 
 	test('the remote listens in the capture phase and skips menus and fields', () => {

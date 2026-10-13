@@ -544,7 +544,7 @@
 	{/if}
 
 	{#if fullscreen}
-		<div class="fs-actions" class:below-bug={broadcast}>
+		<div class="fs-actions">
 			{#if onToggleSaved}
 				<button type="button" class="fs-pill heart" class:saved onclick={() => onToggleSaved?.()} disabled={savePending}
 					aria-pressed={saved} aria-label={saved ? 'Remove video from likes' : 'Save video to likes'}
@@ -787,7 +787,8 @@
 		transform: translateY(-10px);
 	}
 
-	.chrome-hidden .controls {
+	.chrome-hidden .controls,
+	.chrome-hidden .fs-actions {
 		transform: translateY(12px);
 	}
 
@@ -859,20 +860,18 @@
 		border-radius: 0;
 	}
 
-	/* Same pills as the autoplay control; the title leaves room for them. */
+	/* Same pills as the autoplay control, stacked just above the right end of
+	   the control bar so every control sits in one corner and the top of the
+	   picture stays clear (the channel bug owns the top right on air). They
+	   come and go with the bar. */
 	.fs-actions {
 		position: absolute;
 		z-index: 3;
-		top: 14px;
-		right: 16px;
+		right: 14px;
+		bottom: 60px;
 		display: flex;
 		gap: 8px;
-		transition: opacity var(--motion-base);
-	}
-
-	/* On air the channel bug owns the top right corner. */
-	.fs-actions.below-bug {
-		top: 64px;
+		transition: opacity var(--motion-base), transform var(--motion-base);
 	}
 
 	.fs-pill {
@@ -906,10 +905,6 @@
 	.fs-pill:focus-visible {
 		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
-	}
-
-	.fullscreen .top-meta {
-		padding-right: 154px;
 	}
 
 	@keyframes up-next-drop {
