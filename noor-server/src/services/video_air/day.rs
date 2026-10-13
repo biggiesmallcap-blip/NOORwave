@@ -45,6 +45,11 @@ pub struct Lineup {
     pub spotlight_artist: Option<i64>,
     pub spotlight_name: Option<String>,
     pub rewind_decade: Option<i32>,
+    /// The scene channel numbers on the dial when this day was built. A
+    /// catalog rebuild that numbers new scenes (or loses one) changes the
+    /// dial, and today is rebuilt so the new channels air the same day.
+    #[serde(default)]
+    pub dial: Vec<i64>,
     pub channels: Vec<ChannelMeta>,
 }
 
@@ -107,8 +112,20 @@ pub fn load_lineup(conn: &Connection, day: &str) -> Result<Option<Lineup>> {
     Ok(raw.and_then(|raw| serde_json::from_str(&raw).ok()))
 }
 
-fn is_current(lineup: &Lineup, explore: ExploreMode, facets_now: bool) -> bool {
-    lineup.version == LINEUP_VERSION && lineup.explore == explore && (lineup.facets || !facets_now)
+/// The numbered scene channels as the catalog stands now.
+pub fn current_dial(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT channel_no FROM video_scenes WHERE channel_no IS NOT NULL ORDER BY channel_no",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn is_current(lineup: &Lineup, explore: ExploreMode, facets_now: bool, dial_now: &[i64]) -> bool {
+    lineup.version == LINEUP_VERSION
+        && lineup.explore == explore
+        && (lineup.facets || !facets_now)
+        && lineup.dial == dial_now
 }
 
 /// The day's lineup, building it (and its programs) when missing, from an
@@ -116,13 +133,23 @@ fn is_current(lineup: &Lineup, explore: ExploreMode, facets_now: bool) -> bool {
 /// the intelligence build has since landed.
 pub fn ensure(conn: &Connection, day: &str, explore: ExploreMode) -> Result<Lineup> {
     if let Some(lineup) = load_lineup(conn, day)?
-        && is_current(&lineup, explore, universe::facets_ready(conn)?)
+        && is_current(
+            &lineup,
+            explore,
+            universe::facets_ready(conn)?,
+            &current_dial(conn)?,
+        )
     {
         return Ok(lineup);
     }
     let _guard = BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(lineup) = load_lineup(conn, day)?
-        && is_current(&lineup, explore, universe::facets_ready(conn)?)
+        && is_current(
+            &lineup,
+            explore,
+            universe::facets_ready(conn)?,
+            &current_dial(conn)?,
+        )
     {
         return Ok(lineup);
     }
@@ -195,6 +222,7 @@ pub fn build_with(
         spotlight_artist: ctx.spotlight.as_ref().map(|pick| pick.artist),
         spotlight_name: ctx.spotlight.as_ref().map(|pick| pick.name.clone()),
         rewind_decade: ctx.rewind_decade,
+        dial: current_dial(conn)?,
         channels: planned.into_iter().map(|channel| channel.meta).collect(),
     };
     store(conn, &lineup, &schedules)?;
@@ -722,6 +750,24 @@ mod tests {
         add_facet(&conn, 10_000, 500, "official", "id:500:song 0", 0.5);
         let built = ensure(&conn, "2026-10-14", ExploreMode::Mixed).unwrap();
         assert!(built.facets);
+    }
+
+    #[test]
+    fn a_scene_numbered_later_today_joins_today_s_dial() {
+        let conn = conn();
+        seed_catalog(&conn);
+        let before = ensure(&conn, "2026-10-14", ExploreMode::Mixed).unwrap();
+        assert!(before.dial.is_empty());
+        // The catalog rebuild finds a scene and numbers it.
+        add_scene(&conn, 7, "Bay Area Rap", Some(10));
+        for artist in 500..560 {
+            add_artist_scene(&conn, artist, 7);
+        }
+        let after = ensure(&conn, "2026-10-14", ExploreMode::Mixed).unwrap();
+        assert_eq!(after.dial, vec![10]);
+        assert_ne!(after.built_at, before.built_at, "today was rebuilt");
+        let again = ensure(&conn, "2026-10-14", ExploreMode::Mixed).unwrap();
+        assert_eq!(again.built_at, after.built_at, "and then frozen again");
     }
 
     #[test]
