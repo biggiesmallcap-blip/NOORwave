@@ -13,8 +13,9 @@
 	// Every scene channel as one calm index: families in a fixed order, a line
 	// per channel (number, name, who is on now). The picture waits until you
 	// ask for it: resting on a line (or focusing it) brings up a preview of
-	// what is on beside it, which glides from line to line and stays put when
-	// the pointer leaves. A click (or Enter) tunes in.
+	// what is on beside it. Passing over lines shows nothing; the preview never
+	// slides after the pointer, it fades away and comes up again where you
+	// settle. A click (or Enter) tunes in.
 	let { families, slots, onAirId, tuningId, ontune }: {
 		families: readonly DialFamily<VideoChannel>[];
 		slots: ReadonlyMap<string, LiveSlot>;
@@ -23,18 +24,15 @@
 		ontune: (channel: VideoChannel) => void;
 	} = $props();
 
-	/** Rest this long on a line before its preview shows... */
-	const INTENT_MS = 160;
-	/** ...and this long to move an open preview to another line. */
-	const MOVE_MS = 90;
-	const HIDE_MS = 240;
+	/** Rest this long on a line before its preview shows. */
+	const INTENT_MS = 320;
+	const HIDE_MS = 140;
 	const CARD_W = 300;
 	const CARD_H = 290;
 	const GAP = 14;
 
 	let root = $state<HTMLDivElement>();
 	let preview = $state<{ id: string; x: number; y: number } | null>(null);
-	let gliding = $state(false);
 	let timer: ReturnType<typeof setTimeout> | null = null;
 
 	let previewChannel = $derived(preview ? (families.flatMap((family) => family.channels).find((channel) => channel.id === preview!.id) ?? null) : null);
@@ -61,21 +59,19 @@
 		if (channel.locked) return;
 		const at = place(el);
 		if (!at) return;
-		gliding = preview != null;
 		preview = { id: channel.id, ...at };
 	}
 
 	function rest(channel: VideoChannel, el: HTMLElement) {
 		clearTimer();
-		timer = setTimeout(() => show(channel, el), preview ? MOVE_MS : INTENT_MS);
+		// Another line: the open preview fades out now, not after the pointer.
+		if (preview && preview.id !== channel.id) preview = null;
+		timer = setTimeout(() => show(channel, el), INTENT_MS);
 	}
 
 	function away() {
 		clearTimer();
-		timer = setTimeout(() => {
-			preview = null;
-			gliding = false;
-		}, HIDE_MS);
+		timer = setTimeout(() => (preview = null), HIDE_MS);
 	}
 
 	function videoMenu(event: MouseEvent, channel: VideoChannel) {
@@ -138,48 +134,47 @@
 	{#if preview && previewChannel}
 		{@const program = previewSlot?.program ?? null}
 		{@const next = previewSlot?.next ?? null}
+		{#key preview.id}
 		<div
 			class="preview"
-			class:gliding
 			style:--ch-hue={channelHue(previewChannel)}
 			style:transform={`translate(${preview.x}px, ${preview.y}px)`}
-			transition:fade={{ duration: 160 }}
+			out:fade|global={{ duration: 120 }}
 			aria-hidden="true"
 		>
-			{#key previewChannel.id}
-				<div class="card" in:fade={{ duration: 180 }}>
-					<div class="art">
-						{#if program?.video.artwork_url}
-							<ArtworkImage src={program.video.artwork_url} size={640} fallbackText="" decorative fadeIn />
-						{:else}
-							<span class="art-no">{channelNumber(previewChannel.no)}</span>
-						{/if}
-						{#if previewSlot && program}
-							<span class="bar"><span class="fill" style:transform={`scaleX(${previewSlot.progress})`}></span></span>
-						{/if}
-					</div>
-					<div class="body">
-						<p class="ch"><span class="ch-no">{channelNumber(previewChannel.no)}</span>{previewChannel.title}</p>
-						{#if program && previewSlot}
-							<p class="title">{splitTitle(program.video.title).song}</p>
-							<p class="meta">
-								{#if program.video.artist_name}<span>{program.video.artist_name}</span>{/if}
-								<span class="mono">
-									{program.duration_s >= LONG_FORM_S
-										? `until ${formatClock(program.start_s + program.duration_s)}`
-										: `${formatRuntime(Math.max(0, program.duration_s - previewSlot.offset))} left`}
-								</span>
-							</p>
-						{:else}
-							<p class="meta">Off air</p>
-						{/if}
-						{#if next}
-							<p class="next"><span class="mono">{formatClock(next.start_s)}</span>{splitTitle(next.video.title).song}{#if next.video.artist_name}<span class="next-artist"> - {next.video.artist_name}</span>{/if}</p>
-						{/if}
-					</div>
+			<div class="card">
+				<div class="art">
+					{#if program?.video.artwork_url}
+						<ArtworkImage src={program.video.artwork_url} size={640} fallbackText="" decorative fadeIn />
+					{:else}
+						<span class="art-no">{channelNumber(previewChannel.no)}</span>
+					{/if}
+					{#if previewSlot && program}
+						<span class="bar"><span class="fill" style:transform={`scaleX(${previewSlot.progress})`}></span></span>
+					{/if}
 				</div>
-			{/key}
+				<div class="body">
+					<p class="ch"><span class="ch-no">{channelNumber(previewChannel.no)}</span>{previewChannel.title}</p>
+					{#if program && previewSlot}
+						<p class="title">{splitTitle(program.video.title).song}</p>
+						<p class="meta">
+							{#if program.video.artist_name}<span>{program.video.artist_name}</span>{/if}
+							<span class="mono">
+								{program.duration_s >= LONG_FORM_S
+									? `until ${formatClock(program.start_s + program.duration_s)}`
+									: `${formatRuntime(Math.max(0, program.duration_s - previewSlot.offset))} left`}
+							</span>
+						</p>
+					{:else}
+						<p class="meta">Off air</p>
+					{/if}
+					{#if next}
+						<p class="next"><span class="mono">{formatClock(next.start_s)}</span>{splitTitle(next.video.title).song}{#if next.video.artist_name}<span class="next-artist"> - {next.video.artist_name}</span>{/if}</p>
+					{/if}
+				</div>
+			</div>
 		</div>
+		{/key}
 	{/if}
 </div>
 
@@ -289,17 +284,12 @@
 		height: 1px;
 		background: var(--ch-color);
 		opacity: 0;
-		transform: scaleX(0.6);
-		transform-origin: 0 50%;
-		transition:
-			opacity var(--motion-base),
-			transform var(--motion-base);
+		transition: opacity var(--motion-base);
 	}
 	.entry:hover::after,
 	.entry.active::after,
 	.entry:focus-visible::after {
 		opacity: 0.7;
-		transform: scaleX(1);
 	}
 	.entry:hover .no,
 	.entry.active .no { opacity: 1; }
@@ -328,10 +318,9 @@
 		width: 300px;
 		pointer-events: none;
 	}
-	.preview.gliding {
-		transition: transform var(--motion-base);
-	}
+	/* It comes up softly where it is; it never travels. */
 	.card {
+		animation: preview-in 220ms var(--ease-standard) both;
 		overflow: hidden;
 		border-radius: var(--radius-md);
 		background: var(--bg-surface-strong, var(--bg-surface));
@@ -429,12 +418,23 @@
 		margin-right: 8px;
 	}
 
+	@keyframes preview-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+
 	@media (prefers-reduced-motion: reduce) {
-		.preview.gliding,
+		.card { animation: none; }
 		.fill,
 		.entry,
 		.entry::after { transition: none; }
 	}
-	:global(:root[data-motion='reduce']) .preview.gliding,
+	:global(:root[data-motion='reduce']) .card { animation: none; }
 	:global(:root[data-motion='reduce']) .fill { transition: none; }
 </style>
