@@ -246,6 +246,11 @@ function buildNebula(data: AtlasData, key: string, stampOf: (i: number) => Stamp
 	return texture;
 }
 
+/** A thumbnail's radius for a dot of radius `r`. */
+function thumbRadius(r: number): number {
+	return clamp(r * 2.2, 10, 30);
+}
+
 /** You draws the newest this many trails. */
 const YOU_TRAILS = 20;
 
@@ -1208,6 +1213,8 @@ export class AtlasRenderer {
 		if (!data || !this.grid) return;
 		const ctx = this.ctx;
 		const growth = zoomGrowth(this.zoomLevel());
+		// Thumbnails on screen name themselves: fewer, closer names.
+		const thumbs = this.look === 'picture' && this.zoomLevel() >= THUMB_K;
 		if (this.mini) {
 			// Mini map: just the pinned names and the scene of the current artist.
 			this.labels = this.miniLabels(growth);
@@ -1235,8 +1242,14 @@ export class AtlasRenderer {
 				return this.artistWidth[i];
 			},
 			measureScene: (s) => this.sceneBox(s),
-			// Route stops wear a ring; their names start outside it.
-			pointRadius: (i) => (this.routeFlag[i] ? Math.max(7, this.baseR[i] * growth + 5) : this.baseR[i] * growth),
+			// Route stops wear a ring and thumbnails are wider than their dot;
+			// names start outside either.
+			pointRadius: (i) =>
+				this.routeFlag[i]
+					? Math.max(7, this.baseR[i] * growth + 5)
+					: thumbs && this.artOf[i] && data.scene[i] >= 0
+						? thumbRadius(this.baseR[i] * growth) + 3
+						: this.baseR[i] * growth,
 			pinned: this.pinned,
 			focusScene: this.selectedScene,
 			compact: this.compact,
@@ -1245,6 +1258,8 @@ export class AtlasRenderer {
 			obstacles: this.obstacles,
 			spotlight: spot,
 			sticky,
+			reach: thumbs ? { near: 110, far: 200 } : undefined,
+			quotaCap: thumbs ? 6 : undefined,
 		});
 	}
 
@@ -1643,8 +1658,7 @@ export class AtlasRenderer {
 				this.thumbs.set(i, entry);
 			}
 			if (entry.failed || entry.readyAt === 0) continue;
-			const r = this.baseR[i] * growth;
-			const R = clamp(r * 2.2, 10, 30);
+			const R = thumbRadius(this.baseR[i] * growth);
 			const sx = (data.x[i] - cam.cx) * cam.scale + halfW;
 			const sy = (data.y[i] - cam.cy) * cam.scale + halfH;
 			const fade = this.reducedMotion ? 1 : clamp((now - entry.readyAt) / THUMB_FADE_MS, 0, 1);

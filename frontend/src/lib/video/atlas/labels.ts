@@ -117,6 +117,11 @@ export interface LabelPlanInput {
 	spotlight?: Spotlight | null;
 	/** Artists named in the last plan. */
 	sticky?: ReadonlySet<number>;
+	/** A tighter spotlight than the default (thumbnails on screen name
+	 *  themselves, so names gather closer to the pointer). */
+	reach?: { near: number; far: number };
+	/** The deepest rank in scene named without a pointer (thumbnails). */
+	quotaCap?: number;
 }
 
 export interface ScreenBox {
@@ -204,7 +209,7 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 	for (let p = 0; p < input.pinned.length; p++) if (input.pinned[p] >= 0) pinned.add(input.pinned[p]);
 	const sticky = input.sticky;
 	const spot = input.spotlight ?? null;
-	const { near, far } = spotlightRadii(compact);
+	const { near, far } = input.reach ?? spotlightRadii(compact);
 	const candidates: number[] = [];
 	const distance = new Map<number, number>();
 	const minX = camera.cx - halfW / camera.scale;
@@ -234,11 +239,14 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 			distance.set(i, home ? d : d + far);
 		});
 	} else if (quota >= 0) {
+		// The cap (thumbnails) applies only here, without a pointer: around
+		// the pointer everyone within reach is named.
+		const capped = Math.min(quota, input.quotaCap ?? Infinity);
 		input.grid.forEachIn(minX, minY, maxX, maxY, (i) => {
 			if (pinned.has(i)) return;
-			if (data.rankInScene[i] > quota) return;
+			if (data.rankInScene[i] > capped) return;
 			// Uncharted dust only gets names close in.
-			if (data.scene[i] < 0 && quota !== Infinity && data.rankInScene[i] > quota / 4) return;
+			if (data.scene[i] < 0 && capped !== Infinity && data.rankInScene[i] > capped / 4) return;
 			if (!names.has(data.ids[i])) return;
 			candidates.push(i);
 		});
