@@ -1126,6 +1126,145 @@ fn fallback_same_artist_tracks(
         .collect()
 }
 
+/// Library candidates for a seed the listening model has not trained on yet
+/// (added since the last training run, so it has no `track_neighbors` rows).
+/// Draws from the seed's artist, its genres (or its artist's, when the seed
+/// itself is untagged) and its nearest neighbours in audio features, so the
+/// map is not left to Last.fm alone. Scores sit below trained neighbors.
+///
+/// Sound Space calls this; radio keeps its own TIDAL-mix rescue for thin
+/// seeds (`add_tidal_mix_fallback`), so the orchestrator itself is unchanged.
+pub(crate) fn cold_seed_library_candidates(
+    db: &Database,
+    seed_track_id: i64,
+    limit: usize,
+    exclude_ids: &[i64],
+) -> Vec<RadioCandidate> {
+    type Row = (
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    );
+    const COLUMNS: &str = "t.id, t.title, ar.name, al.title, al.artwork_url, t.duration_ms";
+    const JOINS: &str =
+        "LEFT JOIN artists ar ON ar.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id";
+    let per_lane = limit.max(4) as i64;
+    let lanes = db.with_conn(move |conn| {
+        let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Row> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        };
+        let artist: Vec<Row> = conn
+            .prepare(&format!(
+                "SELECT {COLUMNS} FROM tracks t {JOINS}
+                 WHERE t.artist_id = (SELECT artist_id FROM tracks WHERE id = ?1) AND t.id != ?1
+                 ORDER BY t.play_count DESC, t.id LIMIT ?2"
+            ))?
+            .query_map(rusqlite::params![seed_track_id, per_lane], read)?
+            .collect::<rusqlite::Result<_>>()?;
+        // The seed's own genres, else its artist's two most common ones.
+        let genre: Vec<Row> = conn
+            .prepare(&format!(
+                "WITH seed_genres AS (
+                     SELECT genre_id FROM track_genres WHERE track_id = ?1
+                     UNION
+                     SELECT genre_id FROM (
+                         SELECT tg.genre_id, COUNT(*) AS n FROM track_genres tg
+                         JOIN tracks s ON s.id = tg.track_id
+                         WHERE s.artist_id = (SELECT artist_id FROM tracks WHERE id = ?1)
+                         GROUP BY tg.genre_id ORDER BY n DESC LIMIT 2))
+                 SELECT {COLUMNS} FROM track_genres tg
+                 JOIN tracks t ON t.id = tg.track_id {JOINS}
+                 WHERE tg.genre_id IN (SELECT genre_id FROM seed_genres) AND t.id != ?1
+                   AND t.artist_id IS NOT (SELECT artist_id FROM tracks WHERE id = ?1)
+                 GROUP BY t.id ORDER BY COUNT(*) DESC, t.play_count DESC, t.id LIMIT ?2"
+            ))?
+            .query_map(rusqlite::params![seed_track_id, per_lane], read)?
+            .collect::<rusqlite::Result<_>>()?;
+        // Nearest in energy, danceability and tempo (one BPM step = 1/60).
+        let sound: Vec<Row> = conn
+            .prepare(&format!(
+                "WITH s AS (SELECT energy, danceability, bpm FROM audio_dsp_features
+                            WHERE track_id = ?1 AND energy IS NOT NULL
+                              AND danceability IS NOT NULL AND bpm IS NOT NULL)
+                 SELECT {COLUMNS} FROM audio_dsp_features f JOIN s
+                 JOIN tracks t ON t.id = f.track_id {JOINS}
+                 WHERE f.track_id != ?1 AND f.energy IS NOT NULL
+                   AND f.danceability IS NOT NULL AND f.bpm IS NOT NULL
+                 ORDER BY ABS(f.energy - s.energy) + ABS(f.danceability - s.danceability)
+                          + ABS(f.bpm - s.bpm) / 60.0, t.id
+                 LIMIT ?2"
+            ))?
+            .query_map(rusqlite::params![seed_track_id, per_lane], read)?
+            .collect::<rusqlite::Result<_>>()?;
+        // Audio features alone are a loose match (any genre at the same energy
+        // and tempo), so that lane fills at most half the fallback.
+        let sound_cap = limit.div_ceil(2);
+        Ok([
+            (artist, "same artist", "artist_affinity", 0.6, limit),
+            (sound, "similar sound", "energy_match", 0.5, sound_cap),
+            (genre, "same genre", "genre_affinity", 0.45, limit),
+        ])
+    });
+    let Ok(lanes) = lanes else {
+        return Vec::new();
+    };
+
+    let mut seen: HashSet<i64> = exclude_ids.iter().copied().chain([seed_track_id]).collect();
+    let mut queues: Vec<_> = lanes
+        .into_iter()
+        .map(|(rows, label, reason, score, cap)| (rows.into_iter().take(cap), label, reason, score))
+        .collect();
+    let mut out = Vec::new();
+    // Round-robin across lanes so one dense artist does not fill the map.
+    while out.len() < limit {
+        let mut progressed = false;
+        for (rows, label, reason, score) in queues.iter_mut() {
+            for (id, title, artist, album, art, dur) in rows.by_ref() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                out.push(RadioCandidate {
+                    track_id: id,
+                    tidal_track_id: None,
+                    title,
+                    artist_name: artist.unwrap_or_default(),
+                    album_title: album,
+                    artwork_url: art,
+                    duration_ms: dur,
+                    isrc: None,
+                    is_in_library: true,
+                    source: RadioSource::Library,
+                    reason: format!("library \u{b7} {label} (new seed)"),
+                    similarity_score: *score,
+                    confidence: Some(0.4),
+                    candidate_in_degree_percentile: None,
+                    support_count: None,
+                    primary_reason: Some((*reason).to_string()),
+                });
+                progressed = true;
+                break;
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    out
+}
+
 /// Library picks carry their ISRC, so the queue gate can drop a second
 /// release of a recording that is already queued or is the seed.
 fn fill_library_isrcs(db: &Database, candidates: &mut [RadioCandidate]) {

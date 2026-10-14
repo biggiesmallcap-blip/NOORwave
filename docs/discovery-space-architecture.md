@@ -1,4 +1,4 @@
-# Discovery Space architecture (hand-maintained; updated 2026-07-05)
+# Discovery Space architecture (hand-maintained; updated 2026-10-14)
 
 The seed-branch discovery view ("Sound Space", frontend route /discoverspace)
 is built from three backend layers plus a store-driven Svelte UI. Keep this
@@ -11,8 +11,18 @@ section current when touching any of them.
      library embedding neighbors (track_neighbors table), Last.fm similar
      (6h cache), and engine candidates. The request's coherence (0..1,
      default 0.5) picks the RadioBlend band: >=0.67 Familiar, >=0.33 Mixed,
-     else Adventurous.
-   - Batched enrichment (DSP, listen stats, genres, cohorts), then the
+     else Adventurous. With fewer than 8 library candidates (a seed added
+     since the last training run has no neighbors) the route adds
+     radio::cold_seed_library_candidates: same artist, nearest DSP sound
+     (capped at half) and genre, round-robin. Sound Space only; radio keeps
+     its own TIDAL-mix rescue for thin seeds.
+   - Untagged candidate reasons fall back by source (library/engine ->
+     "similar", Last.fm/TIDAL -> "external"); metadata_similarity and
+     audio_texture normalize to "similar", not "unknown".
+   - Batched enrichment (DSP, listen stats, genres, cohorts), then artist
+     genres for tracks with none (services/artist_genres.rs: the artist's
+     library genres, video_artist_facets when that table exists, TIDAL
+     artist genres; free tags resolved to canonical names), then the
      multi-signal re-rank in services/discovery_ranking.rs:
      shaped = base * m_genre * m_harmonic * m_energy * m_artist * m_taste.
      Every multiplier is exactly 1.0 on missing data; at coherence 0.5 with
@@ -23,7 +33,10 @@ section current when touching any of them.
      Missing signals PASS, except key_compatible_only which drops
      unanalyzed candidates by design.
    - normalize_scores_by_source + prune_graph (services/discovery_space.rs;
-     PruneConfig::for_coherence scales hub suppression), then nodes serialize
+     PruneConfig::for_coherence scales hub suppression). A hub needs at least
+     hub_min_in_degree (3) in-edges from other candidates (seed edges are
+     excluded) and in-degree percentiles are mid-rank, so a sparse star map
+     is never read as all hubs. Node radius = confidence. Then nodes serialize
      with why / why_signals / shaped_score and diagnostics gain coherence,
      filter_dropped_count, era_filter_coverage.
 2. Blend endpoints (/api/discovery/blend/{space,add,play,radio}) share the
@@ -52,8 +65,10 @@ bpm, genre_strong, genre, artist, energy, embedding, lastfm, bridge.
 
 ### Signal availability (do not assume more)
 
-audio_dsp_features: TIDAL library tracks only. track_genres: favorites-heavy
-coverage; externals only have external_track_candidates.genre_tags_json.
+audio_dsp_features: TIDAL library tracks only (about 9% of the library).
+track_genres: about two thirds of the library; externals get none of their
+own (external_track_candidates.genre_tags_json is empty in practice) and
+borrow artist genres via services/artist_genres.rs.
 track_neighbors: post-training. track_similarity: stale, NOT a ranking input.
 Ranking code must degrade to neutral on absent data, never crash or bury.
 
@@ -67,6 +82,18 @@ controlRequestFields(), so the WebSocket-driven background reload
 (handleDiscoverySpaceRefreshed) inherits the user's controls. Contract tests
 in frontend/scripts/discovery-space-contract.test.mjs guard this wiring; the
 Rust route tests cover request defaults and shaping output.
+
+### Visual encoding (frontend)
+
+Layout lives in discover_space_physics.ts: distance from the anchor is rank
+by the list's own sort (rerankScore > shapedScore > score), with rings at the
+rank quartiles; the angle is a genre-family sector (discover_space_genre.ts,
+untagged last); size is confidence. The simulation only eases nodes to those
+targets and resolves overlaps; edges do not pull. Missing lens data draws
+UNKNOWN_FILL grey, never a default value. Colour tables (EDGE_COLORS,
+SOURCE_RING, energyColor) live in the renderer; the legend and help import
+them. Labels are greedy and collision-free, by rank. Right-click on a star,
+row or the card opens the shared track menu (discover_space_menu.ts).
 
 ### Branch state and ranked list (frontend)
 

@@ -44,7 +44,9 @@
 	--accent-line:   rgba(124, 128, 255, 0.28);
 	--accent-strong: #b0b3ff;
 	--accent-glow:   rgba(124, 128, 255, 0.22);
-	--text-on-accent: #fff;
+	/* White on most accents; paletteTheme picks a deep ink when white would not
+	   read on the accent fill (bright lime, mint, Pure Black white). */
+	--text-on-accent: var(--accent-ink, #fff);
 
 	--border-subtle: rgba(255, 255, 255, 0.07);
 	--border-muted:  rgba(255, 255, 255, 0.07);
@@ -95,6 +97,13 @@
 	--player-progress-track: rgba(255, 255, 255, 0.14);
 	--sidebar-bg:       transparent;
 	--material-grain:   none;
+
+	/* Page ground gradient. paletteTheme tints these per palette; the values
+	   here are the stock ground before the palette applies. */
+	--ground-top:    #0e0e14;
+	--ground-bottom: #07070a;
+	--ground-glow-a: rgba(124, 128, 255, 0.09);
+	--ground-glow-b: rgba(100, 80, 220, 0.06);
 
 	/* Genre Atlas semantic tokens */
 	--atlas-bg: linear-gradient(165deg, #0c0f1b 0%, #090b14 52%, #070910 100%);
@@ -181,6 +190,11 @@
 	--player-art-rim: rgba(255, 255, 255, 0.7);
 	--player-progress-track: rgba(22, 29, 43, 0.23);
 	--sidebar-bg:       transparent;
+
+	--ground-top:    #f6f7f9;
+	--ground-bottom: #eceff3;
+	--ground-glow-a: rgba(85, 88, 224, 0.05);
+	--ground-glow-b: rgba(85, 88, 224, 0.03);
 
 	/* Genre Atlas semantic tokens */
 	--atlas-bg: linear-gradient(170deg, #f8fafc 0%, #eef3fb 52%, #dde5f1 100%);
@@ -291,9 +305,7 @@
 	--signal-text: #66513b;
 }
 
-/* Pure black (dark surface only): true #000 ground, neutral greys, no tint.
- * In light mode the palette falls back to the stock light theme with a black
- * accent. */
+/* Pure black: true #000 ground, neutral greys, no tint. */
 [data-palette="void"][data-theme="dark"] {
 	--text-on-accent: #000;
 	--bg-base: #000;
@@ -337,10 +349,67 @@
 	--signal-text: rgba(255, 255, 255, 0.66);
 	--playing: #33ffee;
 	--playing-soft: rgba(51, 255, 238, 0.08);
+	--ground-top: #000;
+	--ground-bottom: #000;
+	--ground-glow-a: rgba(0, 0, 0, 0);
+	--ground-glow-b: rgba(0, 0, 0, 0);
 }
 
-[data-palette="void"][data-theme="dark"] body {
-	background: #000;
+/* Pure in light mode: a soft neutral white rather than paper-bright #fff,
+ * neutral greys, a black accent. */
+[data-palette="void"][data-theme="light"] {
+	--text-on-accent: #fff;
+	--bg-base: #ededed;
+	--bg-elevated: #f7f7f7;
+	--bg-raised: #e1e1e1;
+	--bg-surface: rgba(0, 0, 0, 0.05);
+	--bg-hover: rgba(0, 0, 0, 0.08);
+	--bg-surface-strong: #f7f7f7;
+	--surface-0: #ededed;
+	--surface-1: rgba(0, 0, 0, 0.06);
+	--surface-2: rgba(0, 0, 0, 0.11);
+	--panel-bg: rgba(247, 247, 247, 0.94);
+	--panel-border: rgba(0, 0, 0, 0.11);
+	--panel-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+	--text-primary: #0a0a0a;
+	--text-secondary: rgba(0, 0, 0, 0.68);
+	--text-tertiary: rgba(0, 0, 0, 0.58);
+	--text-muted: rgba(0, 0, 0, 0.38);
+	--border-subtle: rgba(0, 0, 0, 0.08);
+	--border-muted: rgba(0, 0, 0, 0.11);
+	--border-strong: rgba(0, 0, 0, 0.2);
+	--quality-lossy: #6b6b6b;
+	--input-bg: rgba(255, 255, 255, 0.7);
+	--input-border: rgba(0, 0, 0, 0.16);
+	--input-focus: rgba(0, 0, 0, 0.05);
+	--scrollbar-thumb: rgba(0, 0, 0, 0.14);
+	--scrollbar-thumb-hover: rgba(0, 0, 0, 0.26);
+	--right-panel-bg: #f2f2f2;
+	--right-panel-sep: rgba(0, 0, 0, 0.09);
+	--player-surface: rgba(247, 247, 247, 0.97);
+	--player-queue-surface: rgba(240, 240, 240, 0.97);
+	--player-art-shadow: rgba(0, 0, 0, 0.14);
+	--player-art-rim: rgba(255, 255, 255, 0.7);
+	--player-progress-track: rgba(0, 0, 0, 0.16);
+	--sidebar-bg: #ededed;
+	--atlas-bg: #ededed;
+	--instrument-surface: rgba(247, 247, 247, 0.86);
+	--instrument-surface-strong: rgba(240, 240, 240, 0.95);
+	--instrument-border: rgba(0, 0, 0, 0.12);
+	--instrument-edge: rgba(255, 255, 255, 0.9);
+	--signal-text: rgba(0, 0, 0, 0.66);
+	--playing: #00706a;
+	--playing-soft: rgba(0, 112, 106, 0.08);
+	--ground-top: #f2f2f2;
+	--ground-bottom: #e8e8e8;
+	--ground-glow-a: rgba(0, 0, 0, 0);
+	--ground-glow-b: rgba(0, 0, 0, 0);
+}
+
+/* Pure is a flat ground in both modes. :root raises this above the general
+ * `:root body` gradient (and its responsive copy), which come later. */
+:root[data-palette="void"] body {
+	background: var(--bg-base);
 }
 
 /* ── Structural tokens (theme-independent) ────────────── */
@@ -500,20 +569,12 @@ body {
 	overflow: hidden;
 }
 
-/* Dark body gradient */
+/* Body ground: the palette tints the gradient and the corner glows. */
 :root body {
 	background:
-		radial-gradient(ellipse 60% 40% at 0% 0%, rgba(124, 128, 255, 0.09), transparent),
-		radial-gradient(ellipse 40% 30% at 100% 100%, rgba(100, 80, 220, 0.06), transparent),
-		linear-gradient(160deg, #0e0e14 0%, #09090c 55%, #07070a 100%);
-}
-
-/* Light body gradient */
-[data-theme="light"] body {
-	background:
-		radial-gradient(ellipse 60% 40% at 0% 0%, rgba(85, 88, 224, 0.05), transparent),
-		radial-gradient(ellipse 40% 30% at 100% 100%, rgba(85, 88, 224, 0.03), transparent),
-		#f5f4f2;
+		radial-gradient(ellipse 60% 40% at 0% 0%, var(--ground-glow-a), transparent),
+		radial-gradient(ellipse 40% 30% at 100% 100%, var(--ground-glow-b), transparent),
+		linear-gradient(160deg, var(--ground-top) 0%, var(--bg-base) 55%, var(--ground-bottom) 100%);
 }
 
 [data-palette="clay"] body {
@@ -1227,11 +1288,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 	}
 
 	:root body {
-		background: linear-gradient(180deg, #0d0e15 0%, #0a0b11 48%, #07070b 100%);
-	}
-
-	[data-theme="light"] body {
-		background: linear-gradient(180deg, #f7f5f2 0%, #f3f1ee 100%);
+		background: linear-gradient(180deg, var(--ground-top) 0%, var(--bg-base) 48%, var(--ground-bottom) 100%);
 	}
 
 	[data-palette="clay"] body {

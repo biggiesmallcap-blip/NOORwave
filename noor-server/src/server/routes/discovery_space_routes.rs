@@ -26,6 +26,23 @@ use super::{
 /// `DiscoverSidePanel.resolveExternalPlayable` go away. Needs an artist+title ->
 /// tidal_id cache (in-memory or a small SQLite table) to avoid hammering the
 /// Tidal API on every discovery request.
+/// Reason for an orchestrator candidate. Untagged rows fall back by source:
+/// library and Engine rows come from the similarity model ("similar"), Last.fm
+/// and TIDAL mix rows are external matches.
+fn candidate_reason(
+    raw: Option<&str>,
+    source: crate::services::radio::RadioSource,
+) -> &'static str {
+    use crate::services::radio::RadioSource;
+    match raw.map(str::trim).filter(|r| !r.is_empty()) {
+        Some(tag) => ds::normalize_reason(tag),
+        None => ds::fallback_reason_for_source(match source {
+            RadioSource::Library | RadioSource::Engine => "library",
+            RadioSource::Lastfm | RadioSource::Tidal => "lastfm",
+        }),
+    }
+}
+
 fn synthetic_external_track_id(artist: &str, title: &str) -> i64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -1432,6 +1449,27 @@ pub(super) async fn get_discovery_space(
         )
         .await
         .ok();
+        // A seed the listening model has not trained on yet (added since the
+        // last training run) gets almost no library neighbors, and Last.fm
+        // alone makes a thin, mostly external map. Fill the library side from
+        // the seed's artist, genres and sound. Sound Space only: radio keeps its
+        // own TIDAL-mix rescue for thin seeds.
+        let queue = queue.map(|mut q| {
+            let library: Vec<i64> = q
+                .tracks
+                .iter()
+                .filter(|c| c.is_in_library)
+                .map(|c| c.track_id)
+                .collect();
+            if library.len() < 8 {
+                let want = ((limit as usize) / 2).max(12);
+                q.tracks
+                    .extend(crate::services::radio::cold_seed_library_candidates(
+                        &db, seed_id, want, &library,
+                    ));
+            }
+            q
+        });
 
         state_guard = state.read().await;
 
@@ -1485,13 +1523,11 @@ pub(super) async fn get_discovery_space(
                         .confidence
                         .unwrap_or(if c.is_in_library { 1.0 } else { 0.5 }),
                     support_count: c.support_count.unwrap_or(0),
-                    primary_reason: ds::normalize_reason(c.primary_reason.as_deref().unwrap_or(""))
+                    primary_reason: candidate_reason(c.primary_reason.as_deref(), c.source)
                         .to_string(),
-                    reason_tags: c
-                        .primary_reason
-                        .as_deref()
-                        .map(|r| vec![ds::normalize_reason(r).to_string()])
-                        .unwrap_or_default(),
+                    reason_tags: vec![
+                        candidate_reason(c.primary_reason.as_deref(), c.source).to_string(),
+                    ],
                     genres: vec![],
                     in_degree_pctile: c.candidate_in_degree_percentile.unwrap_or(0.5),
                 })
@@ -1957,6 +1993,36 @@ pub(super) async fn get_discovery_space(
         }
     }
 
+    // -- 3d2. Artist genres for tracks with none ------------------------------
+    // Externals never get track_genres rows and the tagger has not reached
+    // every library track. Borrow the artist's canonical genres (library first,
+    // then the video catalogue, then TIDAL's artist genres) so genre shaping,
+    // the Genre lens and clustering work across the whole map, the seed included.
+    {
+        let names: Vec<String> = space_tracks
+            .iter()
+            .filter(|t| t.genres.is_empty() && !t.artist_name.trim().is_empty())
+            .map(|t| t.artist_name.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if !names.is_empty() {
+            let by_artist = state_guard
+                .db
+                .with_conn(|conn| crate::services::artist_genres::lookup(conn, &names))
+                .unwrap_or_default();
+            for t in space_tracks.iter_mut().filter(|t| t.genres.is_empty()) {
+                let key = crate::services::video_discovery::names::name_key(&t.artist_name);
+                if let Some(found) = by_artist.get(&key) {
+                    t.genres = found.genres.clone();
+                    t.top_genre = found.genres.first().cloned();
+                    t.top_genre_source = Some(format!("artist:{}", found.source));
+                    t.top_genre_confidence = Some(0.5);
+                }
+            }
+        }
+    }
+
     // -- 3e. Cohort assignment per track (90-day window) ----------------------
     if !space_tracks.is_empty() {
         let track_ids: Vec<i64> = space_tracks
@@ -2272,7 +2338,14 @@ pub(super) async fn get_discovery_space(
         })
         .collect();
     let track_ids_for_deg: Vec<i64> = space_tracks.iter().map(|t| t.track_id).collect();
-    let in_deg_stats = ds::compute_in_degree_stats(&track_ids_for_deg, &prune_edges);
+    // Hubness is "many other candidates point here". The seed points at every
+    // candidate (and is each external's only edge), so its edges are left out.
+    let candidate_edges: Vec<ds::PruneEdge> = prune_edges
+        .iter()
+        .filter(|e| e.from_track_id != seed_id)
+        .cloned()
+        .collect();
+    let in_deg_stats = ds::compute_in_degree_stats(&track_ids_for_deg, &candidate_edges);
     for t in &mut space_tracks {
         if let Some((_, pctile)) = in_deg_stats.get(&t.track_id) {
             t.in_degree_pctile = *pctile;
@@ -2292,7 +2365,7 @@ pub(super) async fn get_discovery_space(
                     .clamp(0.0, 1.0)
             }),
             is_seed: t.track_id == seed_id,
-            primary_reason: t.primary_reason.clone(),
+            in_degree: in_deg_stats.get(&t.track_id).map(|(d, _)| *d).unwrap_or(0),
             in_degree_pctile: t.in_degree_pctile,
         })
         .collect();
@@ -2359,12 +2432,12 @@ pub(super) async fn get_discovery_space(
                 }
                 _ => {
                     let angle = (i as f64 / total as f64) * std::f64::consts::PI * 2.0;
-                    let r =
-                        80.0 + (1.0 - t.similarity_score) * 300.0 + (i as f64 * 37.0).sin() * 50.0;
+                    let r = 80.0 + (1.0 - norm_score) * 300.0 + (i as f64 * 37.0).sin() * 50.0;
                     (angle.cos() * r, angle.sin() * r)
                 }
             };
-            let node_radius = 5.0 + t.similarity_score * 20.0 + t.energy.unwrap_or(0.5) * 5.0;
+            // Size encodes one variable, confidence; distance carries the rank.
+            let node_radius = 7.0 + t.confidence.clamp(0.0, 1.0) * 11.0;
             let in_deg = in_deg_stats
                 .get(&t.track_id)
                 .map(|(d, _)| *d as i64)

@@ -8,6 +8,7 @@
 		branchHere,
 	} from './discover_space_store';
 	import type { DiscoverTrackNode } from './discover_space_types';
+	import { openNodeMenu } from './discover_space_menu';
 
 	interface Props {
 		onSelectNode?: (node: DiscoverTrackNode) => void;
@@ -68,8 +69,12 @@
 			.slice(0, 2);
 	}
 
+	// Relative to the best row: shaped scores can run above 1, and an absolute
+	// clamp painted most of the top of the list as a full bar.
+	let topScore = $derived(rows.reduce((best, n) => Math.max(best, sortScore(n)), 0));
 	function barWidth(node: DiscoverTrackNode): number {
-		return Math.round(Math.min(1, Math.max(0, sortScore(node))) * 100);
+		if (topScore <= 0) return 0;
+		return Math.round(Math.max(0, sortScore(node) / topScore) * 100);
 	}
 
 	function isSuppressed(node: DiscoverTrackNode): boolean {
@@ -86,25 +91,30 @@
 
 <aside class="ranked-list" class:collapsed aria-label="Ranked discovery results">
 	<div class="list-header">
-		<button class="collapse-btn" onclick={toggleCollapsed} aria-expanded={!collapsed}>
-			{collapsed ? '◂' : '▸'}
+		<button
+			class="collapse-btn"
+			onclick={toggleCollapsed}
+			aria-expanded={!collapsed}
+			aria-label={collapsed ? 'Show results' : 'Hide results'}
+		>
+			<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
 		</button>
+		<span class="list-title">Results <span class="list-count">{rows.length}</span></span>
 		{#if !collapsed}
-			<span class="list-title">Results ({rows.length})</span>
 			<div class="list-actions">
-				<button
-					class="action-btn primary"
-					disabled={rows.length === 0}
-					onclick={() => queueSpaceTracks(rows, true)}
-				>
-					Play all
-				</button>
 				<button
 					class="action-btn"
 					disabled={rows.length === 0}
 					onclick={() => queueSpaceTracks(rows, false)}
 				>
 					Queue all
+				</button>
+				<button
+					class="action-btn primary"
+					disabled={rows.length === 0}
+					onclick={() => queueSpaceTracks(rows, true)}
+				>
+					Play all
 				</button>
 			</div>
 		{/if}
@@ -119,6 +129,7 @@
 					role="button"
 					tabindex="0"
 					onclick={() => onSelectNode?.(node)}
+					oncontextmenu={(e) => openNodeMenu(e, node)}
 					onkeydown={(e) => handleRowKeydown(e, node)}
 				>
 					<div class="row-art">
@@ -127,7 +138,8 @@
 							src={node.artworkUrl}
 							alt={`${node.title} artwork`}
 							size={320}
-							fallbackText={node.title.slice(0, 2).toUpperCase()}
+							fallbackText={node.title.trim().charAt(0).toUpperCase() || 'N'}
+							tint={true}
 						/>
 					</div>
 					<div class="row-main" title={node.why || undefined}>
@@ -152,7 +164,7 @@
 								branchHere(node);
 							}}
 						>
-							⑂
+							<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.5" /><circle cx="4.5" cy="12.5" r="1.5" /><circle cx="11.5" cy="5.5" r="1.5" /><path d="M4.5 5v6M11.5 7c0 3-7 2-7 4" /></svg>
 						</button>
 						<button
 							class="mini-btn"
@@ -163,7 +175,7 @@
 								queueSpaceTracks([node], false);
 							}}
 						>
-							+
+							<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" /></svg>
 						</button>
 						<button
 							class="mini-btn like"
@@ -175,7 +187,7 @@
 								likeNode(node);
 							}}
 						>
-							♥
+							<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.2 2.9 8.3a3 3 0 0 1 4.3-4.2l.8.8.8-.8a3 3 0 0 1 4.3 4.2Z" /></svg>
 						</button>
 						<button
 							class="mini-btn skip"
@@ -187,7 +199,7 @@
 								skipNode(node);
 							}}
 						>
-							✕
+							<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" /></svg>
 						</button>
 					</div>
 				</div>
@@ -203,99 +215,105 @@
 	.ranked-list {
 		display: flex;
 		flex-direction: column;
-		width: 300px;
-		max-height: 100%;
-		background: rgba(0, 0, 0, 0.5);
+		flex: 1;
+		min-height: 0;
+		/* Frosted, in the theme colours: a wallpaper reads through the page
+		   scrim, and these panels sit on top of it. */
+		background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--panel-border);
-		border-radius: 12px;
+		border-radius: var(--radius-lg);
 		overflow: hidden;
 	}
-	.ranked-list.collapsed {
-		width: auto;
-	}
+	.ranked-list.collapsed { flex: none; }
+
 	.list-header {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 8px 10px;
-		border-bottom: 1px solid var(--panel-border);
+		gap: var(--space-2);
+		padding: var(--space-2) var(--space-3) var(--space-2) var(--space-2);
+		border-bottom: 1px solid var(--border-subtle);
 	}
-	.ranked-list.collapsed .list-header {
-		border-bottom: none;
-	}
+	.ranked-list.collapsed .list-header { border-bottom: none; }
 	.collapse-btn {
+		display: inline-grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
 		border: none;
+		border-radius: 50%;
 		background: transparent;
-		color: rgba(255, 255, 255, 0.6);
+		color: var(--text-secondary);
 		cursor: pointer;
-		font-size: var(--font-size-sm);
-		padding: 2px 4px;
 	}
+	.collapse-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+	.collapse-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--motion-fast); }
+	.ranked-list.collapsed .collapse-btn svg { transform: rotate(-90deg); }
 	.list-title {
 		flex: 1;
+		min-width: 0;
+		white-space: nowrap;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-primary);
+	}
+	.list-count {
+		margin-left: 4px;
+		font-weight: var(--font-weight-medium);
+		color: var(--text-tertiary);
+		font-variant-numeric: tabular-nums;
+	}
+	.list-actions { display: flex; gap: 6px; }
+	.action-btn {
+		min-height: 28px;
+		padding: 0 var(--space-3);
+		border-radius: 999px;
+		border: 1px solid var(--border-muted);
+		background: transparent;
+		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-medium);
-		color: rgba(255, 255, 255, 0.85);
-		white-space: nowrap;
-	}
-	.list-actions {
-		display: flex;
-		gap: 4px;
-	}
-	.action-btn {
-		padding: 3px 10px;
-		border-radius: 999px;
-		border: 1px solid var(--panel-border);
-		background: transparent;
-		color: rgba(255, 255, 255, 0.7);
-		font-size: var(--font-size-xs);
 		cursor: pointer;
-		white-space: nowrap;
+		transition: background var(--motion-fast), color var(--motion-fast), filter var(--motion-fast);
 	}
-	.action-btn.primary {
-		background: rgba(124, 128, 255, 0.25);
-		color: rgba(255, 255, 255, 0.95);
-	}
-	.action-btn:disabled {
-		opacity: 0.4;
-		cursor: default;
-	}
+	.action-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+	.action-btn.primary { border-color: var(--accent); background: var(--accent); color: var(--text-on-accent); }
+	.action-btn.primary:hover:not(:disabled) { background: var(--accent); color: var(--text-on-accent); filter: brightness(1.1); }
+	.action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 	.list-body {
 		flex: 1;
+		min-height: 0;
 		overflow-y: auto;
-		padding: 4px;
+		padding: var(--space-1);
 	}
+
 	.row {
+		position: relative;
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 5px 6px;
-		border-radius: 8px;
+		gap: var(--space-3);
+		padding: 6px var(--space-2);
+		border-radius: var(--radius-md);
 		cursor: pointer;
-		transition: background var(--motion-fast), opacity var(--motion-base);
+		transition: background var(--motion-fast);
 	}
-	.row:hover,
-	.row:focus-visible {
-		background: rgba(255, 255, 255, 0.06);
-		outline: none;
-	}
-	.row.suppressed {
-		opacity: 0.35;
-	}
-	.row-art {
-		width: 40px;
-		height: 40px;
-		flex-shrink: 0;
-		border-radius: 6px;
-		overflow: hidden;
-	}
+	.row:hover, .row:focus-visible { background: var(--bg-hover); }
+	.row:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
+	.row.suppressed { opacity: 0.45; }
+
+	.row-art { flex-shrink: 0; }
 	.row-art :global(.row-artwork) {
-		width: 100%;
-		height: 100%;
+		width: 42px;
+		height: 42px;
+		border-radius: var(--radius-sm);
+		display: block;
 		object-fit: cover;
 	}
+	.row-art :global(.row-artwork.fallback) { display: grid; place-items: center; background: var(--bg-raised); }
+	.row-art :global(.row-artwork.fallback span) { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
+
 	.row-main {
 		flex: 1;
 		min-width: 0;
@@ -304,82 +322,94 @@
 		gap: 1px;
 	}
 	.row-title {
-		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.9);
-		white-space: nowrap;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
+		color: var(--text-primary);
 		overflow: hidden;
 		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.row-artist {
-		font-size: var(--font-size-2xs);
-		color: rgba(255, 255, 255, 0.5);
-		white-space: nowrap;
+		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
 		overflow: hidden;
 		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.row-meta {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		margin-top: 2px;
+		gap: 6px;
+		margin-top: 3px;
+		min-width: 0;
 	}
 	.why-chip {
+		flex-shrink: 0;
 		font-size: var(--font-size-2xs);
-		padding: 0 6px;
-		border-radius: 999px;
-		background: rgba(124, 128, 255, 0.18);
-		color: rgba(200, 202, 255, 0.9);
+		font-weight: var(--font-weight-medium);
+		color: var(--accent-strong);
 		white-space: nowrap;
 	}
+	.why-chip + .why-chip::before { content: '/'; margin-right: 6px; color: var(--text-muted); }
 	.score-bar {
 		flex: 1;
+		max-width: 64px;
 		height: 3px;
-		min-width: 24px;
-		border-radius: 2px;
-		background: rgba(255, 255, 255, 0.08);
+		border-radius: 999px;
+		background: var(--bg-hover);
 		overflow: hidden;
 	}
-	.score-fill {
-		height: 100%;
-		border-radius: 2px;
-		background: rgba(124, 128, 255, 0.7);
-	}
+	.score-fill { height: 100%; border-radius: 999px; background: var(--accent); }
+
+	/* Actions float over the row end on hover or keyboard focus, so titles keep
+	   the full width at rest. Touch screens keep them in the row. */
 	.row-actions {
+		position: absolute;
+		right: var(--space-2);
+		top: 50%;
+		transform: translateY(-50%);
 		display: flex;
 		gap: 2px;
-		flex-shrink: 0;
+		padding: 2px;
+		border-radius: 999px;
+		background: var(--bg-surface-strong);
+		box-shadow: var(--panel-shadow);
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity var(--motion-fast);
+	}
+	.row:hover .row-actions, .row:focus-within .row-actions { opacity: 1; pointer-events: auto; }
+	@media (hover: none) {
+		.row-actions { position: static; transform: none; padding: 0; background: none; box-shadow: none; opacity: 1; pointer-events: auto; }
 	}
 	.mini-btn {
-		width: 24px;
-		height: 24px;
-		border-radius: 6px;
+		display: inline-grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
 		border: none;
+		border-radius: 50%;
 		background: transparent;
-		color: rgba(255, 255, 255, 0.45);
-		font-size: var(--font-size-xs);
+		color: var(--text-secondary);
 		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: center;
 	}
+	.mini-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 	.mini-btn:hover:not(:disabled) {
-		background: rgba(255, 255, 255, 0.08);
-		color: rgba(255, 255, 255, 0.9);
+		background: var(--bg-hover);
+		color: var(--text-primary);
 	}
-	.mini-btn.like:hover:not(:disabled) {
-		color: rgba(255, 130, 170, 0.95);
-	}
-	.mini-btn.skip:hover:not(:disabled) {
-		color: rgba(255, 180, 120, 0.95);
-	}
-	.mini-btn:disabled {
-		opacity: 0.4;
-		cursor: default;
-	}
+	.mini-btn.like:hover:not(:disabled) { color: var(--state-favorite); }
+	.mini-btn.skip:hover:not(:disabled) { color: var(--state-warning); }
+	.mini-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 	.empty-note {
-		padding: 16px;
+		padding: var(--space-4);
 		text-align: center;
-		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.35);
+		font-size: var(--font-size-sm);
+		color: var(--text-tertiary);
+	}
+
+	@container workspace (max-width: 860px) {
+		.ranked-list { flex: none; max-height: 480px; }
 	}
 </style>

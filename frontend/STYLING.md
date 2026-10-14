@@ -166,8 +166,20 @@ Contrast:
 - Body and meta text meet 4.5:1 against the ground including the wallpaper scrim. `--text-tertiary` is the floor for readable text.
 - Accent text uses `--accent-strong`. `--accent` on dark grounds is for fills and large display text only.
 - Focus rings and essential icons meet 3:1.
-- Check new palettes in dark, light and Clay before shipping.
-- `--accent-strong` comes from the palette in dark themes. In light themes, palettes without their own light accents get a darkened accent (`readableOnLight` in `paletteTheme.ts`) so accent text and focus rings clear 4.5:1 there too.
+- Check new palettes in dark, light and Clay before shipping, with the wallpaper on and off. `paletteTheme.test.ts` asserts text, accent and button-text contrast for every palette in both modes.
+- `--accent-strong` comes from the palette in dark themes. In light themes, palettes without their own light accents get an accent deepened in OKLCH (hue and chroma held, lightness lowered) until `--accent` clears 4.5:1 as a fill and `--accent-strong` clears 6.5:1 as text (`readableAgainst` in `paletteTheme.ts`).
+
+### Palette families and grounds
+
+Every palette has a `family` (`palettes.ts`), which also groups the Settings picker:
+
+- `material`: Clay and Pure Black. Hand-made surface tokens in `app.css` for both modes. Pure is true black in dark mode and a soft neutral white (not paper-bright `#fff`) in light mode; it is a flat ground with no wallpaper in either.
+- `dark`: black-ground schemes (Obsidian, Carbon, Blackout, Nocturne, Neon). Their generated dark ground sits deeper than the rest.
+- `colour` and `light`: generated grounds.
+
+For every non-material palette `paletteGround()` tints the surface ladder (`--bg-base`, `--bg-elevated`, `--bg-raised`, `--bg-surface-strong`, player surfaces, `--atlas-bg` and the body gradient `--ground-*`) in OKLCH. Dark grounds take the accent hue; light grounds take the palette's light wallpaper base when it has one (Futuro's cream) and otherwise a whisper of the accent hue. Tint scales with the accent's chroma, so grey accents stay neutral. `applyPaletteTheme` writes these inline and removes them for material palettes. Never hardcode a ground colour in a component; scrims over the wallpaper use `color-mix()` on `--bg-base` / `--bg-elevated`.
+
+A surface that stays dark in every theme (the Genres sky, the Sound Space stage) scopes the dark token set onto its element: `data-theme="dark"` plus `applyPaletteTheme(el, palette, 'dark')`. Children then use the normal tokens.
 
 ### Material surfaces
 
@@ -175,7 +187,7 @@ The `clay` colour scheme coordinates parchment, ink, and terracotta across the e
 
 `--material-grain` is a background image, separate from the colour tokens because they cannot express texture. It is `none` for other schemes and a small, static, repeating local SVG for Clay. Use it as the first background layer on shared surfaces. Keep it behind content so artwork, text, pointer input, and focus rings remain clear. Do not add an animated grain overlay.
 
-`--text-on-accent` supplies text and icons on solid accent fills. Normal text tokens describe text on page surfaces and cannot also guarantee contrast on an accent. Other schemes keep white; Clay uses parchment on terracotta in light mode and dark ink on amber in dark mode.
+`--text-on-accent` supplies text and icons on solid accent fills. Normal text tokens describe text on page surfaces and cannot also guarantee contrast on an accent. Other schemes get `--accent-ink` from `paletteTheme`: white when it clears 4.5:1 on the accent, otherwise a deep ink in the accent's hue (bright accents such as Citrus, Verdant, Arctic). Clay uses parchment on terracotta in light mode and dark ink on amber in dark mode.
 
 ## Controls
 

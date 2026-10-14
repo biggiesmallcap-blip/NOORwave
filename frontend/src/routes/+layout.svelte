@@ -1917,36 +1917,38 @@
 	/* The workspace scrim has to actually hide the shader: at 0.44 the moire
 	   read straight through card artwork and shelf titles. */
 	.app-shell.has-wallpaper .workspace {
-		background: rgba(9, 9, 14, 0.62);
+		background: color-mix(in srgb, var(--bg-base) 62%, transparent);
 		backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.1);
 		-webkit-backdrop-filter: blur(var(--wallpaper-blur, 10px)) saturate(1.1);
 	}
 
+	/* Light scrims take the palette ground (paletteTheme tints it), not a
+	   fixed blue-white, so a warm palette does not sit under a cold veil. */
 	:global([data-theme="light"]) .app-shell.has-wallpaper .sidebar {
 		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.82)),
+			linear-gradient(180deg, color-mix(in srgb, var(--bg-elevated) 90%, transparent), color-mix(in srgb, var(--bg-base) 82%, transparent)),
 			var(--sidebar-bg);
 	}
 
 	:global([data-theme="light"]) .app-shell.has-wallpaper .workspace {
-		background: rgba(248, 250, 252, 0.9);
+		background: color-mix(in srgb, var(--bg-base) 90%, transparent);
 	}
 
 	:global([data-theme="light"]) .app-shell.has-wallpaper .now-playing-panel {
 		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 252, 0.84)),
+			linear-gradient(180deg, color-mix(in srgb, var(--bg-elevated) 88%, transparent), color-mix(in srgb, var(--bg-base) 84%, transparent)),
 			var(--right-panel-bg);
 	}
 
-	/* Pure black is a flat ground: no shader, no frosted scrims. */
-	:global([data-palette="void"][data-theme="dark"]) .wallpaper-layer:not(.onboarding-wallpaper) {
+	/* Pure is a flat ground in both modes: no shader, no frosted scrims. */
+	:global([data-palette="void"]) .wallpaper-layer:not(.onboarding-wallpaper) {
 		display: none;
 	}
 
-	:global([data-palette="void"][data-theme="dark"]) .app-shell.has-wallpaper .sidebar,
-	:global([data-palette="void"][data-theme="dark"]) .app-shell.has-wallpaper .workspace,
-	:global([data-palette="void"][data-theme="dark"]) .app-shell.has-wallpaper .now-playing-panel {
-		background: #000;
+	:global([data-palette="void"]) .app-shell.has-wallpaper .sidebar,
+	:global([data-palette="void"]) .app-shell.has-wallpaper .workspace,
+	:global([data-palette="void"]) .app-shell.has-wallpaper .now-playing-panel {
+		background: var(--bg-base);
 		backdrop-filter: none;
 		-webkit-backdrop-filter: none;
 	}

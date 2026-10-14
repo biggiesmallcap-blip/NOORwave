@@ -41,7 +41,9 @@
 		align-items: center;
 		gap: 4px;
 		flex-wrap: wrap;
-		background: rgba(0, 0, 0, 0.5);
+		/* Frosted, in the theme colours: a wallpaper reads through the page
+		   scrim, and these panels sit on top of it. */
+		background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--panel-border);
@@ -52,7 +54,7 @@
 	.crumb {
 		border: none;
 		background: transparent;
-		color: rgba(255, 255, 255, 0.55);
+		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 		cursor: pointer;
 		padding: 2px 4px;
@@ -63,26 +65,26 @@
 		text-overflow: ellipsis;
 	}
 	.crumb:hover {
-		color: rgba(255, 255, 255, 0.95);
-		background: rgba(255, 255, 255, 0.06);
+		color: var(--text-primary);
+		background: var(--bg-surface);
 	}
 	.crumb.current {
-		color: rgba(200, 202, 255, 0.95);
+		color: var(--accent-strong);
 		cursor: default;
 	}
 	.sep {
-		color: rgba(255, 255, 255, 0.3);
+		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 	}
 	.clear {
 		border: none;
 		background: transparent;
-		color: rgba(255, 255, 255, 0.35);
+		color: var(--text-tertiary);
 		font-size: var(--font-size-2xs);
 		cursor: pointer;
 		padding: 2px 4px;
 	}
 	.clear:hover {
-		color: rgba(255, 255, 255, 0.8);
+		color: var(--text-primary);
 	}
 </style>
