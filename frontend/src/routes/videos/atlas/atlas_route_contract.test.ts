@@ -87,7 +87,9 @@ describe('atlas route contract', () => {
 		expect(journeyCard).toContain('journeyQueue(journey.stops)');
 		expect(journeyCard).toContain('Play journey');
 		expect(journeyCard).toContain('Somewhere new');
-		expect(journeyCard).toContain('Collab chain');
+		// Collabs are shown on the artist card (and drawn on the map), not chained.
+		expect(journeyCard).not.toContain('Collab chain');
+		expect(artistCard).toContain('aria-label="Collabs"');
 		expect(view).toContain('if (session.sourceLabel !== journeyPlaying.label) {');
 		expect(view).toContain('renderer?.flyToArtist(index, compact ? 6 : 7, ox, oy);');
 		expect(artistCard).toContain('Send a probe');
