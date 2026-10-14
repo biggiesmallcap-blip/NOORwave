@@ -19,7 +19,7 @@
 		AtlasSceneCard as SceneCardData,
 		AtlasYouResponse,
 		ExploreVideo,
-		JourneyKind,
+		JourneyLength,
 		Light,
 	} from '$lib/api/video_explore_types';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -88,7 +88,12 @@
 	// Journeys: where from, the answer, and whether a map click is being
 	// waited for (the start).
 	let journeyFrom = $state(-1);
-	let journeyKind = $state<JourneyKind | null>(null);
+	/** Where the journey goes: somewhere new (or to a scene), or to an
+	 *  artist picked on the map; kept so a length change can re-plan it. */
+	type JourneyTarget = { kind: 'new'; scene: number | null } | { kind: 'to'; index: number };
+	let journeyTarget = $state<JourneyTarget | null>(null);
+	const JOURNEY_LENGTH_STORE = 'noor.atlas.journey-length.v1';
+	let journeyLength = $state<JourneyLength>(readJourneyLength());
 	let journey = $state<AtlasJourneyResponse | null>(null);
 	let journeyLoading = $state(false);
 	let journeyError = $state<string | null>(null);
@@ -129,6 +134,24 @@
 	function nameOf(index: number): string | null {
 		return index >= 0 ? (names.get(data.ids[index]) ?? null) : null;
 	}
+
+	// Each artist's picture from the Picture look's thumbnails, for the
+	// journey's two ends.
+	let artById = $derived(pictures ? new Map(pictures.ids.map((id, n) => [id, pictures!.art[n]])) : null);
+
+	function artOf(index: number): string | null {
+		const art = index >= 0 ? artById?.get(data.ids[index]) : undefined;
+		return art ? `https://resources.tidal.com/images/${art}/640x640.jpg` : null;
+	}
+
+	/** Where the journey goes, as its end shows it. */
+	let journeyEnd = $derived.by(() => {
+		const target = journeyTarget;
+		if (target?.kind === 'to') return { name: nameOf(target.index) ?? 'That artist', art: artOf(target.index) };
+		if (target?.kind === 'new' && target.scene != null) return { name: data.scenes[target.scene].name, art: null };
+		if (journey?.destination) return { name: journey.destination.name, art: null };
+		return null;
+	});
 
 	function hueOf(index: number): number | null {
 		const s = index >= 0 ? data.scene[index] : -1;
@@ -275,7 +298,7 @@
 		journeySeq += 1;
 		card = { kind: 'journey' };
 		journeyFrom = from;
-		journeyKind = null;
+		journeyTarget = null;
 		journey = null;
 		journeyError = null;
 		journeyLoading = false;
@@ -288,7 +311,7 @@
 		journeySeq += 1;
 		picking = null;
 		journey = null;
-		journeyKind = null;
+		journeyTarget = null;
 		journeyLoading = false;
 		journeyError = null;
 		if (!following) renderer?.setRoute(null);
@@ -314,18 +337,43 @@
 		return data.indexById.get(id) ?? -1;
 	}
 
-	async function runJourney(kind: JourneyKind, scene: number | null = null) {
+	function readJourneyLength(): JourneyLength {
+		try {
+			const stored = localStorage.getItem(JOURNEY_LENGTH_STORE);
+			return stored === 'short' || stored === 'long' || stored === 'epic' ? stored : 'long';
+		} catch {
+			return 'long';
+		}
+	}
+
+	/** A new length re-plans the journey on screen (same start and target). */
+	function setJourneyLength(length: JourneyLength) {
+		if (length === journeyLength) return;
+		journeyLength = length;
+		try {
+			localStorage.setItem(JOURNEY_LENGTH_STORE, length);
+		} catch {
+			// Remembered for this visit only.
+		}
+		if (journeyTarget && journeyFrom >= 0) void runJourney(journeyTarget);
+	}
+
+	async function runJourney(target: JourneyTarget) {
 		if (journeyFrom < 0) return;
+		if (target.kind === 'to' && target.index === journeyFrom) return;
 		const seq = ++journeySeq;
-		journeyKind = kind;
+		journeyTarget = target;
 		journeyLoading = true;
 		journeyError = null;
 		journey = null;
+		renderer?.setSelection(journeyFrom, -1);
 		try {
 			const result = await api.getVideoAtlasJourney({
-				kind,
+				kind: target.kind,
 				from: data.ids[journeyFrom],
-				scene: scene != null ? data.scenes[scene].id : undefined,
+				scene: target.kind === 'new' && target.scene != null ? data.scenes[target.scene].id : undefined,
+				to: target.kind === 'to' ? data.ids[target.index] : undefined,
+				length: journeyLength,
 			});
 			if (seq !== journeySeq) return;
 			journey = result;
@@ -391,6 +439,7 @@
 	function pickHit(hit: AtlasSearchHit) {
 		videoSectionQuery.set('');
 		if (picking) journeyPick(hit.index);
+		else if (choosing && hit.index !== journeyFrom) void runJourney({ kind: 'to', index: hit.index });
 		else selectArtist(hit.index);
 		// Leave the field so the map keys (arrows, +/-, Esc) work at once.
 		if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
@@ -398,7 +447,8 @@
 
 	function pickScene(hit: AtlasSceneHit) {
 		videoSectionQuery.set('');
-		selectScene(hit.index);
+		if (card?.kind === 'journey' && journeyFrom >= 0 && !journeyLoading) void runJourney({ kind: 'new', scene: hit.index });
+		else selectScene(hit.index);
 		if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 	}
 
@@ -507,10 +557,12 @@
 		const hit = renderer.hitTest(x, y, compact ? 9 : 5);
 		if (hit.kind === 'artist') {
 			if (picking) journeyPick(hit.index);
+			// With Journeys open and a start chosen, another artist is where to go.
+			else if (choosing && hit.index !== journeyFrom) void runJourney({ kind: 'to', index: hit.index });
 			else selectArtist(hit.index);
 		} else if (hit.kind === 'scene' && !picking) {
 			// With Journeys open and a start chosen, a scene is a destination.
-			if (card?.kind === 'journey' && journeyFrom >= 0 && !journeyLoading) void runJourney('new', hit.index);
+			if (card?.kind === 'journey' && journeyFrom >= 0 && !journeyLoading) void runJourney({ kind: 'new', scene: hit.index });
 			else selectScene(hit.index);
 		} else if (hit.kind === 'none' && card && card.kind !== 'journey' && !picking) {
 			closeCard();
@@ -723,9 +775,13 @@
 		const top = rect.top + (workspace?.scrollTop ?? 0);
 		stageEl.style.setProperty('--atlas-top', `${Math.max(0, Math.round(top))}px`);
 		if (workspace) {
-			const view = workspace.getBoundingClientRect();
-			const bottomInContent = rect.bottom - view.top + workspace.scrollTop;
-			const below = workspace.scrollHeight - bottomInContent;
+			// What sits under the stage in the page itself: the section's and
+			// the workspace's bottom padding. Measured from the layout, never
+			// from scrollHeight, which is at least the window's height and so
+			// would grow as the stage shrank, and shrink it again.
+			const section = [...workspace.children].find((child) => child.contains(stageEl!));
+			const pad = parseFloat(getComputedStyle(workspace).paddingBottom) || 0;
+			const below = section ? section.getBoundingClientRect().bottom - rect.bottom + pad : pad;
 			stageEl.style.setProperty('--atlas-bottom', `${Math.max(0, Math.round(below))}px`);
 		}
 	}
@@ -971,8 +1027,14 @@
 
 	let selectedIndex = $derived(card?.kind === 'artist' ? card.index : -1);
 	let selectedScene = $derived(card?.kind === 'scene' ? data.scenes[card.index] : null);
+	/** Journeys open with a start and nothing planned yet: the next artist
+	 *  or scene clicked (on the map or in search) is where it goes. */
+	let choosing = $derived(
+		card?.kind === 'journey' && journeyFrom >= 0 && picking === null && !journey && !journeyLoading && !journeyError
+	);
 	let pickBanner = $derived.by(() => {
-		if (picking === 'from') return 'Journeys: click the artist to start from';
+		if (picking === 'from') return 'Journeys: click an artist to start from';
+		if (choosing) return 'Journeys: click an artist or a scene to go there';
 		return null;
 	});
 	let journeyPlaying = $derived(following !== null && journey !== null && $videoSession.sourceLabel === following.label);
@@ -1157,7 +1219,7 @@
 		<div class="banner" role="status">
 			<span class="route-line" aria-hidden="true"></span>
 			{pickBanner}
-			<button type="button" class="link" onclick={() => (picking = null)}>Cancel</button>
+			{#if picking}<button type="button" class="link" onclick={() => (picking = null)}>Cancel</button>{/if}
 		</div>
 	{/if}
 
@@ -1202,24 +1264,29 @@
 							onneighbor={selectArtistById}
 							onjourney={() => {
 								openJourneys(selectedIndex);
-								void runJourney('new');
+								void runJourney({ kind: 'new', scene: null });
 							}}
 							onprobe={() => void sendProbe()}
 						/>
 					{:else if card.kind === 'journey'}
 						<AtlasJourneyCard
 							fromName={journeyFrom >= 0 ? (nameOf(journeyFrom) ?? 'This artist') : null}
+							fromArt={artOf(journeyFrom)}
+							end={journeyEnd}
 							{picking}
 							{journey}
 							loading={journeyLoading}
 							error={journeyError}
 							playing={journeyPlaying}
-							onnew={() => void runJourney('new')}
+							choosing={choosing}
+							length={journeyLength}
+							onlength={setJourneyLength}
+							onnew={() => void runJourney({ kind: 'new', scene: null })}
 							onpickfrom={() => (picking = 'from')}
 							onplay={playJourney}
 							onagain={() => openJourneys(journeyFrom)}
 							onclose={closeJourneys}
-							onretry={() => journeyKind && void runJourney(journeyKind)}
+							onretry={() => journeyTarget && void runJourney(journeyTarget)}
 							onstop={(id) => {
 								const index = data.indexById.get(id);
 								if (index !== undefined) {

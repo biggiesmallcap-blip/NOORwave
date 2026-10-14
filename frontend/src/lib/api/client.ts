@@ -7,6 +7,7 @@ import type {
 	AtlasPicturesResponse,
 	AtlasYouResponse,
 	JourneyKind,
+	JourneyLength,
 	AtlasSceneCard,
 	ArchiveQuery,
 	ArchiveResponse,
@@ -2515,9 +2516,17 @@ export const api = {
 	},
 
 	/** May name a destination `scene`. */
-	getVideoAtlasJourney(params: { kind: JourneyKind; from: number; scene?: number }): Promise<AtlasJourneyResponse> {
+	getVideoAtlasJourney(params: {
+		kind: JourneyKind;
+		from: number;
+		scene?: number;
+		to?: number;
+		length?: JourneyLength;
+	}): Promise<AtlasJourneyResponse> {
 		const query: Record<string, string> = { kind: params.kind, from: String(params.from) };
 		if (params.scene != null) query.scene = String(params.scene);
+		if (params.to != null) query.to = String(params.to);
+		if (params.length) query.length = params.length;
 		return fetchApi<AtlasJourneyResponse>('/api/videos/atlas/journey', query);
 	},
 

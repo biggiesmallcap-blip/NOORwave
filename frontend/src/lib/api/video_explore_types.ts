@@ -158,7 +158,11 @@ export interface AtlasYouResponse {
 	frontier: { artist_id: number; score: number; via: number }[];
 }
 
-export type JourneyKind = 'new';
+/** Somewhere new, or to an artist picked on the map. */
+export type JourneyKind = 'new' | 'to';
+
+/** One new scene, two, or four: about 6, 12 or 24 stops. */
+export type JourneyLength = 'short' | 'long' | 'epic';
 
 export interface AtlasJourneyStop {
 	artist_id: number;
@@ -169,12 +173,16 @@ export interface AtlasJourneyStop {
 }
 
 /** A journey across the map: somewhere new (to a scene you have barely
- *  touched, through artists new to you). */
+ *  touched, through artists new to you) or to an artist you picked; longer
+ *  ones pass through more new scenes on the way. */
 export interface AtlasJourneyResponse {
 	found: boolean;
 	kind: JourneyKind;
 	title: string;
+	/** Somewhere new only: the scene it ends in. */
 	destination: { scene_id: number; name: string } | null;
+	/** Scenes passed through on the way, in order. */
+	through: string[];
 	stops: AtlasJourneyStop[];
 	reason: string | null;
 }
