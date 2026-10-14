@@ -56,12 +56,13 @@ describe('archive tile contract', () => {
 		expect(tile).toContain('<ArtworkImage className="poster" src={song.best.artwork_url} size={320}');
 		expect(tile).toContain('buildVideoMenu(song.best)');
 		expect(tile).toContain('buildArtistMenu({ tidal_id: artistId, name: artistName }, { isLocal: false })');
-		expect(tile).toContain('<LightDot light={song.light} />');
 	});
 
-	test('the cuts badge only shows for songs with more than one cut', () => {
+	test('more than one cut shows in the meta line, not on the picture', () => {
 		expect(tile).toContain('{#if song.cut_count > 1}');
-		expect(tile).toContain('x{song.cut_count} cuts');
+		expect(tile).toContain('class="cuts"');
+		expect(tile).toContain('{song.cut_count} cuts</button>');
+		expect(tile).not.toContain('cuts-badge');
 	});
 });
 

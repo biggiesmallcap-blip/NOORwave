@@ -62,6 +62,14 @@
 	let buildingSeen = $state(false);
 	let building = $derived(buildingNow || (buildingSeen && feedState.phase === 'loading'));
 	let firstLoad = $derived(!building && (feedState.phase === 'loading' || feedState.phase === 'idle'));
+	// The opener says what the tiles are; the lens row keeps the count.
+	let openerLine = $derived(
+		lenses.source === 'liked'
+			? 'The songs in the videos you liked, one tile each.'
+			: lenses.source === 'saved'
+				? 'The songs in the videos you saved, one tile each.'
+				: 'Every song with a video, one tile each. The picture plays its best cut.'
+	);
 
 	let openSong = $state<ArchiveSong | null>(null);
 	let sentinel = $state<HTMLDivElement | null>(null);
@@ -351,6 +359,11 @@
 	style:--dock-h={`${dockHeight}px`}
 	style:--dock-offset={docked && !dockHidden ? `${dockHeight}px` : '0px'}
 >
+	<header class="opener">
+		<h2>Archive</h2>
+		<p>{openerLine}</p>
+	</header>
+
 	<!-- Lenses over nothing are noise: while the catalog is being built the
 	     page is just the honest note below. -->
 	{#if !building}
@@ -484,6 +497,30 @@
 		display: grid;
 		gap: var(--space-4);
 		min-width: 0;
+	}
+
+	/* The page's opener, as the Logbook's and History's: the word in the
+	   titles' italic serif, one quiet line under it. */
+	.opener {
+		display: grid;
+		gap: 6px;
+	}
+
+	.opener h2 {
+		margin: 0;
+		color: var(--text-primary);
+		font-family: var(--font-display);
+		font-size: var(--font-size-2xl);
+		font-style: italic;
+		font-weight: var(--font-weight-medium);
+		line-height: 1.1;
+		letter-spacing: -0.01em;
+	}
+
+	.opener p {
+		margin: 0;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-sm);
 	}
 
 	/* Where the lens row sits when not docked; it takes no room. */

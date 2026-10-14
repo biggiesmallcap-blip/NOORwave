@@ -6,11 +6,12 @@
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { formatTrackDuration } from '$lib/utils/format';
-	import LightDot from './LightDot.svelte';
 
 	// One song in the Archive, in the Search card language: 16:9 artwork,
-	// title, artist, a light dot. The artwork and title play the best cut;
-	// the cuts badge is its own control and opens the Versions view.
+	// then the title (up to two lines, so it reads whole) and the artist with
+	// the year. The artwork and title play the best cut; a song with more
+	// than one cut says so at the end of the meta line, and that opens the
+	// Versions view. Nothing sits on the picture but its runtime.
 
 	let {
 		song,
@@ -33,7 +34,7 @@
 		if (song.cut_count > 1) {
 			items.splice(1, 0, {
 				label: `Show all ${song.cut_count} cuts`,
-				icon: '\u2261',
+				icon: '≡',
 				onSelect: () => onversions(song),
 			});
 		}
@@ -54,25 +55,24 @@
 		<PlayOverlay position="corner" size="sm" label={`Play ${song.title}`} />
 		{#if duration}<span class="duration">{duration}</span>{/if}
 	</button>
-	{#if song.cut_count > 1}
-		<button
-			type="button"
-			class="cuts-badge"
-			onclick={() => onversions(song)}
-			aria-label={`Show all ${song.cut_count} cuts of ${song.title}`}
-			title="Every cut of this song"
-		>x{song.cut_count} cuts</button>
-	{/if}
 	<div class="meta">
 		<button type="button" class="title t-row-title" onclick={() => onplay(song)} title={song.title}>{song.title}</button>
 		<span class="sub t-meta">
-			<LightDot light={song.light} />
 			{#if artistId != null}
 				<a class="artist" href={`/tidal/artists/${artistId}`} oncontextmenu={artistMenu}>{artistName}</a>
 			{:else}
 				<span class="artist">{artistName}</span>
 			{/if}
 			{#if song.song_year}<span class="year">{song.song_year}</span>{/if}
+			{#if song.cut_count > 1}
+				<button
+					type="button"
+					class="cuts"
+					onclick={() => onversions(song)}
+					aria-label={`Show all ${song.cut_count} cuts of ${song.title}`}
+					title="Every cut of this song"
+				>{song.cut_count} cuts</button>
+			{/if}
 		</span>
 	</div>
 </div>
@@ -84,6 +84,7 @@
 		position: relative;
 		display: grid;
 		gap: var(--space-2);
+		align-content: start;
 		min-width: 0;
 		transition: transform var(--motion-base);
 	}
@@ -142,9 +143,10 @@
 	}
 
 	/* Text over artwork: white on a dark scrim in every theme. */
-	.duration,
-	.cuts-badge {
+	.duration {
 		position: absolute;
+		left: 8px;
+		bottom: 8px;
 		padding: 3px 8px;
 		border-radius: 999px;
 		background: rgba(0, 0, 0, 0.6);
@@ -153,31 +155,7 @@
 		font-weight: var(--font-weight-semibold);
 		font-variant-numeric: tabular-nums;
 		line-height: 1;
-	}
-
-	.duration {
-		left: 8px;
-		bottom: 8px;
 		pointer-events: none;
-	}
-
-	.cuts-badge {
-		top: 8px;
-		left: 8px;
-		border: 1px solid rgba(255, 255, 255, 0.16);
-		cursor: pointer;
-		transition: background var(--motion-fast), border-color var(--motion-fast);
-	}
-
-	.cuts-badge:hover,
-	.cuts-badge:focus-visible {
-		background: rgba(0, 0, 0, 0.82);
-		border-color: rgba(255, 255, 255, 0.5);
-	}
-
-	.cuts-badge:focus-visible {
-		outline: 2px solid var(--accent-strong);
-		outline-offset: 2px;
 	}
 
 	.meta {
@@ -186,14 +164,19 @@
 		min-width: 0;
 	}
 
+	/* Up to two lines, so a long title (feat. and all) reads whole. */
 	.title {
-		display: block;
+		display: -webkit-box;
 		width: 100%;
 		padding: 0;
 		border: 0;
 		background: none;
 		color: var(--text-primary);
 		text-align: left;
+		white-space: normal;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
 		cursor: pointer;
 	}
 
@@ -224,9 +207,34 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.year::before {
+	.year::before,
+	.cuts::before {
 		content: '\00b7';
 		margin-right: 6px;
+	}
+
+	/* The other cuts, as quiet as the year until pointed at. */
+	.cuts {
+		flex: 0 0 auto;
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--text-tertiary);
+		font: inherit;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		cursor: pointer;
+		transition: color var(--motion-fast);
+	}
+
+	.cuts:hover {
+		color: var(--text-primary);
+	}
+
+	.cuts:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
+		border-radius: 2px;
 	}
 
 	@media (prefers-reduced-motion: reduce) {

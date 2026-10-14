@@ -3,7 +3,6 @@
 
 import type {
 	ExploreVideo,
-	Light,
 	VideoConcert,
 	VideoCut,
 	VideoVersion,
@@ -113,18 +112,3 @@ export function concertLength(totalSeconds: number): string {
 	const rest = minutes % 60;
 	return rest ? `${hours} hr ${rest} min` : `${hours} hr`;
 }
-
-export const LIGHT_NAMES: Record<Light, string> = {
-	0: 'uncharted',
-	1: 'dim',
-	2: 'warm',
-	3: 'lit',
-};
-
-/** What the light dot means, for its tooltip. */
-export const LIGHT_HINTS: Record<Light, string> = {
-	0: 'Uncharted: not on the map yet',
-	1: 'New to you',
-	2: 'Close to what you play',
-	3: 'You have watched, liked or saved this artist',
-};
