@@ -55,10 +55,19 @@
 		void playAtlasQueue(video, piece.videos, `${piece.name}: start here`);
 	}
 
+	/** The piece's own videos, from the start: a piece is about an artist,
+	 *  so its picture plays them, never a channel joined mid-song. */
 	function lead(piece: TodayPiece, el: Element | null) {
 		noteVideoLaunch(el);
-		if (piece.kind === 'today') void tuneChannel({ id: 'spotlight', title: 'Spotlight' });
-		else if (piece.videos[0]) void playAtlasQueue(piece.videos[0], piece.videos, `${piece.name}: start here`);
+		if (piece.videos[0]) void playAtlasQueue(piece.videos[0], piece.videos, `${piece.name}: start here`);
+		else if (piece.kind === 'today') tuneSpotlight(el);
+	}
+
+	/** The Spotlight channel itself, asked for by name: it joins the way the
+	 *  Viewing menu says (with the guide, like TV, or from the start). */
+	function tuneSpotlight(el: Element | null) {
+		noteVideoLaunch(el);
+		void tuneChannel({ id: 'spotlight', title: 'Spotlight' });
 	}
 
 	function artistMenu(event: MouseEvent, piece: TodayPiece) {
@@ -87,7 +96,7 @@
 						type="button"
 						class="picture"
 						onclick={(event) => lead(piece, event.currentTarget)}
-						aria-label={piece.kind === 'today' ? `Watch ${piece.name} on Spotlight` : `Play ${piece.name}`}
+						aria-label={`Play ${piece.name}`}
 					>
 						<ArtworkImage src={hero} size={640} fallbackText={piece.name.slice(0, 1)} tint decorative fadeIn />
 						<span class="play" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" /></svg></span>
@@ -125,8 +134,13 @@
 
 						<div class="actions">
 							<button type="button" class="btn btn-primary" onclick={(event) => lead(piece, event.currentTarget.closest('.piece')?.querySelector('.picture') ?? null)}>
-								{piece.kind === 'today' ? 'Watch Spotlight' : 'Play their videos'}
+								Play their videos
 							</button>
+							{#if piece.kind === 'today'}
+								<button type="button" class="btn btn-ghost" onclick={(event) => tuneSpotlight(event.currentTarget.closest('.piece')?.querySelector('.picture') ?? null)}>
+									Tune in to Spotlight
+								</button>
+							{/if}
 							<a class="btn btn-ghost" href={atlasUrl({ artist: piece.artist_id })}>On the Atlas</a>
 						</div>
 					</div>
