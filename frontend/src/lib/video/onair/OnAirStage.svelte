@@ -2,9 +2,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import type { VideoChannel } from '$lib/api/video_explore_types';
-	import { buildArtistMenu } from '$lib/player/artist_menu';
-	import { buildVideoMenu } from '$lib/player/video_menu';
-	import { contextMenu, openContextMenu } from '$lib/stores/context_menu';
+	import { contextMenu } from '$lib/stores/context_menu';
 	import { reduceMotion } from '$lib/stores/motion';
 	import { steerChannel, steerMessage, videoSession, type VideoSessionItem } from '$lib/stores/video_session';
 	import { dispatchVideoControl } from '$lib/video/controls';
@@ -13,10 +11,12 @@
 	import GuideOverlay from './GuideOverlay.svelte';
 	import { onAirKeyAction, type OnAirAction } from './keymap';
 	import { airTick, channelHue, channelLineup, ensureLineup } from './lineup';
-	import { creditFor, lowerThirdPhase, splitTitle, type CreditSource } from './lower_third';
+	import { splitTitle } from './lower_third';
 	import { remotePresses } from './remote';
 	import { tuneChannel } from './tune';
 	import { lowerVideoCurtain, raiseVideoCurtain, videoCurtain } from '$lib/video/curtain';
+	import { videoCredits } from '$lib/video/viewing';
+	import VideoCredit from '$lib/video/VideoCredit.svelte';
 
 	// The broadcast layer over the stage while a channel is on air, on the
 	// watch page and in fullscreen: the channel bug, the lower third credits,
@@ -53,11 +53,9 @@
 	let nowS = $derived(secondsSinceMidnight(new Date($airTick)));
 	let hue = $derived(channelHue(channel));
 
-	let phase = $derived(lowerThirdPhase(positionS, durationS, startedAtS));
-	let introCredit = $derived(current ? creditFor(current as CreditSource) : null);
-	let outroCredit = $derived(upNext ? creditFor(upNext as CreditSource) : null);
-	let credit = $derived(phase === 'intro' ? introCredit : phase === 'outro' ? outroCredit : null);
-	let showCredit = $derived(Boolean(credit) && !guideOpen && !flipCard && !$videoCurtain);
+	// The credit gives way to the guide, a flip card and the curtain, and to
+	// the Viewing menu's Song titles: Off.
+	let creditHidden = $derived(guideOpen || flipCard !== null || $videoCurtain !== null || $videoCredits === 'off');
 
 	let flipSlot = $derived(flipCard ? liveSlot(flipCard, elapsed) : null);
 	let flipVideo = $derived(flipSlot?.program?.video ?? null);
@@ -93,7 +91,7 @@
 		}
 		// Cover the picture the moment the flip starts, with what the target
 		// channel is playing now; the player keeps it up until that plays.
-		raiseVideoCurtain(liveSlot(target, elapsed).program?.video.artwork_url ?? null, current?.tidal_id ?? null);
+		raiseVideoCurtain(liveSlot(target, elapsed).program?.video.artwork_url ?? null, current?.tidal_id ?? null, true);
 		const ok = await tuneChannel(target);
 		if (!ok) lowerVideoCurtain();
 		holdCardThenHide(target);
@@ -199,18 +197,6 @@
 		run(action);
 	}
 
-	function artistMenu(event: MouseEvent, item: VideoSessionItem | null) {
-		if (item?.artist_id == null) return;
-		event.preventDefault();
-		openContextMenu(event, buildArtistMenu({ tidal_id: item.artist_id, name: item.artist_name ?? '', in_library: false }, { isLocal: false }), item.artist_name ?? '');
-	}
-
-	function videoMenu(event: MouseEvent, item: VideoSessionItem | null) {
-		if (!item) return;
-		event.preventDefault();
-		openContextMenu(event, buildVideoMenu(item), item.title);
-	}
-
 	// The on-screen remote (the fullscreen channel pill) presses the same
 	// actions as the keys. A press made before this stage mounted is old.
 	let handledPress = get(remotePresses)?.seq ?? 0;
@@ -245,23 +231,7 @@
 		{/if}
 	</div>
 
-	{#if showCredit && credit}
-		{#key `${phase}:${phase === 'intro' ? current?.tidal_id : upNext?.tidal_id}`}
-			{@const item = phase === 'intro' ? current : upNext}
-			<div class="lower-third" class:outro={phase === 'outro'} aria-live="polite">
-				<span class="lt-rule" aria-hidden="true"></span>
-				{#if phase === 'outro'}<span class="lt-kicker">Up next</span>{/if}
-				<span class="lt-artist" role="presentation" oncontextmenu={(event) => artistMenu(event, item)}>{credit.artist}</span>
-				<span class="lt-song" role="presentation" oncontextmenu={(event) => videoMenu(event, item)}>{credit.song}</span>
-				<span class="lt-meta">
-					{#if credit.year}<span>{credit.year}</span>{/if}
-					{#if credit.tag}<span>{credit.tag}</span>{:else if credit.cut}<span>{credit.cut}</span>{/if}
-					{#if credit.runtime}<span>{credit.runtime}</span>{/if}
-				</span>
-				{#if credit.why && phase === 'intro'}<span class="lt-why">{credit.why}</span>{/if}
-			</div>
-		{/key}
-	{/if}
+	<VideoCredit {current} {upNext} {positionS} {durationS} {startedAtS} hidden={creditHidden} {fullscreen} />
 
 	{#if flipCard}
 		<div class="flip-card" style:--ch-hue={channelHue(flipCard)} aria-live="assertive">
@@ -357,127 +327,6 @@
 	}
 	.fullscreen .bug { top: 22px; right: 28px; }
 	.fullscreen .bug-no { font-size: var(--font-size-xl); }
-
-	/* ---- Lower third: the music-TV credit ---- */
-	.lower-third {
-		position: absolute;
-		left: clamp(16px, 4%, 64px);
-		bottom: clamp(70px, 15%, 132px);
-		display: grid;
-		justify-items: start;
-		gap: 4px;
-		max-width: min(72%, 760px);
-		padding: 14px 40px 14px 0;
-		/* Readable on any picture: a soft shadow under the type, no box. */
-		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55), 0 2px 24px rgba(0, 0, 0, 0.6);
-	}
-	.lower-third::before {
-		content: '';
-		position: absolute;
-		inset: -70px -160px -80px -140px;
-		z-index: -1;
-		/* closest-side: the shade is gone before the box edge, so it never
-		   shows a seam on the picture. */
-		background: radial-gradient(closest-side, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.22) 60%, rgba(0, 0, 0, 0));
-		animation: lt-fade var(--motion-slow) both;
-	}
-	.lt-rule {
-		width: 44px;
-		height: 3px;
-		margin-bottom: 6px;
-		border-radius: 2px;
-		background: var(--ch-ink);
-		transform-origin: 0 50%;
-		animation: lt-rule var(--motion-slow) both;
-	}
-	.lt-kicker {
-		font-family: var(--font-mono);
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-medium);
-		text-transform: uppercase;
-		letter-spacing: 0.16em;
-		color: var(--ch-ink);
-		animation: lt-in var(--motion-slow) 40ms both;
-	}
-	.lt-artist {
-		max-width: 100%;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-family: var(--font-body);
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-bold);
-		text-transform: uppercase;
-		letter-spacing: 0.14em;
-		pointer-events: auto;
-		animation: lt-in var(--motion-slow) 80ms both;
-	}
-	/* The title wraps (two lines at most, balanced) rather than cutting off
-	   mid-word. */
-	.lt-song {
-		max-width: 100%;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-		text-wrap: balance;
-		font-family: var(--font-display);
-		font-size: var(--font-size-2xl);
-		font-style: italic;
-		font-weight: var(--font-weight-medium);
-		line-height: var(--line-height-tight);
-		pointer-events: auto;
-		animation: lt-in var(--motion-slow) 140ms both;
-	}
-	.lt-song::before { content: '\201C'; }
-	.lt-song::after { content: '\201D'; }
-	.lt-meta {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: baseline;
-		margin-top: 2px;
-		font-family: var(--font-mono);
-		font-size: var(--font-size-xs);
-		font-variant-numeric: tabular-nums;
-		color: rgba(255, 255, 255, 0.78);
-		animation: lt-in var(--motion-slow) 200ms both;
-	}
-	.lt-meta span + span::before {
-		content: '/';
-		margin: 0 10px;
-		color: rgba(255, 255, 255, 0.4);
-	}
-	.lt-why {
-		margin-top: 6px;
-		padding: 4px 10px;
-		border: 1px solid color-mix(in oklch, var(--ch-ink) 55%, transparent);
-		border-radius: 999px;
-		background: rgba(0, 0, 0, 0.35);
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-semibold);
-		color: rgba(255, 255, 255, 0.9);
-		text-shadow: none;
-		animation: lt-in var(--motion-slow) 260ms both;
-	}
-	.fullscreen .lower-third { bottom: clamp(96px, 13%, 168px); }
-	.fullscreen .lt-artist { font-size: var(--font-size-md); }
-	.fullscreen .lt-song { font-size: var(--font-size-3xl); }
-	.fullscreen .lt-meta { font-size: var(--font-size-sm); }
-	.fullscreen .lt-why { font-size: var(--font-size-xs); }
-
-	@keyframes lt-rule {
-		from { transform: scaleX(0); }
-		to { transform: scaleX(1); }
-	}
-	@keyframes lt-in {
-		from { opacity: 0; transform: translateX(-18px); }
-		to { opacity: 1; transform: none; }
-	}
-	@keyframes lt-fade {
-		from { opacity: 0; }
-		to { opacity: 1; }
-	}
 
 	/* ---- Flip card: where you are going, shown at once ---- */
 	.flip-card {
@@ -617,19 +466,11 @@
 	/* Reduced motion: no dip, no slides; things simply appear. */
 	@media (prefers-reduced-motion: reduce) {
 		.dip { display: none; }
-		.lt-rule,
-		.lt-kicker,
-		.lt-artist,
-		.lt-song,
-		.lt-meta,
-		.lt-why,
-		.lower-third::before,
 		.flip-card,
 		.note { animation: none; }
 	}
 	:global(:root[data-motion='reduce']) .dip { display: none; }
-	:global(:root[data-motion='reduce']) :is(.lt-rule, .lt-kicker, .lt-artist, .lt-song, .lt-meta, .lt-why, .flip-card, .note) {
+	:global(:root[data-motion='reduce']) :is(.flip-card, .note) {
 		animation: none;
 	}
-	:global(:root[data-motion='reduce']) .lower-third::before { animation: none; }
 </style>

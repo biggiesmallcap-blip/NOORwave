@@ -67,7 +67,11 @@
 		outline-offset: 3px;
 	}
 
+	/* On the accent the knob takes the accent's own text colour, so it
+	   stays visible where the accent is close to the text (light accents,
+	   monochrome themes). */
 	.toggle-switch input:checked + .toggle-slider::before {
+		background: var(--text-on-accent);
 		transform: translateX(20px);
 	}
 

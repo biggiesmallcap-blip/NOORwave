@@ -10,6 +10,8 @@ const stations = read('../../../routes/videos/stations/+page.svelte');
 const card = read('ChannelCard.svelte');
 const row = read('ChannelRow.svelte');
 const stage = read('OnAirStage.svelte');
+const credit = read('../VideoCredit.svelte');
+const viewing = read('../ViewingMenu.svelte');
 const guide = read('GuideOverlay.svelte');
 const dock = read('../../components/video/VideoDock.svelte');
 const player = read('../../components/video/VideoPlayer.svelte');
@@ -70,8 +72,8 @@ describe('On Air landing (the dial)', () => {
 	test('artwork goes through ArtworkImage at allowed sizes; every reference has its menu', () => {
 		expect(card).toContain('size={640}');
 		expect(row).toContain('size={320}');
-		for (const source of [card, row, stage, guide]) expect(source).toContain('buildVideoMenu(');
-		for (const source of [card, row, stage]) expect(source).toContain('buildArtistMenu(');
+		for (const source of [card, row, credit, guide]) expect(source).toContain('buildVideoMenu(');
+		for (const source of [card, row, credit]) expect(source).toContain('buildArtistMenu(');
 	});
 
 	test('stations keep working and link back to the dial', () => {
@@ -100,7 +102,7 @@ describe('On Air stage wiring', () => {
 	test('the broadcast layer rides on the dock: watch page and fullscreen, never the corner', () => {
 		expect(dock).toContain("let broadcast = $derived($videoChannelOnAir !== null && (place === 'full' || place === 'expanded'));");
 		expect(dock).toContain('<OnAirStage');
-		expect(dock).toContain('{broadcast}');
+		expect(dock).toContain('broadcast={broadcast || creditsEverywhere}');
 		// One player still: the stage is an overlay, not a second <video>.
 		expect((dock.match(/<VideoPlayer/g) ?? []).length).toBe(1);
 		// Hidden during glides like the rest of the chrome.
@@ -130,12 +132,19 @@ describe('On Air stage wiring', () => {
 	});
 
 	test('lower third: rule, ARTIST, "Song", mono metadata, one why chip', () => {
-		expect(stage).toContain('lowerThirdPhase(positionS, durationS, startedAtS)');
-		expect(stage).toContain('class="lt-rule"');
-		expect(stage).toMatch(/\.lt-artist \{[^}]*text-transform: uppercase;/);
-		expect(stage).toMatch(/\.lt-song \{[^}]*font-family: var\(--font-display\);[^}]*font-style: italic;/);
-		expect(stage).toMatch(/\.lt-meta \{[^}]*font-family: var\(--font-mono\);/);
-		expect(stage).toContain('Up next');
+		expect(credit).toContain('lowerThirdPhase(positionS, durationS, startedAtS)');
+		expect(credit).toContain('class="lt-rule"');
+		expect(credit).toMatch(/\.lt-artist \{[^}]*text-transform: uppercase;/);
+		expect(credit).toMatch(/\.lt-song \{[^}]*font-family: var\(--font-display\);[^}]*font-style: italic;/);
+		expect(credit).toMatch(/\.lt-meta \{[^}]*font-family: var\(--font-mono\);/);
+		expect(credit).toContain('Up next');
+	});
+
+	test('song titles: off, on channels, or on every video, from the Viewing menu', () => {
+		expect(stage).toContain("$videoCredits === 'off'");
+		expect(dock).toContain("let creditsEverywhere = $derived(!broadcast && $videoCredits === 'all' && (place === 'full' || place === 'expanded'));");
+		expect(viewing).toContain('options={VIEWING_SCOPES}');
+		expect(viewing).toContain("setTuneMode(event.currentTarget.checked ? 'live' : 'start')");
 	});
 
 	test('the guide is a channels x time grid with a now line, driven by the stage', () => {
@@ -158,18 +167,18 @@ describe('On Air stage wiring', () => {
 
 describe('the curtain between videos', () => {
 	test('the player raises it on every change of video and draws it over the picture', () => {
-		expect(dock).toContain("if (id !== null) raiseVideoCurtain($videoSession.current?.artwork_url ?? null, stageVideoId);");
+		expect(dock).toContain("if (id !== null) raiseVideoCurtain($videoSession.current?.artwork_url ?? null, stageVideoId, $videoChannelOnAir !== null);");
 		expect(dock).toContain('<VideoCurtain');
-		expect(stage).toContain('raiseVideoCurtain(liveSlot(target, elapsed).program?.video.artwork_url ?? null, current?.tidal_id ?? null);');
+		expect(stage).toContain('raiseVideoCurtain(liveSlot(target, elapsed).program?.video.artwork_url ?? null, current?.tidal_id ?? null, true);');
 	});
 
 	test("the stage's bug and credits stand on their own, never inside a curtain", () => {
 		expect(stage).not.toContain('class="curtain"');
-		expect(stage).toContain('!$videoCurtain');
+		expect(stage).toContain('$videoCurtain !== null');
 		const bug = stage.indexOf('<div class="bug"');
-		const credit = stage.indexOf('<div class="lower-third"');
+		const creditAt = stage.indexOf('<VideoCredit');
 		expect(bug).toBeGreaterThan(-1);
-		expect(credit).toBeGreaterThan(bug);
+		expect(creditAt).toBeGreaterThan(bug);
 		// Nothing opened before the bug is still open around it.
 		const before = stage.slice(stage.indexOf('<div class="onair-stage"'), bug);
 		expect((before.match(/<div/g) ?? []).length).toBe(1);

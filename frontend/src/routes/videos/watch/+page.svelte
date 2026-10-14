@@ -41,6 +41,7 @@
 	import type { ExploreVideo } from '$lib/api/video_explore_types';
 	import StageRow from '$lib/video/archive/StageRow.svelte';
 	import AtlasMiniMap from '$lib/video/atlas/AtlasMiniMap.svelte';
+	import ViewingMenu from '$lib/video/ViewingMenu.svelte';
 	import { cachedAtlas, loadAtlas, type LoadedAtlas } from '$lib/video/atlas/atlas_data';
 	import VersionsDrawer from '$lib/video/archive/VersionsDrawer.svelte';
 	import { CUT_LABELS, hueColor } from '$lib/video/archive/lenses';
@@ -467,6 +468,7 @@
 						{/if}
 					</div>
 					<div class="np-actions">
+						<ViewingMenu />
 						<button
 							type="button"
 							class="pill-btn"

@@ -42,7 +42,9 @@
 	import ChannelPill from '$lib/video/onair/ChannelPill.svelte';
 	import OnAirStage from '$lib/video/onair/OnAirStage.svelte';
 	import VideoCurtain from '$lib/components/video/VideoCurtain.svelte';
-	import { raiseVideoCurtain } from '$lib/video/curtain';
+	import { raiseVideoCurtain, videoCurtain } from '$lib/video/curtain';
+	import { videoCredits } from '$lib/video/viewing';
+	import VideoCredit from '$lib/video/VideoCredit.svelte';
 
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. Where it sits:
@@ -660,6 +662,9 @@
 	// panel players stay plain. The player reports position at 4 Hz; only the
 	// broadcast layer reads it.
 	let broadcast = $derived($videoChannelOnAir !== null && (place === 'full' || place === 'expanded'));
+	/** Song titles on every video: the credit tells the title and what is up
+	 *  next, so the player's own title strip and up-next pill step aside. */
+	let creditsEverywhere = $derived(!broadcast && $videoCredits === 'all' && (place === 'full' || place === 'expanded'));
 	let stagePositionS = $state(0);
 	let stageDurationS = $state(0);
 	let stageVideoId: number | null = null;
@@ -669,7 +674,7 @@
 		if (id === stageVideoId) return;
 		// Every change of video goes behind the curtain until it plays: the
 		// next track, a pick, a channel flip (which raised it already).
-		if (id !== null) raiseVideoCurtain($videoSession.current?.artwork_url ?? null, stageVideoId);
+		if (id !== null) raiseVideoCurtain($videoSession.current?.artwork_url ?? null, stageVideoId, $videoChannelOnAir !== null);
 		stageVideoId = id;
 		stagePositionS = $videoSession.startAtS;
 		const ms = $videoSession.current?.duration_ms;
@@ -810,7 +815,7 @@
 				onFullscreenToggle={toggleExpanded}
 				onProgress={handleProgress}
 				startAt={$videoSession.startAtS}
-				{broadcast}
+				broadcast={broadcast || creditsEverywhere}
 				autoplayNext={$videoSession.autoplay}
 				hasNext={hasNext}
 				hasPrevious={hasPrevious}
@@ -847,6 +852,20 @@
 				startedAtS={$videoSession.startAtS}
 				fullscreen={expanded}
 			/>
+		{:else if creditsEverywhere}
+			<!-- Song titles on every video (Viewing menu): the same credit as on
+			     air, in the accent instead of a channel's colour. -->
+			<div class="credit-layer">
+				<VideoCredit
+					current={$videoSession.current}
+					{upNext}
+					positionS={stagePositionS}
+					durationS={stageDurationS}
+					startedAtS={$videoSession.startAtS}
+					hidden={$videoCurtain !== null}
+					fullscreen={expanded}
+				/>
+			</div>
 		{/if}
 
 		{#if expanded}
@@ -931,6 +950,15 @@
 		position: relative;
 		width: 100%;
 		height: 100%;
+	}
+
+	.credit-layer {
+		position: absolute;
+		inset: 0;
+		z-index: 5;
+		overflow: hidden;
+		border-radius: inherit;
+		pointer-events: none;
 	}
 
 	/* Full and panel modes: a fixed box copied each frame onto an anchor's rect,

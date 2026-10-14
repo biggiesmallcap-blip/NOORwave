@@ -1,5 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { reduceMotion } from '$lib/stores/motion';
+import { curtainScope, scopeCovers } from './viewing';
 
 // The curtain between videos: from the moment a video change starts until
 // the new one is really playing, the picture is the new video's own still
@@ -22,8 +23,10 @@ export const videoCurtain = writable<CurtainState | null>(null);
 
 let seq = 0;
 
-export function raiseVideoCurtain(art: string | null, fromId: number | null): void {
-	if (get(reduceMotion)) return;
+/** Raise it for a change of video; `onAir` says whether a channel is on,
+ *  for the Viewing menu's On Air choice. */
+export function raiseVideoCurtain(art: string | null, fromId: number | null, onAir: boolean): void {
+	if (get(reduceMotion) || !scopeCovers(get(curtainScope), onAir)) return;
 	seq += 1;
 	videoCurtain.set({ art, fromId, seq });
 }
