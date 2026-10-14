@@ -14,7 +14,7 @@ NOORwave is a desktop music player for TIDAL built for **instant local search an
 
 <p align="center">
   <a href="https://noorwave.app"><strong>noorwave.app</strong></a> &middot;
-  <a href="../../releases/latest"><strong>Download</strong></a> &middot;
+  <a href="https://noorwave.app/#download"><strong>Download v1.1.1</strong></a> &middot;
   <a href="#connect-lastfm-seriously">Last.fm setup</a> &middot;
   <a href="#the-phone-remote-set-up">Phone remote</a> &middot;
   <a href="../../issues">Report a bug</a>
@@ -155,15 +155,25 @@ No Last.fm key ships with the app, so this step is on you. It is worth the minut
 
 ## Download
 
-Get the latest build from [noorwave.app](https://noorwave.app) or [GitHub Releases](../../releases/latest).
+**NOORwave v1.1.1 is out.** Get it from [noorwave.app](https://noorwave.app/#download), or use the direct links below. They always serve the newest version.
 
-| Platform | File | Notes |
+| Platform | Download | Notes |
 |---|---|---|
-| Windows | `NOORwave-vX.Y.Z-windows-x64-setup.exe` | Per-user installer, updates in place. Recommended. |
-| Windows | `NOORwave-vX.Y.Z-windows-x64.zip` | Portable. Unzip anywhere, run `NOORwave.exe`. |
-| macOS ARM64 | `NOORwave-vX.Y.Z-macos-arm64.tar.gz` | Portable. Gatekeeper may need `xattr -cr NOORwave noor-server`. |
-| macOS x64 | `NOORwave-vX.Y.Z-macos-x64.tar.gz` | Portable. |
-| Linux x64 | `NOORwave-vX.Y.Z-linux-x64.tar.gz` | Portable. |
+| Windows | [Installer (.exe)](https://releases.noorwave.app/latest/NOORwave-windows-x64-setup.exe) | Per-user installer, updates in place. Recommended. |
+| Windows | [Portable (.zip)](https://releases.noorwave.app/latest/NOORwave-windows-x64.zip) | Unzip anywhere, run `NOORwave.exe`. |
+| Linux x64 | [Archive (.tar.gz)](https://releases.noorwave.app/latest/NOORwave-linux-x64.tar.gz) | Portable. |
+| macOS | [v1.1.0 on GitHub](../../releases/tag/v1.1.0) | Mac builds stay on v1.1.0 for now. Gatekeeper may need `xattr -cr NOORwave noor-server`. |
+
+SHA-256 checksums: [sha256sums.txt](https://releases.noorwave.app/v1.1.1/sha256sums.txt). New versions ship from noorwave.app only; the GitHub Releases here hold v1.1.0 and older.
+
+**Already installed, or downloaded v1.1.0 from GitHub?** You do not need to reinstall. On Windows, v1.1.0 checks noorwave.app for updates and takes you on to v1.1.1 by itself. Older installs (v1.0.9 and before) update to v1.1.0 first, then straight on to v1.1.1. Linux and portable copies update by downloading the new build.
+
+### What's new in v1.1.1
+
+- **On Air:** music videos as numbered TV channels on a daily clock, with a channel for each scene.
+- **Atlas:** a map of every music video NOORwave knows, grouped into scenes, with journeys from one artist to the next.
+- **Archive and Logbook:** every song with all its versions and concerts, and your liked, saved and watched videos by day.
+- **Sound Space** gets a new layout, and Automix now weaves new songs through your library.
 
 Windows builds are not CA-signed yet, so SmartScreen can warn on first launch. Updates are signed and verified by the app before they install. Installed copies update themselves from noorwave.app.
 
