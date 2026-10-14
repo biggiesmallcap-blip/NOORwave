@@ -863,7 +863,8 @@
 		const look = $atlasLook;
 		if (!ready) return;
 		const timer = setInterval(() => {
-			if (look === 'picture' && pictures && pictures.ready >= pictures.total) return;
+			// A few thumbnails can fail for good; 99.5% read is done.
+			if (look === 'picture' && pictures && pictures.ready >= pictures.total * 0.995) return;
 			void loadLookData(look, true);
 		}, 60_000);
 		return () => clearInterval(timer);
@@ -1000,7 +1001,7 @@
 						<span class="l-help">
 							{!pictures || pictures.ready === 0
 								? 'Not read yet: it is read in the background'
-								: pictures.ready < pictures.total
+								: pictures.ready < pictures.total * 0.995
 									? `Reading: ${formatCount(pictures.total - pictures.ready)} to go`
 									: 'Read for every artist on the map'}
 						</span>
