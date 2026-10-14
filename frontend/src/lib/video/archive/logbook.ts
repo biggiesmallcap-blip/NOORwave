@@ -24,7 +24,7 @@ export function censusFigures(census: VideoCensus): Figure[] {
 	return [
 		{ label: 'Videos', value: n(census.videos), note: `${n(census.programmable)} play on air` },
 		{ label: 'Hours', value: n(census.hours) },
-		{ label: 'Songs', value: n(census.songs), note: `${n(census.multi_cut_songs)} with more than one cut` },
+		{ label: 'Songs', value: n(census.songs), note: `${n(census.multi_cut_songs)} in several cuts` },
 		{ label: 'Scenes', value: n(census.scenes), note: census.channel_scenes ? `${n(census.channel_scenes)} with a channel` : undefined },
 		{ label: 'Concerts', value: n(census.concerts) },
 		{ label: 'Artists', value: n(census.artists), note: `${n(census.charted_artists)} on the map` },

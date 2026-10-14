@@ -40,7 +40,7 @@ describe('logbook census', () => {
 			['Concerts', '513'],
 			['Artists', '15,214'],
 		]);
-		expect(figures[2].note).toBe('20,335 with more than one cut');
+		expect(figures[2].note).toBe('20,335 in several cuts');
 	});
 
 	test('coverage as percentages', () => {

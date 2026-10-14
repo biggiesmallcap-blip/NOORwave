@@ -21,9 +21,9 @@
 	// Saved, History), the More and Less like this presses On Air still
 	// remembers (each with an undo), then the catalog as a calm page of
 	// numbers and how much of each scene you have seen. Plain counts only: no
-	// badges, no streaks.
+	// badges, no streaks. Sections open like On Air's, in the titles' serif.
 
-	const SCENES_SHOWN = 16;
+	const SCENES_SHOWN = 24;
 
 	let census = $state<VideoCensus | null>(null);
 	let censusState = $state<'loading' | 'ready' | 'unavailable'>('loading');
@@ -40,6 +40,9 @@
 	let sceneRows = $derived(sceneCoverage(census?.scene_rows ?? []));
 	let shownScenes = $derived(allScenes ? sceneRows : sceneRows.slice(0, SCENES_SHOWN));
 	let visited = $derived(sceneRows.filter((row) => row.seen > 0).length);
+	// Bars compare scenes with each other (the most seen one fills its bar):
+	// against a whole scene every bar would be a sliver.
+	let bestRatio = $derived(Math.max(0, ...sceneRows.map((row) => row.ratio)));
 
 	async function loadCensus() {
 		try {
@@ -110,7 +113,7 @@
 		<a class="entry" href="/videos/liked" oncontextmenu={(event) => saved?.[0] && videoMenu(event, saved[0])}>
 			<span class="entry-art">
 				{#if saved && saved.length > 0}
-					<ArtworkImage className="entry-img" src={saved[0].artwork_url} size={160} fallbackText="VID" decorative={true} />
+					<ArtworkImage className="entry-img" src={saved.slice(0, 6).map((video) => video.artwork_url ?? '')} size={160} fallbackText="" tint decorative={true} />
 				{:else}
 					<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M6.5 3.5h11v17l-5.5-4-5.5 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" /></svg>
 				{/if}
@@ -128,7 +131,7 @@
 		<a class="entry" href="/videos/history" oncontextmenu={(event) => lastWatched && videoMenu(event, lastWatched.video)}>
 			<span class="entry-art">
 				{#if lastWatched}
-					<ArtworkImage className="entry-img" src={lastWatched.video.artwork_url} size={160} fallbackText="VID" decorative={true} />
+					<ArtworkImage className="entry-img" src={lastWatched.video.artwork_url} size={160} fallbackText="" tint decorative={true} />
 				{:else}
 					<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 7v5l3 2M3.5 12a8.5 8.5 0 1 0 2.5-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /><path d="M3 4v4h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
 				{/if}
@@ -152,10 +155,10 @@
 
 	{#if steers.length > 0}
 		<section class="steers" aria-labelledby="steers-title">
-			<div class="scenes-head">
-				<h2 id="steers-title" class="t-section">Channel steering</h2>
-				<span class="t-meta">More and Less like this lean On Air a little, then fade out within four weeks</span>
-			</div>
+			<header class="opener">
+				<h2 id="steers-title">Steering</h2>
+				<p>More and Less like this lean On Air a little, then fade within four weeks.</p>
+			</header>
 			<ul class="steer-rows">
 				{#each steers as steer (steer.artist_id)}
 					<li class="steer-row">
@@ -165,10 +168,10 @@
 							href={`/tidal/artists/${steer.artist_id}`}
 							oncontextmenu={(event) => artistMenu(event, steer)}
 						>{steer.name ?? `Artist ${steer.artist_id}`}</a>
-						<span class="bar" title={`${Math.round(steer.strength * 100)}% of its first strength`}>
-							<span class="fill" style:width={`${Math.max(steer.strength * 100, 2)}%`}></span>
+						<span class="meter" title={`${Math.round(steer.strength * 100)}% of its first strength`}>
+							<span class="fill" class:less={!steer.more} style:width={`${Math.max(steer.strength * 100, 4)}%`}></span>
 						</span>
-						<span class="seen">{steerAge(steer.at)}, gone by {fadeDate(steer.forgotten_at)}</span>
+						<span class="when">{steerAge(steer.at)}, fades by {fadeDate(steer.forgotten_at)}</span>
 						<button
 							type="button"
 							class="undo"
@@ -182,7 +185,10 @@
 	{/if}
 
 	<section class="census" aria-labelledby="census-title">
-		<h2 id="census-title" class="t-section">The catalog</h2>
+		<header class="opener">
+			<h2 id="census-title">The catalog</h2>
+			<p>Everything video discovery has found, sorted into songs, scenes and concerts.</p>
+		</header>
 		{#if censusState === 'loading'}
 			<div class="figures" aria-busy="true">
 				{#each Array(6) as _, i (i)}
@@ -247,17 +253,22 @@
 
 	{#if sceneRows.length > 0}
 		<section class="scenes" aria-labelledby="scenes-title">
-			<div class="scenes-head">
-				<h2 id="scenes-title" class="t-section">Scenes</h2>
-				<span class="t-meta">{visited} of {sceneRows.length} visited</span>
-			</div>
-			<ul class="scene-rows">
+			<header class="opener">
+				<h2 id="scenes-title">Scenes</h2>
+				<p>{visited} of {sceneRows.length} visited. Each bar compares a scene with the one you have seen most.</p>
+			</header>
+			<ul class="scene-grid">
 				{#each shownScenes as row (row.id)}
 					<li>
-						<a class="scene-row" href={`/videos/archive?scene=${row.id}`} title={`Open ${row.name} in the Archive`}>
-							<span class="scene-name"><span class="hue" style:background={hueColor(row.hue)}></span>{row.name}</span>
-							<span class="bar" style:background={hueColor(row.hue, 0.16)}><span class="fill" style:width={`${row.seen > 0 ? Math.max(row.ratio * 100, 1.5) : 0}%`} style:background={hueColor(row.hue)}></span></span>
-							<span class="seen">{seenLabel(row)}</span>
+						<a class="scene" class:unseen={row.seen === 0} href={`/videos/archive?scene=${row.id}`} title={`${seenLabel(row)}. Open ${row.name} in the Archive`}>
+							<span class="scene-line">
+								<span class="hue" style:background={hueColor(row.hue)}></span>
+								<span class="scene-name">{row.name}</span>
+								<span class="scene-count"><strong>{row.seen.toLocaleString()}</strong> of {row.videos.toLocaleString()}</span>
+							</span>
+							<span class="scene-bar" style:background={hueColor(row.hue, 0.14)}>
+								<span class="fill" style:width={`${row.seen > 0 && bestRatio > 0 ? Math.max((row.ratio / bestRatio) * 100, 3) : 0}%`} style:background={hueColor(row.hue)}></span>
+							</span>
 						</a>
 					</li>
 				{/each}
@@ -275,8 +286,9 @@
 	/* Width, gutters and the bottom inset come from the video layout. A calm
 	   page: rows on the ground, numbers in columns, no tiles or borders. */
 	.logbook {
+		container-type: inline-size;
 		display: grid;
-		gap: var(--section-gap);
+		gap: var(--space-7);
 		min-width: 0;
 		max-width: 1100px;
 	}
@@ -368,9 +380,26 @@
 		gap: var(--space-5);
 	}
 
-	.census h2,
-	.scenes h2 {
+	/* Section openers, as On Air's: the word in the titles' italic serif,
+	   one quiet line under it. */
+	.opener {
+		display: grid;
+		gap: 6px;
+	}
+	.opener h2 {
 		margin: 0;
+		color: var(--text-primary);
+		font-family: var(--font-display);
+		font-size: var(--font-size-2xl);
+		font-style: italic;
+		font-weight: var(--font-weight-medium);
+		line-height: 1.1;
+		letter-spacing: -0.01em;
+	}
+	.opener p {
+		margin: 0;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-sm);
 	}
 
 	.quiet {
@@ -380,9 +409,11 @@
 
 	.figures {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-		gap: var(--space-5);
+		grid-template-columns: repeat(6, minmax(0, 1fr));
+		gap: var(--space-5) var(--space-6);
 		margin: 0;
+		padding-bottom: var(--space-2);
+		border-bottom: 1px solid var(--border-subtle);
 	}
 
 	.figure {
@@ -411,12 +442,15 @@
 		margin: 0;
 	}
 
+	/* Big numbers in the serif, lining figures: a printed annual, not a
+	   dashboard. */
 	.num {
 		color: var(--text-primary);
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-bold);
+		font-family: var(--font-display);
+		font-size: var(--font-size-2xl);
+		font-weight: var(--font-weight-medium);
 		line-height: var(--line-height-tight);
-		font-variant-numeric: tabular-nums;
+		font-variant-numeric: lining-nums tabular-nums;
 	}
 
 	.note {
@@ -494,8 +528,7 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.cut-bars,
-	.scene-rows {
+	.cut-bars {
 		display: grid;
 		gap: 6px;
 		margin: 0;
@@ -523,9 +556,9 @@
 	.bar {
 		position: relative;
 		display: block;
-		height: 6px;
+		height: 3px;
 		border-radius: 999px;
-		background: color-mix(in srgb, var(--text-tertiary) 18%, transparent);
+		background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
 		overflow: hidden;
 	}
 
@@ -537,8 +570,7 @@
 		opacity: 0.8;
 	}
 
-	.cut-count,
-	.seen {
+	.cut-count {
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
@@ -552,12 +584,8 @@
 		gap: var(--space-4);
 	}
 
-	.steers h2 {
-		margin: 0;
-	}
-
-	/* One remembered press per row: the lean, the artist, how much of it is
-	   left, when it goes, and the undo. */
+	/* One remembered press per row: the lean, the artist, a short meter of
+	   how much of it is left, when it goes, and a quiet undo. */
 	.steer-rows {
 		display: grid;
 		gap: 2px;
@@ -568,14 +596,16 @@
 
 	.steer-row {
 		display: grid;
-		grid-template-columns: 52px minmax(120px, 240px) minmax(0, 1fr) 190px auto;
+		grid-template-columns: 52px minmax(0, 260px) 72px minmax(0, 1fr) 64px;
 		align-items: center;
 		gap: var(--space-4);
-		padding: 6px 8px;
+		padding: 7px 8px;
 		border-radius: var(--radius-sm);
+		transition: background var(--motion-fast);
 	}
 
-	.steer-row:hover {
+	.steer-row:hover,
+	.steer-row:focus-within {
 		background: var(--bg-hover);
 	}
 
@@ -607,22 +637,59 @@
 
 	.steer-name:hover {
 		text-decoration: underline;
+		text-underline-offset: 3px;
 	}
 
+	.meter {
+		position: relative;
+		display: block;
+		height: 3px;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--text-tertiary) 16%, transparent);
+		overflow: hidden;
+	}
+
+	.meter .fill {
+		background: var(--accent);
+		opacity: 1;
+	}
+
+	.meter .fill.less {
+		background: var(--text-tertiary);
+	}
+
+	.when {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+		white-space: nowrap;
+	}
+
+	/* The undo waits for the row: no wall of identical buttons. */
 	.undo {
-		height: 28px;
+		justify-self: end;
+		height: 26px;
 		padding: 0 12px;
-		border: 1px solid var(--border-subtle);
+		border: 0;
 		border-radius: 999px;
 		background: none;
-		color: var(--text-secondary);
+		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
+		opacity: 0;
+		transition:
+			opacity var(--motion-fast),
+			background var(--motion-fast),
+			color var(--motion-fast);
+	}
+
+	.steer-row:hover .undo,
+	.steer-row:focus-within .undo {
+		opacity: 1;
 	}
 
 	.undo:hover {
-		background: var(--bg-hover);
+		background: var(--bg-surface);
 		color: var(--text-primary);
 	}
 
@@ -632,55 +699,85 @@
 		outline-offset: 2px;
 	}
 
-	.scenes-head {
-		display: flex;
-		align-items: baseline;
-		gap: var(--space-3);
+	/* Scenes in three quiet columns: a dot of the scene's colour, the name,
+	   how many you have seen, and a hairline bar beneath. */
+	.scene-grid {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 4px clamp(24px, 3vw, 48px);
+		margin: 0;
+		padding: 0;
+		list-style: none;
 	}
 
-	.scene-row {
+	.scene {
 		display: grid;
-		grid-template-columns: minmax(140px, 260px) minmax(0, 1fr) 140px;
-		align-items: center;
-		gap: var(--space-4);
-		padding: 6px 8px;
+		gap: 6px;
+		padding: 8px 8px 9px;
 		border-radius: var(--radius-sm);
 		color: var(--text-primary);
 		text-decoration: none;
 		transition: background var(--motion-fast);
 	}
 
-	.scene-row:hover {
+	.scene:hover {
 		background: var(--bg-hover);
 	}
 
-	.scene-row:focus-visible,
+	.scene:focus-visible,
 	.more:focus-visible {
 		outline: 2px solid var(--accent-strong);
 		outline-offset: -2px;
 	}
 
-	.scene-name {
-		display: flex;
+	.scene-line {
+		display: grid;
+		grid-template-columns: 8px minmax(0, 1fr) auto;
 		align-items: center;
-		gap: 8px;
-		min-width: 0;
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		gap: 10px;
 	}
 
 	.hue {
-		flex: 0 0 auto;
 		width: 8px;
 		height: 8px;
 		border-radius: 50%;
 	}
 
-	.scene-row .fill {
-		opacity: 0.85;
+	.scene-name {
+		overflow: hidden;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.scene-count {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+
+	.scene-count strong {
+		color: var(--text-secondary);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.scene-bar {
+		position: relative;
+		display: block;
+		height: 2px;
+		margin-left: 18px;
+		border-radius: 999px;
+		overflow: hidden;
+	}
+
+	.scene-bar .fill {
+		opacity: 0.9;
+	}
+
+	.scene.unseen .scene-name {
+		color: var(--text-secondary);
 	}
 
 	.more {
@@ -700,6 +797,15 @@
 		background: var(--bg-hover);
 	}
 
+	@container (max-width: 900px) {
+		.scene-grid {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+		.figures {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+	}
+
 	@media (max-width: 640px) {
 		.entry {
 			grid-template-columns: 72px minmax(0, 1fr) auto 12px;
@@ -710,22 +816,21 @@
 			width: 72px;
 		}
 
-		.scene-row {
-			grid-template-columns: minmax(0, 1fr) 96px;
+		.scene-grid {
+			grid-template-columns: minmax(0, 1fr);
 		}
 
 		.steer-row {
 			grid-template-columns: 52px minmax(0, 1fr) auto;
 		}
 
-		.steer-row .bar,
-		.steer-row .seen {
+		.steer-row .meter,
+		.steer-row .when {
 			display: none;
 		}
 
-		.scene-row .bar {
-			grid-column: 1 / -1;
-			grid-row: 2;
+		.undo {
+			opacity: 1;
 		}
 
 		.small-figure {
