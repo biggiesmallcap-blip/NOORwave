@@ -538,6 +538,30 @@ fn channel_out(
     }
 }
 
+/// The pictures the dial is about to show, most urgent first: what is on now,
+/// then next, then after that. Every channel at the 640 its cards and
+/// previews use; the programmed channels also at the 320 of their rows.
+pub fn dial_artwork(out: &ChannelsOut) -> Vec<(String, u32)> {
+    let mut urls = Vec::new();
+    for depth in 0..3 {
+        for channel in &out.channels {
+            let video = match depth {
+                0 => channel.now.as_ref().map(|now| &now.program.video),
+                1 => channel.next.as_ref().map(|next| &next.video),
+                _ => channel.then.as_ref().map(|then| &then.video),
+            };
+            let Some(url) = video.and_then(|video| video.artwork_url.clone()) else {
+                continue;
+            };
+            if channel.meta.scene_id.is_none() {
+                urls.push((url.clone(), 320));
+            }
+            urls.push((url, 640));
+        }
+    }
+    urls
+}
+
 /// Every channel with what is on now (and how far in) and what is next.
 pub fn channels_at(
     conn: &Connection,
@@ -858,6 +882,43 @@ mod tests {
             .unwrap();
         assert_eq!(locked["locked"], true);
         assert!(locked["now"].is_null());
+    }
+
+    #[test]
+    fn the_dial_warms_now_first_then_next_then_after() {
+        let conn = conn();
+        seed_catalog(&conn);
+        let out = channels_at(&conn, "2026-10-14", 30_000, ExploreMode::Mixed).unwrap();
+        let urls = dial_artwork(&out);
+        let live: Vec<&ChannelOut> = out.channels.iter().filter(|c| c.now.is_some()).collect();
+        assert!(!live.is_empty());
+        // Every live channel's picture on now comes before any next one.
+        let now_urls: Vec<String> = live
+            .iter()
+            .filter_map(|c| c.now.as_ref()?.program.video.artwork_url.clone())
+            .collect();
+        let first_next = urls
+            .iter()
+            .position(|(url, _)| !now_urls.contains(url))
+            .unwrap_or(urls.len());
+        assert!(
+            urls[..first_next]
+                .iter()
+                .all(|(url, _)| now_urls.contains(url))
+        );
+        // Fixed channels at both sizes, scenes only at the preview's 640.
+        let wild = live.iter().find(|c| c.meta.id == "wild").unwrap();
+        let url = wild
+            .now
+            .as_ref()
+            .unwrap()
+            .program
+            .video
+            .artwork_url
+            .clone()
+            .unwrap();
+        assert!(urls.contains(&(url.clone(), 320)) && urls.contains(&(url, 640)));
+        assert!(urls.iter().all(|(_, size)| *size == 320 || *size == 640));
     }
 
     #[test]

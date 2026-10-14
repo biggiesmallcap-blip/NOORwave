@@ -60,7 +60,7 @@
 		oncontextmenu={screenMenu}
 		aria-label={video ? `Tune in to ${channel.title}: ${video.title}${video.artist_name ? ` by ${video.artist_name}` : ''}` : `Tune in to ${channel.title}`}
 	>
-		<ArtworkImage src={video?.artwork_url ?? null} size={640} fallbackText={channel.title.slice(0, 1)} tint decorative fadeIn />
+		<ArtworkImage src={video?.artwork_url ?? null} size={640} fallbackText={channel.title.slice(0, 1)} tint decorative fadeIn loading="eager" fetchPriority="high" />
 		<span class="scrim" aria-hidden="true"></span>
 		<span class="ident" aria-hidden="true">
 			<span class="no">{channelNumber(channel.no)}</span>

@@ -5,6 +5,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
+	import { cachedTidalArtwork, upscaleTidalArtwork } from '$lib/utils/artwork';
 	import { LONG_FORM_S, channelNumber, formatClock, formatRuntime, unlockLabel, type LiveSlot } from './clock';
 	import type { DialFamily } from './families';
 	import { channelHue } from './lineup';
@@ -62,8 +63,22 @@
 		preview = { id: channel.id, ...at };
 	}
 
+	// The picture starts loading the moment the pointer reaches a line, so
+	// it is there by the time the preview comes up.
+	const fetched = new Set<string>();
+	function prefetch(channel: VideoChannel) {
+		const art = slots.get(channel.id)?.program?.video.artwork_url;
+		const url = art ? upscaleTidalArtwork(art, 640) : null;
+		if (!url || fetched.has(url)) return;
+		fetched.add(url);
+		const image = new Image();
+		image.decoding = 'async';
+		image.src = cachedTidalArtwork(url) ?? url;
+	}
+
 	function rest(channel: VideoChannel, el: HTMLElement) {
 		clearTimer();
+		prefetch(channel);
 		// Another line: the open preview fades out now, not after the pointer.
 		if (preview && preview.id !== channel.id) preview = null;
 		timer = setTimeout(() => show(channel, el), INTENT_MS);
@@ -145,7 +160,7 @@
 			<div class="card">
 				<div class="art">
 					{#if program?.video.artwork_url}
-						<ArtworkImage src={program.video.artwork_url} size={640} fallbackText="" decorative fadeIn />
+						<ArtworkImage src={program.video.artwork_url} size={640} fallbackText="" decorative fadeIn loading="eager" />
 					{:else}
 						<span class="art-no">{channelNumber(previewChannel.no)}</span>
 					{/if}

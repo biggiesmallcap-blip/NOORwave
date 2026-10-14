@@ -71,7 +71,12 @@ pub(super) async fn get_video_channels(State(state): State<SharedState>) -> Repl
     })
     .await;
     match result {
-        Ok(out) => ok(out),
+        Ok(out) => {
+            // Pictures TIDAL has not served lately take up to a second;
+            // saving what is on now and next ahead makes them instant.
+            crate::services::artwork_cache::warm(&day::dial_artwork(&out));
+            ok(out)
+        }
         Err(error) => failed(error, "channels"),
     }
 }
