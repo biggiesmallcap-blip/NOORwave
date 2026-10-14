@@ -32,6 +32,23 @@ blocks it; each is small on its own.
 - Logbook: there is no cheap liked-videos count for its Liked row.
 - Spawned by: branch `bsc/video-exploration-redesign-56c487` (Atlas and Air).
 
+### videos: Journal tab
+
+A fifth video tab growing the Today pieces into a small magazine: Today,
+Artist of the week, The Wall (a colour-sorted mosaic of every artist's
+picture in triangles, diamonds and hexagons) and back issues. Plan sketch:
+`docs/plans/2026-10-14-journal.md`. Not started; open: the name, and what
+stays below Scenes on On Air.
+- Spawned by: branch `bsc/video-exploration-redesign-56c487` (Atlas and Air).
+
+### videos: Journal, after the core
+
+Once the Journal's first version ships: the other collages (One song,
+every cut; A year in pictures; On stage) and short stories (New on the map
+this week; The most collaborative artist in a scene; Songs filmed 10
+times; Your month in videos). See the plan's "Later" section.
+- Spawned by: branch `bsc/video-exploration-redesign-56c487` (Atlas and Air).
+
 ### tidal: confirm the playlist move toIndex convention live
 
 `move_playlist_item` sends TIDAL's `toIndex` measured after lifting the item
