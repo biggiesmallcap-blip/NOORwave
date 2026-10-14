@@ -41,6 +41,8 @@
 	import { loadSavedVideos, savedVideoIds, savingVideo, toggleSavedVideo } from '$lib/stores/saved_videos';
 	import ChannelPill from '$lib/video/onair/ChannelPill.svelte';
 	import OnAirStage from '$lib/video/onair/OnAirStage.svelte';
+	import VideoCurtain from '$lib/components/video/VideoCurtain.svelte';
+	import { raiseVideoCurtain } from '$lib/video/curtain';
 
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. Where it sits:
@@ -665,6 +667,9 @@
 	$effect(() => {
 		const id = $videoSession.current?.tidal_id ?? null;
 		if (id === stageVideoId) return;
+		// Every change of video goes behind the curtain until it plays: the
+		// next track, a pick, a channel flip (which raised it already).
+		if (id !== null) raiseVideoCurtain($videoSession.current?.artwork_url ?? null, stageVideoId);
 		stageVideoId = id;
 		stagePositionS = $videoSession.startAtS;
 		const ms = $videoSession.current?.duration_ms;
@@ -822,6 +827,14 @@
 				onToggleSaved={() => void toggleSavedVideo($videoSession.current)}
 				fsLead={broadcast && $videoChannelOnAir ? channelPill : undefined}
 			/>
+			<!-- Over the picture (in its own box, at every size), under the
+			     stage's bug and credits. -->
+			<VideoCurtain
+				currentId={$videoSession.current?.tidal_id ?? null}
+				positionS={stagePositionS}
+				startedAtS={$videoSession.startAtS}
+				failed={Boolean($videoSession.error) && !$videoSession.loading}
+			/>
 		</div>
 
 		{#if broadcast && $videoChannelOnAir}
@@ -915,6 +928,7 @@
 	}
 
 	.player-surface {
+		position: relative;
 		width: 100%;
 		height: 100%;
 	}

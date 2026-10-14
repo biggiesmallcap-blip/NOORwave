@@ -155,3 +155,23 @@ describe('On Air stage wiring', () => {
 		}
 	});
 });
+
+describe('the curtain between videos', () => {
+	test('the player raises it on every change of video and draws it over the picture', () => {
+		expect(dock).toContain("if (id !== null) raiseVideoCurtain($videoSession.current?.artwork_url ?? null, stageVideoId);");
+		expect(dock).toContain('<VideoCurtain');
+		expect(stage).toContain('raiseVideoCurtain(liveSlot(target, elapsed).program?.video.artwork_url ?? null, current?.tidal_id ?? null);');
+	});
+
+	test("the stage's bug and credits stand on their own, never inside a curtain", () => {
+		expect(stage).not.toContain('class="curtain"');
+		expect(stage).toContain('!$videoCurtain');
+		const bug = stage.indexOf('<div class="bug"');
+		const credit = stage.indexOf('<div class="lower-third"');
+		expect(bug).toBeGreaterThan(-1);
+		expect(credit).toBeGreaterThan(bug);
+		// Nothing opened before the bug is still open around it.
+		const before = stage.slice(stage.indexOf('<div class="onair-stage"'), bug);
+		expect((before.match(/<div/g) ?? []).length).toBe(1);
+	});
+});

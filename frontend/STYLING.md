@@ -317,6 +317,7 @@ The Videos section (On Air, Atlas, Archive, Logbook, History) is where a calmer,
 - **Ask in place.** A destructive action asks with `InlineConfirm` (the button turns into the question and its two answers, Cancel focused, reverts on its own) instead of a native dialog.
 - **Last answers first.** Video pages keep their last answer for the session in `$lib/video/view_cache` (the Archive keeps its first page per lens state). A revisit shows it at once, still, and asks again underneath, swapping the answer in without a refresh state.
 - **One arrival.** A first visit waits up to 150 ms for its answers, then shows the page in one `.rise-in-shelf` cascade (sections) or `.rise-in-card` cascade (cards); slower answers fall back to skeletons in place.
+- **A curtain between videos.** Every change of video (next track, a pick, a channel flip) goes behind the incoming video's own still, softened and darkened under film grain, until the new video is playing; then it dissolves in (`VideoCurtain`, raised through `$lib/video/curtain`). No black frame or loading text between videos.
 - **Stages stay dark.** The On Air stage and the Atlas are night skies in every theme and keep stage-local colours (`--stage-*`); the chrome around them still follows the theme.
 - **Wide screens.** From about 1560 px of content width a long single column becomes two (Logbook: your shelves and steering beside the catalog, scenes across both).
 

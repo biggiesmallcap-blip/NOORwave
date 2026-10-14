@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
-	import { fade } from 'svelte/transition';
 	import { get } from 'svelte/store';
 	import type { VideoChannel } from '$lib/api/video_explore_types';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -16,8 +15,8 @@
 	import { airTick, channelHue, channelLineup, ensureLineup } from './lineup';
 	import { creditFor, lowerThirdPhase, splitTitle, type CreditSource } from './lower_third';
 	import { remotePresses } from './remote';
-	import { tuneChannel, tunedRecently } from './tune';
-	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import { tuneChannel } from './tune';
+	import { lowerVideoCurtain, raiseVideoCurtain, videoCurtain } from '$lib/video/curtain';
 
 	// The broadcast layer over the stage while a channel is on air, on the
 	// watch page and in fullscreen: the channel bug, the lower third credits,
@@ -36,10 +35,6 @@
 	} = $props();
 
 	const FLIP_HOLD_MS = 1400;
-	/** The curtain never stays longer than this, whatever the stream does. */
-	const CURTAIN_MAX_MS = 8000;
-	/** Played this far into the new video: it is really on, lift the curtain. */
-	const CURTAIN_LIFT_S = 0.25;
 	const NOTE_MS = 1800;
 
 	let guideOpen = $state(false);
@@ -52,45 +47,6 @@
 	let flipTimer: ReturnType<typeof setTimeout> | null = null;
 	let noteTimer: ReturnType<typeof setTimeout> | null = null;
 
-	// Changing channel: from the moment the tune starts until the new video
-	// is really playing, the picture is the new video's own still (softened,
-	// a little dark) under the usual channel card, so the black frame and the
-	// loading text in between never show; then it dissolves into the video.
-	let curtain = $state<{ channel: VideoChannel; fromId: number | null } | null>(null);
-	let curtainTimer: ReturnType<typeof setTimeout> | null = null;
-
-	/** The position last seen since the new video arrived: the curtain lifts
-	 *  only on a position that moved forward after that, so the old video's
-	 *  position (still reported for a moment) cannot lift it. */
-	let curtainSeen: number | null = null;
-
-	function raiseCurtain(target: VideoChannel, fromId: number | null) {
-		if (get(reduceMotion)) return;
-		curtainSeen = null;
-		curtain = { channel: target, fromId };
-		if (curtainTimer) clearTimeout(curtainTimer);
-		curtainTimer = setTimeout(lowerCurtain, CURTAIN_MAX_MS);
-	}
-
-	function lowerCurtain() {
-		if (curtainTimer) clearTimeout(curtainTimer);
-		curtainTimer = null;
-		curtain = null;
-	}
-
-	$effect(() => {
-		if (!curtain) return;
-		const id = current?.tidal_id ?? null;
-		const arrived = id !== null && id !== curtain.fromId;
-		if (!arrived) return;
-		const seen = curtainSeen;
-		curtainSeen = positionS;
-		const moving = seen !== null && positionS > seen && positionS >= startedAtS + CURTAIN_LIFT_S;
-		// Only the new video's own failure lifts it early: an error left over
-		// from the one before must not.
-		if (moving || ($videoSession.error && !$videoSession.loading)) lowerCurtain();
-	});
-
 	let lineup = $derived($channelLineup);
 	let channels = $derived<readonly VideoChannel[]>(lineup?.data.channels.length ? lineup.data.channels : [channel]);
 	let elapsed = $derived(lineup ? Math.max(0, ($airTick - lineup.fetchedAt) / 1000) : 0);
@@ -101,11 +57,9 @@
 	let introCredit = $derived(current ? creditFor(current as CreditSource) : null);
 	let outroCredit = $derived(upNext ? creditFor(upNext as CreditSource) : null);
 	let credit = $derived(phase === 'intro' ? introCredit : phase === 'outro' ? outroCredit : null);
-	let showCredit = $derived(Boolean(credit) && !guideOpen && !flipCard && !curtain);
+	let showCredit = $derived(Boolean(credit) && !guideOpen && !flipCard && !$videoCurtain);
 
 	let flipSlot = $derived(flipCard ? liveSlot(flipCard, elapsed) : null);
-	let curtainSlot = $derived(curtain ? liveSlot(curtain.channel, elapsed) : null);
-	let curtainArt = $derived(curtainSlot?.program?.video.artwork_url ?? null);
 	let flipVideo = $derived(flipSlot?.program?.video ?? null);
 
 	const flipper = createFlipper<VideoChannel>({
@@ -137,9 +91,11 @@
 			holdCardThenHide(target);
 			return;
 		}
-		raiseCurtain(target, current?.tidal_id ?? null);
+		// Cover the picture the moment the flip starts, with what the target
+		// channel is playing now; the player keeps it up until that plays.
+		raiseVideoCurtain(liveSlot(target, elapsed).program?.video.artwork_url ?? null, current?.tidal_id ?? null);
 		const ok = await tuneChannel(target);
-		if (!ok) lowerCurtain();
+		if (!ok) lowerVideoCurtain();
 		holdCardThenHide(target);
 	}
 
@@ -267,25 +223,17 @@
 	onMount(() => {
 		void ensureLineup();
 		window.addEventListener('keydown', onKeydown, true);
-		// Just tuned in from the dial: cover the picture until it plays.
-		if (tunedRecently(3000) && !(positionS >= startedAtS + CURTAIN_LIFT_S)) raiseCurtain(channel, null);
 	});
 
 	onDestroy(() => {
 		if (typeof window !== 'undefined') window.removeEventListener('keydown', onKeydown, true);
 		unsubscribePresses();
 		flipper.cancel();
-		for (const timer of [digitTimer, flipTimer, noteTimer, curtainTimer]) if (timer) clearTimeout(timer);
+		for (const timer of [digitTimer, flipTimer, noteTimer]) if (timer) clearTimeout(timer);
 	});
 </script>
 
 <div class="onair-stage" class:fullscreen style:--ch-hue={hue}>
-	<!-- Under everything else on the stage: the bug and cards stay on top. -->
-	{#if curtain}
-		<div class="curtain" out:fade={{ duration: 420 }} aria-hidden="true">
-			{#if curtainArt}
-				<ArtworkImage src={curtainArt} size={640} fallbackText="" decorative fadeIn loading="eager" fetchPriority="high" />
-			{/if}
 	<!-- The bug: number and name, top right, quiet like a broadcaster's mark.
 	     While digits are typed it shows them instead. -->
 	<div class="bug" class:typing={digits.length > 0} class:hidden={guideOpen} aria-live="polite">
@@ -313,9 +261,6 @@
 				{#if credit.why && phase === 'intro'}<span class="lt-why">{credit.why}</span>{/if}
 			</div>
 		{/key}
-	{/if}
-
-		</div>
 	{/if}
 
 	{#if flipCard}
@@ -656,53 +601,6 @@
 	}
 
 	/* ---- The flip's luminance dip: 160 ms down and back up ---- */
-	/* While the new video loads: its own still, full bleed, softened and a
-	   little dark, drifting in slowly. Black underneath, never a colour. */
-	.curtain {
-		position: absolute;
-		inset: 0;
-		overflow: hidden;
-		background: #000;
-		animation: curtain-in var(--motion-fast) both;
-	}
-	.curtain :global(img) {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		filter: brightness(0.62) saturate(0.9) blur(1.5px);
-		transform: scale(1.04);
-		animation: curtain-drift 6s ease-out both; /* motion-ok: a slow drift under the still, not a UI transition */
-	}
-	/* Film grain over the still, so it reads as picture, not a frozen
-	   thumbnail: a seamless tile blended softly, jittering a few times a
-	   second like a projector. */
-	.curtain::after {
-		content: '';
-		position: absolute;
-		inset: -32px;
-		background: url('/textures/film-grain.webp') repeat;
-		background-size: 627px 627px;
-		mix-blend-mode: overlay;
-		opacity: 0.6;
-		pointer-events: none;
-		animation: grain 0.9s steps(1) infinite;
-	}
-	@keyframes grain {
-		0% { transform: translate(0, 0); }
-		20% { transform: translate(-13px, 9px); }
-		40% { transform: translate(11px, -17px); }
-		60% { transform: translate(-7px, 21px); }
-		80% { transform: translate(19px, -5px); }
-	}
-	@keyframes curtain-in {
-		from { opacity: 0; }
-		to { opacity: 1; }
-	}
-	@keyframes curtain-drift {
-		from { transform: scale(1.08); }
-		to { transform: scale(1.04); }
-	}
-
 	.dip {
 		position: absolute;
 		inset: 0;
@@ -719,7 +617,6 @@
 	/* Reduced motion: no dip, no slides; things simply appear. */
 	@media (prefers-reduced-motion: reduce) {
 		.dip { display: none; }
-		.curtain::after { animation: none; }
 		.lt-rule,
 		.lt-kicker,
 		.lt-artist,
@@ -731,7 +628,6 @@
 		.note { animation: none; }
 	}
 	:global(:root[data-motion='reduce']) .dip { display: none; }
-	:global(:root[data-motion='reduce']) .curtain::after { animation: none; }
 	:global(:root[data-motion='reduce']) :is(.lt-rule, .lt-kicker, .lt-artist, .lt-song, .lt-meta, .lt-why, .flip-card, .note) {
 		animation: none;
 	}
