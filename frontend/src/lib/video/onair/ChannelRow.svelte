@@ -55,7 +55,7 @@
 	<span class="no" aria-hidden="true">{channelNumber(channel.no)}</span>
 
 	<div class="ident">
-		<button type="button" class="name" disabled={channel.locked} onclick={tune}>{channel.title}</button>
+		<button type="button" class="name" disabled={channel.locked} data-dial-no={channel.no > 0 ? channel.no : undefined} onclick={tune}>{channel.title}</button>
 		<span class="subtitle" title={channel.subtitle}>{channel.subtitle}</span>
 	</div>
 

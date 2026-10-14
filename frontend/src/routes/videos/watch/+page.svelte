@@ -865,14 +865,9 @@
 		font-size: var(--font-size-xs);
 	}
 
-	.related-why,
-	.related-loading {
+	.related-why {
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
-	}
-
-	.related-loading {
-		margin: 0;
 	}
 
 	@media (max-width: 620px) {

@@ -16,11 +16,12 @@ const player = read('../../components/video/VideoPlayer.svelte');
 const store = read('../../stores/video_session.ts');
 
 describe('On Air landing (the dial)', () => {
-	test('the "for you" strip first, then the fixed channels and the families', () => {
+	test('the "for you" strip first, then the programmed channels, then the scene index', () => {
 		expect(landing).toContain('let tonight = $derived(forYouTonight(channels));');
-		expect(landing).toContain('let grouped = $derived(dialFamilies(channels, $videoChannelOnAir?.id ?? null, familyChoices));');
-		expect(landing.indexOf('{forYou}')).toBeLessThan(landing.indexOf('All channels'));
-		expect(landing.indexOf('grouped.main')).toBeLessThan(landing.indexOf('<div class="family" id={`family-${family.key}`}>'));
+		expect(landing).toContain('let grouped = $derived(dialFamilies(channels));');
+		expect(landing.indexOf('{forYou}')).toBeLessThan(landing.indexOf('grouped.main'));
+		expect(landing.indexOf('grouped.main')).toBeLessThan(landing.indexOf('<SceneIndex families={grouped.families}'));
+		expect(landing).toContain('<svelte:window onkeydown={onDialKey} />');
 		expect(landing).toContain('<ChannelCard {channel} {slot}');
 		expect(landing).toContain('<ChannelRow {channel} {slot}');
 	});
