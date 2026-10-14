@@ -22,9 +22,15 @@ use super::archive;
 use super::light::{self, LightMap};
 use super::scenes::{self, ArtistGraph, EDGE_SOURCES, MIN_PROGRAMMABLE_S, VARIOUS_ARTISTS_ID};
 
-/// Somewhere new runs four to eight stops, the start included.
+/// Each leg of a journey runs four to eight stops, the start included,
+/// and aims for at least six: the cheapest path would otherwise take the
+/// fewest stops allowed, and a journey of four is over before it starts.
 pub const NEW_MIN_STOPS: usize = 4;
+pub const LEG_AIM_STOPS: usize = 6;
 pub const NEW_MAX_STOPS: usize = 8;
+/// The last leg to a chosen artist may run longer: two artists can sit far
+/// apart, and the path still has to reach that one.
+pub const TO_MAX_STOPS: usize = 13;
 /// Destinations need this many artists; smaller scenes are too thin to visit.
 pub const DESTINATION_MIN_ARTISTS: i64 = 8;
 /// The path ends at one of this many top-ranked artists of the destination.
@@ -595,34 +601,61 @@ pub struct NewTrip {
     pub path: Vec<(i64, Option<&'static str>)>,
 }
 
-/// Plan somewhere new from `from`: to `scene` when given, else to the best
-/// destination with a path. Every stop after the start is on the map with a
-/// programmable video; stops the listener knows cost more. Err is the
+/// What a journey has already passed: its artists (never stopped at again)
+/// and its scenes (never chosen again as somewhere new).
+#[derive(Debug, Clone, Default)]
+pub struct Visited {
+    pub artists: HashSet<i64>,
+    pub scenes: HashSet<i64>,
+}
+
+/// The cost of stopping at an artist: unknown ones are free, ones the
+/// listener knows cost more; None refuses it (no programmable video, or the
+/// journey has been there).
+fn stop_toll(facts: &MapFacts, light: &LightMap, visited: &Visited, id: i64) -> Option<f64> {
+    (facts.playable(id) && !visited.artists.contains(&id)).then(|| {
+        match light.light(id, facts.charted(id)) {
+            light::LIT => LIT_TOLL,
+            light::WARM => WARM_TOLL,
+            _ => 0.0,
+        }
+    })
+}
+
+/// One leg somewhere new from `from`: to `scene` when given, else to the
+/// best destination with a path, never to a scene or through an artist the
+/// journey has already visited. Every stop after the start is on the map
+/// with a programmable video; stops the listener knows cost more. Err is the
 /// reason shown when nothing is found.
-pub fn plan_new(
+fn plan_leg(
     graph: &ArtistGraph,
     facts: &MapFacts,
     light: &LightMap,
     scenes: &[SceneSeen],
     from: i64,
     scene: Option<i64>,
+    visited: &Visited,
 ) -> Result<NewTrip, String> {
     let max_hops = NEW_MAX_STOPS - 1;
     let allowed = |id: i64| facts.playable(id);
-    let stop_toll = |id: i64| {
-        allowed(id).then(|| match light.light(id, facts.charted(id)) {
-            light::LIT => LIT_TOLL,
-            light::WARM => WARM_TOLL,
-            _ => 0.0,
-        })
-    };
+    let stop_toll = |id: i64| stop_toll(facts, light, visited, id);
     let goals_of = |scene: i64| -> HashSet<i64> {
         facts
             .tops
             .get(&scene)
-            .map(|tops| tops.iter().copied().filter(|id| *id != from).collect())
+            .map(|tops| {
+                tops.iter()
+                    .copied()
+                    .filter(|id| *id != from && !visited.artists.contains(id))
+                    .collect()
+            })
             .unwrap_or_default()
     };
+    let fresh: Vec<SceneSeen> = scenes
+        .iter()
+        .filter(|s| !visited.scenes.contains(&s.id))
+        .cloned()
+        .collect();
     let order: Vec<i64> = match scene {
         Some(scene) => {
             if !scenes.iter().any(|s| s.id == scene) {
@@ -635,7 +668,7 @@ pub fn plan_new(
                 return Err("no unexplored scene within reach".into());
             };
             let hops = hops_from(graph, start, max_hops, allowed);
-            let order = destinations(scenes, facts.scene(from), |scene| {
+            let order = destinations(&fresh, facts.scene(from), |scene| {
                 goals_of(scene)
                     .iter()
                     .filter_map(|id| graph.index_of(*id))
@@ -652,9 +685,9 @@ pub fn plan_new(
     };
     for scene in order.iter().take(DESTINATION_TRIES) {
         let goals = goals_of(*scene);
-        if let Some(path) =
-            route_to_any(graph, from, &goals, NEW_MIN_STOPS - 1, max_hops, stop_toll)
-        {
+        let path = route_to_any(graph, from, &goals, LEG_AIM_STOPS - 1, max_hops, stop_toll)
+            .or_else(|| route_to_any(graph, from, &goals, NEW_MIN_STOPS - 1, max_hops, stop_toll));
+        if let Some(path) = path {
             return Ok(NewTrip {
                 scene: *scene,
                 path,
@@ -671,6 +704,197 @@ pub fn plan_new(
         ),
         None => format!("no route to a new scene within {NEW_MAX_STOPS} stops"),
     })
+}
+
+// --------------------------------------------------------------- tours
+
+/// How far a journey goes: through one new scene, two, or four. Each leg
+/// aims for six to eight stops, so about 6, 12 or 24 in all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Length {
+    Short,
+    Long,
+    Epic,
+}
+
+impl Length {
+    /// `short`, `long` or `epic`; absent is short.
+    pub fn parse(value: Option<&str>) -> Result<Self, &'static str> {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            None | Some("short") => Ok(Self::Short),
+            Some("long") => Ok(Self::Long),
+            Some("epic") => Ok(Self::Epic),
+            Some(_) => Err("length must be short, long or epic"),
+        }
+    }
+
+    pub fn legs(self) -> usize {
+        match self {
+            Self::Short => 1,
+            Self::Long => 2,
+            Self::Epic => 4,
+        }
+    }
+}
+
+/// A journey of one or more legs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tour {
+    /// The scene each leg arrived in; for a trip to an artist, the last leg
+    /// arrives at that artist instead and has no entry here.
+    pub scenes: Vec<i64>,
+    /// Stops from the start, each with the provider of the edge into it.
+    pub path: Vec<(i64, Option<&'static str>)>,
+    /// Index in `path` where each waypoint leg arrived.
+    pub arrivals: Vec<usize>,
+}
+
+impl Tour {
+    fn start(from: i64, facts: &MapFacts) -> (Self, Visited) {
+        let mut visited = Visited::default();
+        visited.artists.insert(from);
+        if let Some(own) = facts.scene(from) {
+            visited.scenes.insert(own);
+        }
+        (
+            Self {
+                scenes: Vec::new(),
+                path: vec![(from, None)],
+                arrivals: Vec::new(),
+            },
+            visited,
+        )
+    }
+
+    fn at(&self) -> i64 {
+        self.path.last().map_or(0, |stop| stop.0)
+    }
+
+    /// Add a leg that starts where the tour stands.
+    fn extend(&mut self, leg: &[(i64, Option<&'static str>)], visited: &mut Visited) {
+        for stop in leg.iter().skip(1) {
+            visited.artists.insert(stop.0);
+            self.path.push(*stop);
+        }
+    }
+}
+
+/// Up to `waypoints` legs somewhere new from `from`, each to a scene the
+/// journey has not been to (and never to `keep_clear`, the final scene).
+/// Stops early when the map runs out of new scenes in reach.
+fn waypoint_legs(
+    graph: &ArtistGraph,
+    facts: &MapFacts,
+    light: &LightMap,
+    scenes: &[SceneSeen],
+    from: i64,
+    waypoints: usize,
+    keep_clear: Option<i64>,
+) -> (Tour, Visited) {
+    let (mut tour, mut visited) = Tour::start(from, facts);
+    for _ in 0..waypoints {
+        let mut around = visited.clone();
+        if let Some(scene) = keep_clear {
+            around.scenes.insert(scene);
+        }
+        let Ok(leg) = plan_leg(graph, facts, light, scenes, tour.at(), None, &around) else {
+            break;
+        };
+        tour.extend(&leg.path, &mut visited);
+        visited.scenes.insert(leg.scene);
+        tour.scenes.push(leg.scene);
+        tour.arrivals.push(tour.path.len() - 1);
+    }
+    (tour, visited)
+}
+
+/// Somewhere new in `legs` legs: each leg from where the last arrived to a
+/// scene the journey has not been to; the last to `scene` when one is
+/// chosen. With a chosen scene, waypoints are dropped one by one until the
+/// last leg can reach it.
+pub fn plan_tour(
+    graph: &ArtistGraph,
+    facts: &MapFacts,
+    light: &LightMap,
+    scenes: &[SceneSeen],
+    from: i64,
+    scene: Option<i64>,
+    legs: usize,
+) -> Result<Tour, String> {
+    let legs = legs.max(1);
+    if scene.is_none() {
+        let (mut tour, visited) = waypoint_legs(graph, facts, light, scenes, from, legs, None);
+        if tour.scenes.is_empty() {
+            // Say why, as one leg would.
+            return plan_leg(graph, facts, light, scenes, from, None, &visited).map(|_| tour);
+        }
+        tour.arrivals.pop();
+        return Ok(tour);
+    }
+    let mut last_err = String::new();
+    for waypoints in (0..legs).rev() {
+        let (mut tour, visited) =
+            waypoint_legs(graph, facts, light, scenes, from, waypoints, scene);
+        if tour.scenes.len() < waypoints {
+            continue;
+        }
+        match plan_leg(graph, facts, light, scenes, tour.at(), scene, &visited) {
+            Ok(leg) => {
+                let mut visited = visited;
+                tour.extend(&leg.path, &mut visited);
+                tour.scenes.push(leg.scene);
+                return Ok(tour);
+            }
+            Err(reason) => last_err = reason,
+        }
+    }
+    Err(last_err)
+}
+
+/// From `from` to the artist `to`: through `legs - 1` new scenes first when
+/// the journey is longer, then the cheapest path to `to` within
+/// `TO_MAX_STOPS`; waypoints are dropped one by one until it is reached.
+pub fn plan_to(
+    graph: &ArtistGraph,
+    facts: &MapFacts,
+    light: &LightMap,
+    scenes: &[SceneSeen],
+    from: i64,
+    to: i64,
+    legs: usize,
+) -> Result<Tour, String> {
+    if from == to {
+        return Err("that is where it starts".into());
+    }
+    let goals = HashSet::from([to]);
+    for waypoints in (0..legs.max(1)).rev() {
+        let (mut tour, mut visited) = waypoint_legs(
+            graph,
+            facts,
+            light,
+            scenes,
+            from,
+            waypoints,
+            facts.scene(to),
+        );
+        if tour.scenes.len() < waypoints {
+            continue;
+        }
+        visited.artists.remove(&to);
+        // The chosen artist is always a stop, video or not.
+        let toll = |id: i64| {
+            if id == to {
+                Some(0.0)
+            } else {
+                stop_toll(facts, light, &visited, id)
+            }
+        };
+        if let Some(leg) = route_to_any(graph, tour.at(), &goals, 1, TO_MAX_STOPS - 1, toll) {
+            tour.extend(&leg, &mut visited);
+            return Ok(tour);
+        }
+    }
+    Err(format!("no route within {TO_MAX_STOPS} stops"))
 }
 
 // --------------------------------------------------------------- videos

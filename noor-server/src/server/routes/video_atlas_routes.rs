@@ -195,8 +195,10 @@ pub(super) struct AtlasJourneyResponse {
     found: bool,
     kind: &'static str,
     title: String,
-    /// Somewhere new only.
+    /// Somewhere new only: the scene it ends in.
     destination: Option<JourneyDestination>,
+    /// Scenes passed through on the way, in order (longer journeys).
+    through: Vec<String>,
     stops: Vec<JourneyStop>,
     reason: Option<String>,
 }
@@ -208,6 +210,7 @@ impl AtlasJourneyResponse {
             kind,
             title,
             destination: None,
+            through: Vec::new(),
             stops: Vec::new(),
             reason: Some(reason.into()),
         }
@@ -216,11 +219,21 @@ impl AtlasJourneyResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum JourneyRequest {
-    New { from: i64, scene: Option<i64> },
+    New {
+        from: i64,
+        scene: Option<i64>,
+        length: journey::Length,
+    },
+    To {
+        from: i64,
+        to: i64,
+        length: journey::Length,
+    },
 }
 
 impl JourneyRequest {
-    /// kind=new&from[&scene]; Err is the 400 message.
+    /// kind=new&from[&scene] or kind=to&from&to, each with an optional
+    /// length=short|long|epic; Err is the 400 message.
     fn parse(params: &HashMap<String, String>) -> Result<Self, &'static str> {
         // Absent is None, anything but a positive integer is an error.
         let id = |name: &str| -> Result<Option<i64>, ()> {
@@ -235,15 +248,27 @@ impl JourneyRequest {
             }
         };
         let kind = params.get("kind").map(String::as_str);
-        if kind != Some("new") {
-            return Err("kind must be new");
+        if kind != Some("new") && kind != Some("to") {
+            return Err("kind must be new or to");
         }
         let from = id("from")
             .ok()
             .flatten()
             .ok_or("from must be an artist id")?;
+        let length = journey::Length::parse(params.get("length").map(String::as_str))?;
+        if kind == Some("to") {
+            let to = id("to").ok().flatten().ok_or("to must be an artist id")?;
+            if to == from {
+                return Err("to must be another artist");
+            }
+            return Ok(Self::To { from, to, length });
+        }
         let scene = id("scene").map_err(|_| "scene must be a scene id")?;
-        Ok(Self::New { from, scene })
+        Ok(Self::New {
+            from,
+            scene,
+            length,
+        })
     }
 }
 
@@ -708,17 +733,53 @@ pub(super) fn journey(
     request: JourneyRequest,
 ) -> anyhow::Result<AtlasJourneyResponse> {
     match request {
-        JourneyRequest::New { from, scene } => new_journey(conn, from, scene),
+        JourneyRequest::New {
+            from,
+            scene,
+            length,
+        } => new_journey(conn, from, scene, length),
+        JourneyRequest::To { from, to, length } => to_journey(conn, from, to, length),
+    }
+}
+
+/// What a journey reads: the graph, the map's facts, light and scenes.
+struct JourneyMap {
+    graph: std::sync::Arc<scenes::ArtistGraph>,
+    facts: std::sync::Arc<journey::MapFacts>,
+    light: LightMap,
+    scenes: Vec<journey::SceneSeen>,
+}
+
+impl JourneyMap {
+    fn load(conn: &Connection) -> anyhow::Result<Self> {
+        let graph = scenes::cached_graph(conn)?;
+        let facts = journey::cached_facts(conn)?;
+        let light = light::load(conn, &graph)?;
+        let scenes = journey::scenes_seen(conn)?;
+        Ok(Self {
+            graph,
+            facts,
+            light,
+            scenes,
+        })
+    }
+
+    fn scene_name(&self, id: i64) -> Option<String> {
+        self.scenes
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.name.clone())
     }
 }
 
 /// From `from` to a scene the listener has barely seen (or `scene`),
-/// through artists new to them; each stop plays its best cut not yet
-/// watched.
+/// through artists new to them, in one leg or (longer) several, each into
+/// another new scene; each stop plays its best cut not yet watched.
 fn new_journey(
     conn: &Connection,
     from: i64,
     scene: Option<i64>,
+    length: journey::Length,
 ) -> anyhow::Result<AtlasJourneyResponse> {
     const KIND: &str = "new";
     let Some(from_name) = artist_name(conn, from)? else {
@@ -728,30 +789,112 @@ fn new_journey(
             "unknown artist",
         ));
     };
-    let graph = scenes::cached_graph(conn)?;
-    let facts = journey::cached_facts(conn)?;
-    let light = light::load(conn, &graph)?;
-    let scene_rows = journey::scenes_seen(conn)?;
-    let scene_name = |id: i64| {
-        scene_rows
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| s.name.clone())
-    };
-    let trip = match journey::plan_new(&graph, &facts, &light, &scene_rows, from, scene) {
-        Ok(trip) => trip,
+    let map = JourneyMap::load(conn)?;
+    let tour = match journey::plan_tour(
+        &map.graph,
+        &map.facts,
+        &map.light,
+        &map.scenes,
+        from,
+        scene,
+        length.legs(),
+    ) {
+        Ok(tour) => tour,
         Err(reason) => {
             let title = scene
-                .and_then(scene_name)
+                .and_then(|id| map.scene_name(id))
                 .map(|name| format!("{from_name} to {name}"))
                 .unwrap_or_default();
             return Ok(AtlasJourneyResponse::lost(KIND, title, reason));
         }
     };
-    let destination = scene_name(trip.scene).unwrap_or_default();
+    let names: Vec<String> = tour
+        .scenes
+        .iter()
+        .map(|id| map.scene_name(*id).unwrap_or_default())
+        .collect();
+    let destination = names.last().cloned().unwrap_or_default();
+    let stops = tour_stops(
+        conn,
+        &map,
+        &tour,
+        &names,
+        format!("Arriving in {destination}"),
+    )?;
+    Ok(AtlasJourneyResponse {
+        found: true,
+        kind: KIND,
+        title: format!("{from_name} to {destination}"),
+        destination: tour.scenes.last().map(|id| JourneyDestination {
+            scene_id: *id,
+            name: destination.clone(),
+        }),
+        through: names[..names.len().saturating_sub(1)].to_vec(),
+        stops,
+        reason: None,
+    })
+}
+
+/// From `from` to the artist `to`; longer journeys pass through new scenes
+/// on the way.
+fn to_journey(
+    conn: &Connection,
+    from: i64,
+    to: i64,
+    length: journey::Length,
+) -> anyhow::Result<AtlasJourneyResponse> {
+    const KIND: &str = "to";
+    let (Some(from_name), Some(to_name)) = (artist_name(conn, from)?, artist_name(conn, to)?)
+    else {
+        return Ok(AtlasJourneyResponse::lost(
+            KIND,
+            String::new(),
+            "unknown artist",
+        ));
+    };
+    let title = format!("{from_name} to {to_name}");
+    let map = JourneyMap::load(conn)?;
+    let tour = match journey::plan_to(
+        &map.graph,
+        &map.facts,
+        &map.light,
+        &map.scenes,
+        from,
+        to,
+        length.legs(),
+    ) {
+        Ok(tour) => tour,
+        Err(reason) => return Ok(AtlasJourneyResponse::lost(KIND, title, reason)),
+    };
+    let names: Vec<String> = tour
+        .scenes
+        .iter()
+        .map(|id| map.scene_name(*id).unwrap_or_default())
+        .collect();
+    let stops = tour_stops(conn, &map, &tour, &names, format!("Arriving at {to_name}"))?;
+    Ok(AtlasJourneyResponse {
+        found: true,
+        kind: KIND,
+        title,
+        destination: None,
+        through: names,
+        stops,
+        reason: None,
+    })
+}
+
+/// A tour's stops with their videos and why each is there: the start, the
+/// scenes each leg arrives in, the end, and new or known artists between.
+fn tour_stops(
+    conn: &Connection,
+    map: &JourneyMap,
+    tour: &journey::Tour,
+    scene_names: &[String],
+    arriving: String,
+) -> anyhow::Result<Vec<JourneyStop>> {
     let watched = journey::watched_videos(conn)?;
     let never = HashSet::new();
-    let picks: Vec<Option<i64>> = trip
+    let picks: Vec<Option<i64>> = tour
         .path
         .iter()
         .map(|(id, _)| {
@@ -764,15 +907,21 @@ fn new_journey(
         .collect::<anyhow::Result<_>>()?;
     let ids: Vec<i64> = picks.iter().flatten().copied().collect();
     let videos = day::catalog_videos(conn, &ids)?;
-    let last = trip.path.len() - 1;
-    let mut stops = Vec::with_capacity(trip.path.len());
-    for (at, ((artist_id, via), pick)) in trip.path.iter().zip(&picks).enumerate() {
+    let last = tour.path.len() - 1;
+    let mut stops = Vec::with_capacity(tour.path.len());
+    for (at, ((artist_id, via), pick)) in tour.path.iter().zip(&picks).enumerate() {
         let name = artist_name(conn, *artist_id)?.unwrap_or_default();
-        let level = light.light(*artist_id, facts.charted(*artist_id));
+        let level = map.light.light(*artist_id, map.facts.charted(*artist_id));
+        let waypoint = tour.arrivals.iter().position(|index| *index == at);
         let why = if at == 0 {
             format!("Start: {name}")
         } else if at == last {
-            format!("Arriving in {destination}")
+            arriving.clone()
+        } else if let Some(leg) = waypoint {
+            format!(
+                "Into {}",
+                scene_names.get(leg).map_or("a new scene", String::as_str)
+            )
         } else if level == light::LIT {
             format!("You know {name}")
         } else {
@@ -788,17 +937,7 @@ fn new_journey(
             why,
         });
     }
-    Ok(AtlasJourneyResponse {
-        found: true,
-        kind: KIND,
-        title: format!("{from_name} to {destination}"),
-        destination: Some(JourneyDestination {
-            scene_id: trip.scene,
-            name: destination,
-        }),
-        stops,
-        reason: None,
-    })
+    Ok(stops)
 }
 
 /// Whether a probe can and should go to the crawler.
@@ -927,7 +1066,8 @@ pub(super) async fn post_video_atlas_probe(
     Ok(Json(decision))
 }
 
-/// GET /api/videos/atlas/journey?kind=collab&from&to or ?kind=new&from[&scene]
+/// GET /api/videos/atlas/journey?kind=new&from[&scene] or ?kind=to&from&to,
+/// with &length=short|long|epic
 pub(super) async fn get_video_atlas_journey(
     State(state): State<SharedState>,
     Query(params): Query<HashMap<String, String>>,
@@ -1591,6 +1731,98 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn longer_journeys_cross_more_new_scenes() {
+        let db = new_db();
+        let (_, short) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=101&length=short",
+            None,
+        )
+        .await;
+        let (status, long) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=101&length=long",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(long["found"], true);
+        assert_eq!(short["through"], json!([]));
+        // Fresh first (least seen in reach), then Far, reached from Fresh.
+        assert_eq!(long["through"], json!(["Fresh"]));
+        assert_eq!(long["destination"]["name"], "Far");
+        assert_eq!(long["title"], "Artist 101 to Far");
+        let ids = stop_ids(&long);
+        assert!(ids.len() > stop_ids(&short).len(), "{ids:?}");
+        let unique: HashSet<i64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "no stop twice: {ids:?}");
+        let why: Vec<&str> = long["stops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["why"].as_str().unwrap())
+            .collect();
+        assert!(why.contains(&"Into Fresh"), "{why:?}");
+        assert_eq!(*why.last().unwrap(), "Arriving in Far");
+        // Epic asks for four legs and takes what the map has.
+        let (_, epic) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=new&from=101&length=epic",
+            None,
+        )
+        .await;
+        assert_eq!(epic["found"], true);
+        assert!(stop_ids(&epic).len() >= ids.len());
+    }
+
+    #[tokio::test]
+    async fn a_journey_goes_from_one_artist_to_another() {
+        let db = new_db();
+        let (status, trip) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=to&from=101&to=501",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(trip["found"], true);
+        assert_eq!(trip["kind"], "to");
+        assert_eq!(trip["title"], "Artist 101 to Artist 501");
+        assert_eq!(trip["destination"], Value::Null);
+        let ids = stop_ids(&trip);
+        assert_eq!(ids.first(), Some(&101));
+        assert_eq!(ids.last(), Some(&501));
+        assert!(ids.windows(2).all(|w| w[0] != w[1]));
+        let stops = trip["stops"].as_array().unwrap();
+        assert_eq!(stops.last().unwrap()["why"], "Arriving at Artist 501");
+
+        let (_, nowhere) = call(
+            &db,
+            "GET",
+            "/api/videos/atlas/journey?kind=to&from=101&to=999",
+            None,
+        )
+        .await;
+        assert_eq!(nowhere["found"], false);
+        assert_eq!(nowhere["reason"], "unknown artist");
+
+        for uri in [
+            "/api/videos/atlas/journey?kind=to&from=101",
+            "/api/videos/atlas/journey?kind=to&from=101&to=101",
+            "/api/videos/atlas/journey?kind=to&from=101&to=x",
+            "/api/videos/atlas/journey?kind=new&from=101&length=forever",
+        ] {
+            let (status, body) = call(&db, "GET", uri, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert!(body["error"].is_string(), "{uri}");
+        }
+    }
+
     #[test]
     fn best_cuts_follow_catalog_facets_once_they_exist() {
         let db = seeded_db();
@@ -1723,11 +1955,26 @@ mod tests {
             ("Elvis Presley", id_of("Elvis Presley")),
             ("Metallica", id_of("Metallica")),
         ] {
-            let request = JourneyRequest::New {
-                from: id,
-                scene: None,
+            for length in [journey::Length::Short, journey::Length::Epic] {
+                let request = JourneyRequest::New {
+                    from: id,
+                    scene: None,
+                    length,
+                };
+                run(format!("new {length:?} from {from}"), request, 3);
+            }
+        }
+        for length in [journey::Length::Short, journey::Length::Epic] {
+            let request = JourneyRequest::To {
+                from: id_of("James Blake"),
+                to: id_of("Metallica"),
+                length,
             };
-            run(format!("new from {from}"), request, 3);
+            run(
+                format!("to {length:?}: James Blake to Metallica"),
+                request,
+                3,
+            );
         }
     }
 
