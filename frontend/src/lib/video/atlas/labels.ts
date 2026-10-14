@@ -104,6 +104,8 @@ export interface LabelPlanInput {
 	pointRadius: (index: number) => number;
 	/** Artists that always get a name if it fits (selection, hover, route). */
 	pinned: ArrayLike<number>;
+	/** The selected artist: placed before any other pinned name. */
+	selected?: number;
 	/** Scene drawn as focused (its label wins). -1 for none. */
 	focusScene: number;
 	compact: boolean;
@@ -261,6 +263,7 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 
 	const total = Math.max(1, data.count);
 	const priorityOf = (i: number): number => {
+		if (i === input.selected) return 1100;
 		if (pinned.has(i)) return 1000;
 		const rankPart = (1 - data.globalRank[i] / total) * (spot ? 150 : 300);
 		const stickyPart = sticky?.has(i) ? STICKY_PRIORITY : 0;
@@ -299,7 +302,7 @@ export function planLabels(input: LabelPlanInput): PlannedLabel[] {
 			dy,
 			width,
 			height,
-			alpha: isPinned ? 1 : 0.86,
+			alpha: isPinned ? 1 : 0.95,
 			text,
 		});
 	}

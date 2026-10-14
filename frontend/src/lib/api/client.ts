@@ -2518,10 +2518,9 @@ export const api = {
 		return fetchApi<AtlasYouResponse>('/api/videos/atlas/you');
 	},
 
-	/** kind 'collab' needs `to`; kind 'new' may name a destination `scene`. */
-	getVideoAtlasJourney(params: { kind: JourneyKind; from: number; to?: number; scene?: number }): Promise<AtlasJourneyResponse> {
+	/** May name a destination `scene`. */
+	getVideoAtlasJourney(params: { kind: JourneyKind; from: number; scene?: number }): Promise<AtlasJourneyResponse> {
 		const query: Record<string, string> = { kind: params.kind, from: String(params.from) };
-		if (params.to != null) query.to = String(params.to);
 		if (params.scene != null) query.scene = String(params.scene);
 		return fetchApi<AtlasJourneyResponse>('/api/videos/atlas/journey', query);
 	},

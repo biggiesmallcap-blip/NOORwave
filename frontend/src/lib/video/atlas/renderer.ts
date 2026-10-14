@@ -62,7 +62,16 @@ const SCENE_FONT = '"Manrope", "Segoe UI", system-ui, sans-serif';
 const SCENE_TRACKING = '0.16em';
 const BODY_FONT = '"Manrope", "Segoe UI", system-ui, sans-serif';
 const MONO_FONT = '"JetBrains Mono", "Cascadia Code", monospace';
-const ARTIST_FONT_PX = 11;
+const ARTIST_FONT_PX = 12;
+/** Names are semibold, so the small ones hold up over stars and pictures. */
+const ARTIST_FONT = `600 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+/** The selected artist's name: larger, on a dark pill. */
+const SELECTED_FONT_PX = 14;
+const SELECTED_FONT = `700 ${SELECTED_FONT_PX}px ${BODY_FONT}`;
+const SELECTED_PAD = 9;
+/** Selection and collabs share the route's warm light. */
+const PICK_RING = '#ffe9c4';
+const PICK_GLOW = '255, 222, 166';
 const META_FONT_PX = 9.5;
 const PULSE_MS = 1200;
 const MAX_PULSES = 3;
@@ -290,7 +299,10 @@ export class AtlasRenderer {
 	routeIdx: Int32Array | null = null;
 	private routeFlag = new Uint8Array(0);
 	trailIdx: Int32Array | null = null;
-	/** Pinned names: selection, hover, route stops, trail. */
+	/** The selected artist's collabs: lines from `collabFrom` to each. */
+	private collabFrom = -1;
+	private collabIdx: Int32Array | null = null;
+	/** Pinned names: selection, route stops, trail, collabs. */
 	private pinned: number[] = [];
 
 	// Per-artist caches.
@@ -609,7 +621,7 @@ export class AtlasRenderer {
 			'requestIdleCallback' in window ? (cb) => window.requestIdleCallback(cb, { timeout: 500 }) : (cb) => setTimeout(cb, 30);
 		const step = () => {
 			if (this.destroyed || token !== this.warmToken || this.data !== data) return;
-			this.ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+			this.ctx.font = ARTIST_FONT;
 			const end = Math.min(order.length, at + 300);
 			for (; at < end; at++) {
 				const i = order[at];
@@ -831,6 +843,16 @@ export class AtlasRenderer {
 		this.requestDraw();
 	}
 
+	/** Draw lines from `from` to each artist it shares a video with. */
+	setCollabs(from: number, targets: number[] | null): void {
+		const next = from >= 0 && targets && targets.length ? Int32Array.from(targets) : null;
+		if (!next && !this.collabIdx) return;
+		this.collabFrom = next ? from : -1;
+		this.collabIdx = next;
+		this.refreshPinned();
+		this.requestDraw();
+	}
+
 	setTrail(indices: number[] | null): void {
 		this.trailIdx = indices && indices.length > 0 ? Int32Array.from(indices) : null;
 		this.refreshPinned();
@@ -844,6 +866,7 @@ export class AtlasRenderer {
 		if (this.selectedArtist >= 0) pins.push(this.selectedArtist);
 		if (this.routeIdx) for (const i of this.routeIdx) pins.push(i);
 		if (this.trailIdx && this.trailIdx.length) pins.push(this.trailIdx[this.trailIdx.length - 1]);
+		if (this.collabIdx) for (const i of this.collabIdx) pins.push(i);
 		this.pinned = pins;
 		this.labelsStale = true;
 	}
@@ -990,6 +1013,17 @@ export class AtlasRenderer {
 	/** Point radius in CSS px for artist i at the current zoom. */
 	pointRadius(i: number): number {
 		return this.baseR[i] * zoomGrowth(this.zoomLevel());
+	}
+
+	/** Thumbnails stand in for the dots (Picture, zoomed in). */
+	private thumbsShown(): boolean {
+		return this.look === 'picture' && !this.mini && this.zoomLevel() >= THUMB_K;
+	}
+
+	/** Radius of what is drawn for artist i: its thumbnail, else its dot. */
+	private shownRadius(i: number, growth: number, thumbs = this.thumbsShown()): number {
+		const r = this.baseR[i] * growth;
+		return thumbs && this.artOf[i] && this.data!.scene[i] >= 0 ? thumbRadius(r) : r;
 	}
 
 	screenOf(i: number, out: Point = this.scratchPt): Point {
@@ -1235,22 +1269,29 @@ export class AtlasRenderer {
 			viewport: this.viewport,
 			fitScale: this.fitScale,
 			measureArtist: (i, text) => {
+				if (i === this.selectedArtist) {
+					ctx.font = SELECTED_FONT;
+					return ctx.measureText(text).width + SELECTED_PAD * 2;
+				}
 				if (this.artistWidth[i] < 0) {
-					ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+					ctx.font = ARTIST_FONT;
 					this.artistWidth[i] = ctx.measureText(text).width;
 				}
 				return this.artistWidth[i];
 			},
 			measureScene: (s) => this.sceneBox(s),
-			// Route stops wear a ring and thumbnails are wider than their dot;
-			// names start outside either.
+			// Route stops and the selection wear a ring and thumbnails are wider
+			// than their dot; names start outside all of them.
 			pointRadius: (i) =>
-				this.routeFlag[i]
-					? Math.max(7, this.baseR[i] * growth + 5)
-					: thumbs && this.artOf[i] && data.scene[i] >= 0
-						? thumbRadius(this.baseR[i] * growth) + 3
-						: this.baseR[i] * growth,
+				i === this.selectedArtist
+					? Math.max(7, this.shownRadius(i, growth, thumbs) + 4) + 8
+					: this.routeFlag[i]
+						? Math.max(7, this.baseR[i] * growth + 5)
+						: thumbs && this.artOf[i] && data.scene[i] >= 0
+							? thumbRadius(this.baseR[i] * growth) + 3
+							: this.baseR[i] * growth,
 			pinned: this.pinned,
+			selected: this.selectedArtist,
 			focusScene: this.selectedScene,
 			compact: this.compact,
 			artistLabelHeight: ARTIST_FONT_PX + 3,
@@ -1270,7 +1311,7 @@ export class AtlasRenderer {
 		if (current < 0) return out;
 		const name = this.names.get(data.ids[current]);
 		if (name) {
-			this.ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
+			this.ctx.font = ARTIST_FONT;
 			const width = this.ctx.measureText(name).width;
 			const r = this.baseR[current] * growth;
 			const p = this.screenOf(current);
@@ -1341,6 +1382,7 @@ export class AtlasRenderer {
 
 		if (this.look === 'you') this.drawYouTrails(k, reveal);
 		this.drawTrail();
+		this.drawCollabs(reveal);
 		this.drawRoute(true);
 
 		const growth = zoomGrowth(k);
@@ -1646,6 +1688,9 @@ export class AtlasRenderer {
 		// The biggest artists first; at most what reads on screen.
 		visible.sort((a, b) => data.videos[b] - data.videos[a]);
 		if (visible.length > 160) visible.length = 160;
+		// The selected artist's picture goes on top of its neighbours'.
+		const pick = visible.indexOf(this.selectedArtist);
+		if (pick >= 0) visible.push(visible.splice(pick, 1)[0]);
 		for (const i of visible) {
 			let entry = this.thumbs.get(i);
 			if (!entry) {
@@ -1852,9 +1897,23 @@ export class AtlasRenderer {
 			ctx.fillRect(p.x - r, p.y - r, r * 2, r * 2);
 			ctx.globalCompositeOperation = 'source-over';
 		}
+		const thumbs = this.thumbsShown();
+		// Each collab wears a thin warm ring where its line lands.
+		if (this.collabIdx && !this.mini) {
+			ctx.strokeStyle = `rgba(${PICK_GLOW}, 0.8)`;
+			ctx.lineWidth = 1.25;
+			ctx.beginPath();
+			for (const i of this.collabIdx) {
+				const p = this.screenOf(i);
+				const r = Math.max(4, this.shownRadius(i, growth, thumbs) + 3);
+				ctx.moveTo(p.x + r, p.y);
+				ctx.arc(p.x, p.y, r, 0, TAU);
+			}
+			ctx.stroke();
+		}
 		if (this.hover >= 0 && this.hover !== this.selectedArtist) {
 			const p = this.screenOf(this.hover);
-			const r = this.baseR[this.hover] * growth + 3.5;
+			const r = this.shownRadius(this.hover, growth, thumbs) + 3.5;
 			ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
 			ctx.lineWidth = 1.25;
 			ctx.beginPath();
@@ -1864,39 +1923,117 @@ export class AtlasRenderer {
 		const current = this.mini && this.trailIdx && this.trailIdx.length ? this.trailIdx[this.trailIdx.length - 1] : this.selectedArtist;
 		if (current >= 0) {
 			const p = this.screenOf(current);
-			const r = this.baseR[current] * growth + 5;
-			ctx.globalCompositeOperation = 'lighter';
-			ctx.strokeStyle = 'rgba(255, 236, 200, 0.28)';
-			ctx.lineWidth = 6;
-			ctx.beginPath();
-			ctx.arc(p.x, p.y, r + 1, 0, TAU);
-			ctx.stroke();
-			ctx.globalCompositeOperation = 'source-over';
-			ctx.strokeStyle = 'rgba(255, 244, 222, 0.98)';
-			ctx.lineWidth = 1.6;
+			const R = this.shownRadius(current, growth, thumbs);
+			const r = Math.max(7, R + 4);
+			if (!this.mini) {
+				// A warm pool of light under the pick, so it reads from across the map.
+				const reach = r * 2 + 30;
+				const g = ctx.createRadialGradient(p.x, p.y, r * 0.5, p.x, p.y, reach);
+				g.addColorStop(0, `rgba(${PICK_GLOW}, 0.34)`);
+				g.addColorStop(0.4, `rgba(${PICK_GLOW}, 0.1)`);
+				g.addColorStop(1, `rgba(${PICK_GLOW}, 0)`);
+				ctx.globalCompositeOperation = 'lighter';
+				ctx.fillStyle = g;
+				ctx.fillRect(p.x - reach, p.y - reach, reach * 2, reach * 2);
+				ctx.globalCompositeOperation = 'source-over';
+			}
+			// A dark gap, a solid warm ring, and a faint outer ring.
+			ctx.strokeStyle = 'rgba(6, 8, 14, 0.85)';
+			ctx.lineWidth = 4.5;
 			ctx.beginPath();
 			ctx.arc(p.x, p.y, r, 0, TAU);
 			ctx.stroke();
+			ctx.strokeStyle = PICK_RING;
+			ctx.lineWidth = this.mini ? 1.6 : 2.25;
+			ctx.beginPath();
+			ctx.arc(p.x, p.y, r, 0, TAU);
+			ctx.stroke();
+			if (!this.mini) {
+				ctx.strokeStyle = `rgba(${PICK_GLOW}, 0.4)`;
+				ctx.lineWidth = 1;
+				ctx.beginPath();
+				ctx.arc(p.x, p.y, r + 6, 0, TAU);
+				ctx.stroke();
+			}
 		}
+	}
+
+	/** Lines from the selected artist to everyone they share a video with,
+	 *  each bowed a little so lines leaving together fan apart. */
+	private drawCollabs(reveal: number): void {
+		const list = this.collabIdx;
+		const from = this.collabFrom;
+		if (!list || from < 0 || this.mini) return;
+		const ctx = this.ctx;
+		const start = this.screenOf(from);
+		const ax = start.x;
+		const ay = start.y;
+		ctx.save();
+		ctx.globalCompositeOperation = 'lighter';
+		ctx.globalAlpha = reveal;
+		ctx.lineCap = 'round';
+		ctx.lineWidth = 1.4;
+		for (const i of list) {
+			const end = this.screenOf(i);
+			const dx = end.x - ax;
+			const dy = end.y - ay;
+			const len = Math.hypot(dx, dy);
+			if (len < 1) continue;
+			const bend = Math.min(len * 0.16, 70);
+			const mx = (ax + end.x) / 2 - (dy / len) * bend;
+			const my = (ay + end.y) / 2 + (dx / len) * bend;
+			const g = ctx.createLinearGradient(ax, ay, end.x, end.y);
+			g.addColorStop(0, `rgba(${PICK_GLOW}, 0.6)`);
+			g.addColorStop(1, `rgba(${PICK_GLOW}, 0.22)`);
+			ctx.strokeStyle = g;
+			ctx.beginPath();
+			ctx.moveTo(ax, ay);
+			ctx.quadraticCurveTo(mx, my, end.x, end.y);
+			ctx.stroke();
+		}
+		ctx.restore();
 	}
 
 	private drawArtistLabel(label: PlannedLabel, x: number, y: number, fade: number, pinned: boolean): void {
 		const ctx = this.ctx;
 		const data = this.data!;
-		ctx.globalAlpha = label.alpha * fade * (this.selectedScene >= 0 && data.scene[label.index] !== this.selectedScene ? 0.5 : 1);
-		ctx.font = `500 ${ARTIST_FONT_PX}px ${BODY_FONT}`;
-		if (pinned) {
-			const w = ctx.measureText(label.text).width;
-			const alpha = ctx.globalAlpha;
-			ctx.globalAlpha = alpha * 0.9;
-			ctx.drawImage(labelShade(), x - 18, y - 9, w + 36, ARTIST_FONT_PX + 20);
-			ctx.globalAlpha = alpha;
-		}
-		ctx.strokeStyle = STAGE.textHalo;
-		ctx.lineWidth = 2.5;
-		ctx.strokeText(label.text, x, y + 1);
-		ctx.fillStyle = pinned ? '#ffffff' : STAGE.text;
-		ctx.fillText(label.text, x, y + 1);
+		const alpha = label.alpha * fade * (this.selectedScene >= 0 && data.scene[label.index] !== this.selectedScene ? 0.55 : 1);
+		// Whole device pixels keep small text crisp.
+		const dpr = this.dpr;
+		const px = Math.round(x * dpr) / dpr;
+		const py = Math.round((y + 1) * dpr) / dpr;
+		// Every name sits on a soft dark pool, deeper under the hovered one.
+		ctx.globalAlpha = alpha * (pinned ? 0.9 : 0.6);
+		ctx.drawImage(labelShade(), px - 14, py - 8, label.width + 28, ARTIST_FONT_PX + 16);
+		ctx.globalAlpha = alpha;
+		ctx.font = ARTIST_FONT;
+		ctx.strokeStyle = STAGE.labelHalo;
+		ctx.lineWidth = 3;
+		ctx.strokeText(label.text, px, py);
+		ctx.fillStyle = pinned ? '#ffffff' : STAGE.label;
+		ctx.fillText(label.text, px, py);
+	}
+
+	/** The selected artist's name: larger, on a dark pill with a warm edge. */
+	private drawSelectedLabel(label: PlannedLabel, x: number, y: number, alpha: number): void {
+		const ctx = this.ctx;
+		const dpr = this.dpr;
+		const h = SELECTED_FONT_PX + 12;
+		const cy = Math.round((y + label.height / 2) * dpr) / dpr;
+		const left = Math.round(x * dpr) / dpr;
+		ctx.globalAlpha = alpha;
+		ctx.fillStyle = 'rgba(10, 12, 22, 0.9)';
+		ctx.strokeStyle = `rgba(${PICK_GLOW}, 0.6)`;
+		ctx.lineWidth = 1;
+		ctx.beginPath();
+		ctx.roundRect(left + 0.5, cy - h / 2 + 0.5, label.width - 1, h - 1, h / 2);
+		ctx.fill();
+		ctx.stroke();
+		ctx.font = SELECTED_FONT;
+		ctx.textBaseline = 'middle';
+		ctx.fillStyle = '#fff6e4';
+		ctx.fillText(label.text, left + SELECTED_PAD, cy + 0.5);
+		ctx.textBaseline = 'top';
 	}
 
 	/** Birth times for the new plan's names (see labelBorn). */
@@ -1947,6 +2084,7 @@ export class AtlasRenderer {
 				this.drawArtistLabel(label, x, y, reveal * (1 - (now - gone) / LABEL_FADE_MS), false);
 			}
 		}
+		let picked: PlannedLabel | null = null;
 		for (let n = 0; n < this.labels.length; n++) {
 			const label = this.labels[n];
 			const x = (label.wx - cam.cx) * cam.scale + halfW + label.dx;
@@ -1983,12 +2121,20 @@ export class AtlasRenderer {
 					ctx.fillText(box.meta, cx, my);
 				}
 				ctx.textAlign = 'start';
+			} else if (label.index === this.selectedArtist && !this.mini) {
+				// Drawn last, over its neighbours.
+				picked = label;
 			} else {
 				const pinnedLabel = label.index === this.selectedArtist || label.index === this.hover;
 				if (this.inMotion && !pinnedLabel) continue;
 				const fade = pinnedLabel ? 1 : this.labelFadeOf('artist', label.index, now);
 				this.drawArtistLabel(label, x, y, reveal * fade, pinnedLabel);
 			}
+		}
+		if (picked) {
+			const x = (picked.wx - cam.cx) * cam.scale + halfW + picked.dx;
+			const y = (picked.wy - cam.cy) * cam.scale + halfH + picked.dy;
+			this.drawSelectedLabel(picked, x, y, reveal);
 		}
 		ctx.globalAlpha = 1;
 		ctx.textBaseline = 'alphabetic';

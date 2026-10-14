@@ -1,12 +1,9 @@
 <script lang="ts">
-	// Journeys across the map. Two kinds:
-	// - Somewhere new: from where you are to a scene you have barely touched,
-	//   through artists new to you (or to a scene you click on the map).
-	// - Collab chain: to any artist you pick, every step a real video both
-	//   artists are on.
-	// First the choice, then the journey: its stops with why each is there,
-	// and Play journey, which the map then follows stop by stop.
-	import type { AtlasJourneyResponse, AtlasJourneyStop, ExploreVideo, JourneyKind } from '$lib/api/video_explore_types';
+	// Journeys across the map: from where you are to a scene you have barely
+	// touched, through artists new to you (or to a scene you click on the
+	// map). First the start, then the journey: its stops with why each is
+	// there, and Play journey, which the map then follows stop by stop.
+	import type { AtlasJourneyResponse, AtlasJourneyStop, ExploreVideo } from '$lib/api/video_explore_types';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
@@ -17,12 +14,10 @@
 		fromName,
 		picking,
 		journey,
-		kind,
 		loading,
 		error,
 		playing,
 		onnew,
-		oncollab,
 		onpickfrom,
 		onplay,
 		onagain,
@@ -32,16 +27,14 @@
 	}: {
 		/** The start, or null until one is picked. */
 		fromName: string | null;
-		/** Waiting for a click on the map: the start or the collab destination. */
-		picking: 'from' | 'to' | null;
+		/** Waiting for a click on the map for the start. */
+		picking: 'from' | null;
 		journey: AtlasJourneyResponse | null;
-		kind: JourneyKind | null;
 		loading: boolean;
 		error: string | null;
 		/** This journey is what is playing. */
 		playing: boolean;
 		onnew: () => void;
-		oncollab: () => void;
 		onpickfrom: () => void;
 		onplay: (queue: ExploreVideo[], label: string, start?: ExploreVideo) => void;
 		onagain: () => void;
@@ -88,24 +81,18 @@
 
 		<button type="button" class="choice" disabled={!fromName || picking !== null} onclick={onnew}>
 			<span class="choice-name">Somewhere new</span>
-			<span class="choice-copy">To a scene you have barely touched, through artists new to you.</span>
-		</button>
-		<button type="button" class="choice" class:waiting={picking === 'to'} disabled={!fromName || picking === 'from'} onclick={oncollab}>
-			<span class="choice-name">Collab chain</span>
-			<span class="choice-copy">
-				{picking === 'to' ? 'Now click any artist on the map (or find one in the search).' : 'To any artist you pick, every step a video both artists are on.'}
-			</span>
+			<span class="choice-copy">A playlist into a scene you have barely touched, through artists new to you.</span>
 		</button>
 		<p class="note">Or click a scene on the map to travel there.</p>
 	{:else}
-		<h2 class="title">{journey?.title ?? (kind === 'collab' ? 'Collab chain' : 'Somewhere new')}</h2>
+		<h2 class="title">{journey?.title ?? 'Somewhere new'}</h2>
 		{#if error}
 			<div class="error" role="alert">
 				<p>{error}</p>
 				<button type="button" class="link" onclick={onretry}>Retry</button>
 			</div>
 		{:else if loading}
-			<p class="note">{kind === 'collab' ? 'Following collaborations across the map...' : 'Finding a scene you have not been to...'}</p>
+			<p class="note">Finding a scene you have not been to...</p>
 			<div class="skeleton">{#each [0, 1, 2, 3] as n (n)}<span class="sk-row tall"></span>{/each}</div>
 		{:else if journey && !journey.found}
 			<p class="note">{journey.reason ? `${journey.reason[0].toUpperCase()}${journey.reason.slice(1)}.` : 'No journey found.'}</p>
@@ -202,8 +189,7 @@
 			border-color var(--motion-fast);
 	}
 
-	.choice:hover:not(:disabled),
-	.choice.waiting {
+	.choice:hover:not(:disabled) {
 		border-color: rgba(255, 230, 168, 0.45);
 		background: rgba(255, 230, 168, 0.06);
 	}

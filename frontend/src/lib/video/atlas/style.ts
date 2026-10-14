@@ -51,6 +51,9 @@ export const STAGE = {
 	textShadow: 'rgba(3, 4, 9, 0.82)',
 	/** A thin dark halo behind names, enough to read them over stars. */
 	textHalo: 'rgba(4, 5, 10, 0.55)',
+	/** Artist names: brighter, with a fuller halo, so small ones still read. */
+	label: 'rgba(242, 244, 251, 0.97)',
+	labelHalo: 'rgba(4, 5, 10, 0.88)',
 	uncharted: 'hsla(222, 12%, 66%, 0.34)',
 	route: '#ffe6a8',
 	trail: 'rgba(255, 236, 196, 0.55)',

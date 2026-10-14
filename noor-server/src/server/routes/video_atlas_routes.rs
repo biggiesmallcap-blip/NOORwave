@@ -1,6 +1,6 @@
 //! The Atlas: the whole map in one columnar payload, lazy names, artist
-//! and scene cards, probes into the crawler, routes between artists and
-//! journeys (collab chains, somewhere new).
+//! and scene cards (an artist's with their collabs), probes into the
+//! crawler, routes between artists and journeys somewhere new.
 //!
 //! Every read is local: the derived tables from services::video_intel plus
 //! the listener's light, computed per request. Only a probe reaches the
@@ -23,7 +23,7 @@ use crate::services::video_air::day;
 use crate::services::video_discovery::crawler::{self, Urgent};
 use crate::services::video_discovery::setting::{self as discovery_setting, DiscoverySetting};
 use crate::services::video_discovery::{artist_state, roots};
-use crate::services::video_intel::journey::{self, COLLAB_MAX_STEPS};
+use crate::services::video_intel::journey;
 use crate::services::video_intel::layout::MAP_SIZE;
 use crate::services::video_intel::light::{self, LightMap};
 use crate::services::video_intel::scenes::{self, MIN_PROGRAMMABLE_S, VARIOUS_ARTISTS_ID};
@@ -35,6 +35,7 @@ pub(super) type ApiError = (StatusCode, Json<Value>);
 
 const BEST_CUTS: usize = 8;
 const NEIGHBORS: usize = 12;
+const COLLABS: usize = 12;
 const SCENE_TOP_ARTISTS: usize = 12;
 const SCENE_SAMPLE: usize = 12;
 const ROUTE_MAX_HOPS: usize = 6;
@@ -124,6 +125,15 @@ struct AtlasNeighbor {
     light: u8,
 }
 
+/// Someone the artist shares a video with, and the best such video.
+#[derive(Debug, Serialize)]
+struct AtlasCollab {
+    id: i64,
+    name: String,
+    light: u8,
+    video: Option<VideoSetItem>,
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct AtlasArtistCard {
     id: i64,
@@ -138,6 +148,9 @@ pub(super) struct AtlasArtistCard {
     genres: Vec<String>,
     best: Vec<VideoSetItem>,
     neighbors: Vec<AtlasNeighbor>,
+    /// The best `COLLABS` collaborators, best video first.
+    collabs: Vec<AtlasCollab>,
+    collabs_total: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -218,12 +231,11 @@ impl AtlasJourneyResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum JourneyRequest {
-    Collab { from: i64, to: i64 },
     New { from: i64, scene: Option<i64> },
 }
 
 impl JourneyRequest {
-    /// kind=collab&from&to or kind=new&from[&scene]; Err is the 400 message.
+    /// kind=new&from[&scene]; Err is the 400 message.
     fn parse(params: &HashMap<String, String>) -> Result<Self, &'static str> {
         // Absent is None, anything but a positive integer is an error.
         let id = |name: &str| -> Result<Option<i64>, ()> {
@@ -238,17 +250,13 @@ impl JourneyRequest {
             }
         };
         let kind = params.get("kind").map(String::as_str);
-        if !matches!(kind, Some("collab" | "new")) {
-            return Err("kind must be collab or new");
+        if kind != Some("new") {
+            return Err("kind must be new");
         }
         let from = id("from")
             .ok()
             .flatten()
             .ok_or("from must be an artist id")?;
-        if kind == Some("collab") {
-            let to = id("to").ok().flatten().ok_or("to must be an artist id")?;
-            return Ok(Self::Collab { from, to });
-        }
         let scene = id("scene").map_err(|_| "scene must be a scene id")?;
         Ok(Self::New { from, scene })
     }
@@ -577,6 +585,7 @@ pub(super) fn artist_card(
             break;
         }
     }
+    let (collabs, collabs_total) = collabs(conn, artist_id, &light)?;
     Ok(Some(AtlasArtistCard {
         id: artist_id,
         name,
@@ -590,7 +599,39 @@ pub(super) fn artist_card(
         genres: serde_json::from_str(&genres).unwrap_or_default(),
         best: best_videos(conn, artist_id, BEST_CUTS)?,
         neighbors,
+        collabs,
+        collabs_total,
     }))
+}
+
+/// Everyone the artist shares a video with (best video first, at most
+/// `COLLABS`) and how many there are in all.
+fn collabs(
+    conn: &Connection,
+    artist_id: i64,
+    light: &LightMap,
+) -> anyhow::Result<(Vec<AtlasCollab>, usize)> {
+    let all = journey::cached_collab(conn)?.collaborators(artist_id);
+    if all.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    let facts = journey::cached_facts(conn)?;
+    let top = &all[..all.len().min(COLLABS)];
+    let ids: Vec<i64> = top.iter().map(|(_, link)| link.video_id).collect();
+    let videos = day::catalog_videos(conn, &ids)?;
+    let mut out = Vec::with_capacity(top.len());
+    for (id, link) in top {
+        let name = artist_name(conn, *id)?.unwrap_or_default();
+        out.push(AtlasCollab {
+            id: *id,
+            light: light.light(*id, facts.charted(*id)),
+            video: videos
+                .get(&link.video_id)
+                .map(|entry| day::item(entry, &format!("With {name}"))),
+            name,
+        });
+    }
+    Ok((out, all.len()))
 }
 
 pub(super) fn scene_card(
@@ -706,98 +747,8 @@ pub(super) fn journey(
     request: JourneyRequest,
 ) -> anyhow::Result<AtlasJourneyResponse> {
     match request {
-        JourneyRequest::Collab { from, to } => collab_journey(conn, from, to),
         JourneyRequest::New { from, scene } => new_journey(conn, from, scene),
     }
-}
-
-/// Every step a video both artists are on. Stop 0 plays the start's best
-/// video (never one of the chain's links), each later stop the link video
-/// from the stop before.
-fn collab_journey(conn: &Connection, from: i64, to: i64) -> anyhow::Result<AtlasJourneyResponse> {
-    const KIND: &str = "collab";
-    let (Some(from_name), Some(to_name)) = (artist_name(conn, from)?, artist_name(conn, to)?)
-    else {
-        return Ok(AtlasJourneyResponse::lost(
-            KIND,
-            String::new(),
-            "unknown artist",
-        ));
-    };
-    let title = format!("{from_name} to {to_name}");
-    if from == to {
-        return Ok(AtlasJourneyResponse::lost(
-            KIND,
-            title,
-            "start and end are the same artist",
-        ));
-    }
-    let collab = journey::cached_collab(conn)?;
-    let facts = journey::cached_facts(conn)?;
-    // Stops in between stay on the map, so the camera can follow them.
-    let Some(chain) = collab.chain(from, to, COLLAB_MAX_STEPS, |id| facts.on_map(id)) else {
-        return Ok(AtlasJourneyResponse::lost(
-            KIND,
-            title,
-            format!("no collab chain within {COLLAB_MAX_STEPS} steps"),
-        ));
-    };
-    let links: HashSet<i64> = chain
-        .iter()
-        .filter_map(|(_, link)| link.map(|link| link.video_id))
-        .collect();
-    let opener = journey::pick_video(
-        &journey::programmable_videos(conn, from)?,
-        &HashSet::new(),
-        &links,
-    );
-    let ids: Vec<i64> = links.iter().copied().chain(opener).collect();
-    let videos = day::catalog_videos(conn, &ids)?;
-    let light = light_map(conn)?;
-    let names: Vec<String> = chain
-        .iter()
-        .map(|(id, _)| Ok(artist_name(conn, *id)?.unwrap_or_default()))
-        .collect::<anyhow::Result<_>>()?;
-    let mut stops = Vec::with_capacity(chain.len());
-    for (at, (artist_id, link)) in chain.iter().enumerate() {
-        let (video_id, why) = match link {
-            None => (opener, format!("Start: {}", names[at])),
-            Some(link) => {
-                // The link video's own artist leads; the other end is featured.
-                let (main, featured) = if link.main == *artist_id {
-                    (at, at - 1)
-                } else {
-                    (at - 1, at)
-                };
-                let main_name = videos
-                    .get(&link.video_id)
-                    .and_then(|entry| entry.video.artist_name.clone())
-                    .filter(|name| !name.trim().is_empty())
-                    .unwrap_or_else(|| names[main].clone());
-                (
-                    Some(link.video_id),
-                    format!("{main_name} with {}", names[featured]),
-                )
-            }
-        };
-        stops.push(JourneyStop {
-            artist_id: *artist_id,
-            name: names[at].clone(),
-            light: light.light(*artist_id, facts.charted(*artist_id)),
-            video: video_id
-                .and_then(|id| videos.get(&id))
-                .map(|entry| day::item(entry, &why)),
-            why,
-        });
-    }
-    Ok(AtlasJourneyResponse {
-        found: true,
-        kind: KIND,
-        title,
-        destination: None,
-        stops,
-        reason: None,
-    })
 }
 
 /// From `from` to a scene the listener has barely seen (or `scene`),
@@ -1470,15 +1421,6 @@ mod tests {
             .collect()
     }
 
-    fn video_ids(journey: &Value) -> Vec<i64> {
-        journey["stops"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| s["video"]["tidal_id"].as_i64().unwrap())
-            .collect()
-    }
-
     /// (main artist, featured artists) of a catalog video.
     fn credits(db: &Database, video: i64) -> (i64, Vec<i64>) {
         db.with_conn(|conn| {
@@ -1494,103 +1436,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collab_journeys_step_through_videos_both_artists_are_on() {
+    async fn artist_cards_list_collabs_best_video_first() {
         let db = collab_db();
-        let (status, trip) = call(
-            &db,
-            "GET",
-            "/api/videos/atlas/journey?kind=collab&from=11&to=13",
-            None,
-        )
-        .await;
+        let (status, card) = call(&db, "GET", "/api/videos/atlas/artists/11", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(trip["found"], true);
-        assert_eq!(trip["kind"], "collab");
-        assert_eq!(trip["title"], "Artist 11 to Artist 13");
-        assert_eq!(trip["destination"], Value::Null);
-        assert_eq!(trip["reason"], Value::Null);
-        // Fewest steps (not the Last.fm edge, not the longer popular line),
-        // the popular link on ties, never through 15 off the map.
-        assert_eq!(stop_ids(&trip), vec![11, 14, 13]);
-        let videos = video_ids(&trip);
-        assert_eq!(
-            videos,
-            vec![1104, 1102, 1302],
-            "the start never replays a link"
-        );
-        let stops = trip["stops"].as_array().unwrap();
-        for pair in stops.windows(2) {
-            let (a, b) = (
-                pair[0]["artist_id"].as_i64().unwrap(),
-                pair[1]["artist_id"].as_i64().unwrap(),
-            );
-            let (main, featured) = credits(&db, pair[1]["video"]["tidal_id"].as_i64().unwrap());
-            assert!(
-                (main == a && featured.contains(&b)) || (main == b && featured.contains(&a)),
-                "{a} and {b} are both on the link"
-            );
+        assert_eq!(card["collabs_total"], 4);
+        let collabs = card["collabs"].as_array().unwrap();
+        let ids: Vec<i64> = collabs.iter().map(|c| c["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![14, 15, 21, 12], "most popular shared video first");
+        let videos: Vec<i64> = collabs
+            .iter()
+            .map(|c| c["video"]["tidal_id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(videos, vec![1102, 1104, 1103, 1101]);
+        for collab in collabs {
+            let (main, featured) = credits(&db, collab["video"]["tidal_id"].as_i64().unwrap());
+            let other = collab["id"].as_i64().unwrap();
+            assert!(main == 11 && featured.contains(&other), "both are on it");
         }
-        let why: Vec<&str> = stops.iter().map(|s| s["why"].as_str().unwrap()).collect();
-        assert_eq!(
-            why,
-            vec![
-                "Start: Artist 11",
-                "Artist 11 with Artist 14",
-                "Artist 13 with Artist 14"
-            ]
-        );
-        assert_eq!(stops[1]["video"]["why"], "Artist 11 with Artist 14");
-        let lights: Vec<i64> = stops.iter().map(|s| s["light"].as_i64().unwrap()).collect();
-        assert_eq!(lights, vec![3, 1, 2], "watched, charted, next to watched");
+        assert_eq!(collabs[0]["name"], "Artist 14");
+        assert_eq!(collabs[0]["video"]["why"], "With Artist 14");
 
-        // A video by 51 features 52 and 53; the chain plays it once.
-        let (_, hub) = call(
-            &db,
-            "GET",
-            "/api/videos/atlas/journey?kind=collab&from=52&to=53",
-            None,
-        )
-        .await;
-        assert_eq!(stop_ids(&hub), vec![52, 51, 53]);
-        assert_eq!(video_ids(&hub), vec![5200, 5101, 5102]);
-    }
-
-    #[tokio::test]
-    async fn collab_journeys_stop_at_eight_steps_and_unknown_artists() {
-        let db = collab_db();
-        let (_, eight) = call(
-            &db,
-            "GET",
-            "/api/videos/atlas/journey?kind=collab&from=31&to=39",
-            None,
-        )
-        .await;
-        assert_eq!(eight["found"], true);
-        assert_eq!(stop_ids(&eight), (31..=39).collect::<Vec<i64>>());
-        let (status, nine) = call(
-            &db,
-            "GET",
-            "/api/videos/atlas/journey?kind=collab&from=31&to=40",
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            nine,
-            json!({
-                "found": false, "kind": "collab", "title": "Artist 31 to Artist 40",
-                "destination": null, "stops": [], "reason": "no collab chain within 8 steps",
-            })
-        );
-        let (_, unknown) = call(
-            &db,
-            "GET",
-            "/api/videos/atlas/journey?kind=collab&from=11&to=999",
-            None,
-        )
-        .await;
-        assert_eq!(unknown["found"], false);
-        assert_eq!(unknown["reason"], "unknown artist");
+        // A video by 51 features 52 and 53: each is a collab of 51 only.
+        let (_, hub) = call(&db, "GET", "/api/videos/atlas/artists/52", None).await;
+        assert_eq!(hub["collabs_total"], 1);
+        assert_eq!(hub["collabs"][0]["id"], 51);
+        let (_, twice) = call(&db, "GET", "/api/videos/atlas/artists/12", None).await;
+        assert_eq!(twice["collabs_total"], 2);
     }
 
     /// Scenes for somewhere new, every artist on the map with programmable
@@ -1809,8 +1681,7 @@ mod tests {
             "/api/videos/atlas/journey?kind=new",
             "/api/videos/atlas/journey?kind=new&from=abc",
             "/api/videos/atlas/journey?kind=new&from=101&scene=x",
-            "/api/videos/atlas/journey?kind=collab&from=101",
-            "/api/videos/atlas/journey?kind=collab&from=0&to=101",
+            "/api/videos/atlas/journey?kind=collab&from=101&to=102",
         ] {
             let (status, body) = call(&db, "GET", uri, None).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
@@ -1903,9 +1774,6 @@ mod tests {
         journey::cached_facts(&conn).unwrap();
         eprintln!("map facts: {} ms", started.elapsed().as_millis());
         let started = std::time::Instant::now();
-        journey::cached_collab(&conn).unwrap();
-        eprintln!("collab graph: {} ms", started.elapsed().as_millis());
-        let started = std::time::Instant::now();
         light_map(&conn).unwrap();
         eprintln!("light: {} ms", started.elapsed().as_millis());
         let id_of = |name: &str| -> i64 {
@@ -1946,18 +1814,6 @@ mod tests {
                 );
             }
         };
-        for (from, to) in [
-            ("Drake", "Calvin Harris"),
-            ("Rihanna", "Taylor Swift"),
-            ("Drake", "Miles Davis"),
-            ("Metallica", "Bad Bunny"),
-        ] {
-            let request = JourneyRequest::Collab {
-                from: id_of(from),
-                to: id_of(to),
-            };
-            run(format!("collab {from} -> {to}"), request, 3);
-        }
         // JAY-Z's TIDAL name is not plain ASCII; 7804 is his id.
         for (from, id) in [
             ("James Blake", id_of("James Blake")),

@@ -110,6 +110,17 @@ export interface AtlasArtistCard {
 	/** Best cuts first, up to 8. */
 	best: ExploreVideo[];
 	neighbors: AtlasNeighbor[];
+	/** Everyone they share a video with, best video first, up to 12. */
+	collabs: AtlasCollab[];
+	collabs_total: number;
+}
+
+/** Someone an artist shares a video with, and the best such video. */
+export interface AtlasCollab {
+	id: number;
+	name: string;
+	light: Light;
+	video: ExploreVideo | null;
 }
 
 export interface AtlasSceneCard {
@@ -159,7 +170,7 @@ export interface AtlasYouResponse {
 	frontier: { artist_id: number; score: number; via: number }[];
 }
 
-export type JourneyKind = 'collab' | 'new';
+export type JourneyKind = 'new';
 
 export interface AtlasJourneyStop {
 	artist_id: number;
@@ -169,9 +180,8 @@ export interface AtlasJourneyStop {
 	why: string;
 }
 
-/** A journey across the map: a collab chain (every step a video both
- *  artists are on) or somewhere new (to a scene you have barely touched,
- *  through artists new to you). */
+/** A journey across the map: somewhere new (to a scene you have barely
+ *  touched, through artists new to you). */
 export interface AtlasJourneyResponse {
 	found: boolean;
 	kind: JourneyKind;

@@ -4,7 +4,7 @@
 	// colours. Interactions: drag to pan (with a fling), wheel and pinch to zoom
 	// around the pointer, hover for a name, click a scene or an artist for its
 	// card, the section search field to fly to an artist, Journeys to travel
-	// across the map (somewhere new, or a collab chain), and the two looks:
+	// across the map (somewhere new), and the two looks:
 	// Picture (artists in the colours of their own videos) and You (your
 	// footprints and the frontier next to them). Keys: arrows pan, +/- zoom,
 	// F fits, J opens Journeys, Esc closes.
@@ -86,15 +86,14 @@
 	let artistError = $state<string | null>(null);
 	let probe = $state({ busy: false, message: null as string | null, sent: false });
 
-	// Journeys: where from, which kind, the answer, and whether a map click
-	// is being waited for (the start, or a collab chain's destination).
+	// Journeys: where from, the answer, and whether a map click is being
+	// waited for (the start).
 	let journeyFrom = $state(-1);
 	let journeyKind = $state<JourneyKind | null>(null);
-	let journeyTo = $state(-1);
 	let journey = $state<AtlasJourneyResponse | null>(null);
 	let journeyLoading = $state(false);
 	let journeyError = $state<string | null>(null);
-	let picking = $state<'from' | 'to' | null>(null);
+	let picking = $state<'from' | null>(null);
 	/** The journey playing, followed on the map while its label is what
 	 *  the session says is playing. */
 	let following = $state<{ label: string; ids: number[] } | null>(null);
@@ -267,7 +266,6 @@
 		card = { kind: 'journey' };
 		journeyFrom = from;
 		journeyKind = null;
-		journeyTo = -1;
 		journey = null;
 		journeyError = null;
 		journeyLoading = false;
@@ -299,12 +297,6 @@
 			journeyFrom = index;
 			picking = null;
 			renderer?.setSelection(index, -1);
-			return;
-		}
-		if (picking === 'to' && index !== journeyFrom) {
-			journeyTo = index;
-			picking = null;
-			void runJourney('collab');
 		}
 	}
 
@@ -323,7 +315,6 @@
 			const result = await api.getVideoAtlasJourney({
 				kind,
 				from: data.ids[journeyFrom],
-				to: kind === 'collab' && journeyTo >= 0 ? data.ids[journeyTo] : undefined,
 				scene: scene != null ? data.scenes[scene].id : undefined,
 			});
 			if (seq !== journeySeq) return;
@@ -348,6 +339,16 @@
 		renderer?.setTrail(null);
 		void playAtlasQueue(start ?? queue[0], queue, label);
 	}
+
+	// The open artist's collabs, drawn from them across the map.
+	$effect(() => {
+		const index = card?.kind === 'artist' ? card.index : -1;
+		const open = artistCard;
+		if (!ready || !renderer) return;
+		const collabs = index >= 0 && open && open.id === data.ids[index] ? open.collabs : [];
+		const targets = collabs.map((collab) => data.indexById.get(collab.id) ?? -1).filter((i) => i >= 0);
+		renderer.setCollabs(index, targets);
+	});
 
 	// While a journey plays, the map follows it: the camera goes to each
 	// stop's artist as its video starts and the trail lights up behind it.
@@ -512,7 +513,7 @@
 				y,
 				title: nameOf(i) ?? 'Unnamed artist',
 				meta: `${formatCount(data.videos[i])} ${data.videos[i] === 1 ? 'video' : 'videos'} in ${scene}`,
-				hint: picking === 'from' ? 'Click to start from here' : picking === 'to' ? 'Click to travel here' : lookHint(i, light),
+				hint: picking === 'from' ? 'Click to start from here' : lookHint(i, light),
 			};
 			if (!nameOf(i)) {
 				// Names may be partial: learn this one after a short dwell.
@@ -889,7 +890,6 @@
 	let selectedScene = $derived(card?.kind === 'scene' ? data.scenes[card.index] : null);
 	let pickBanner = $derived.by(() => {
 		if (picking === 'from') return 'Journeys: click the artist to start from';
-		if (picking === 'to') return `Collab chain from ${nameOf(journeyFrom) ?? 'this artist'}: click where to go`;
 		return null;
 	});
 	let journeyPlaying = $derived(following !== null && journey !== null && $videoSession.sourceLabel === following.label);
@@ -1090,7 +1090,10 @@
 							onretry={() => void loadArtist(selectedIndex)}
 							onscene={s >= 0 ? () => selectScene(s) : null}
 							onneighbor={selectArtistById}
-							onroute={() => openJourneys(selectedIndex)}
+							onjourney={() => {
+								openJourneys(selectedIndex);
+								void runJourney('new');
+							}}
 							onprobe={() => void sendProbe()}
 						/>
 					{:else if card.kind === 'journey'}
@@ -1098,12 +1101,10 @@
 							fromName={journeyFrom >= 0 ? (nameOf(journeyFrom) ?? 'This artist') : null}
 							{picking}
 							{journey}
-							kind={journeyKind}
 							loading={journeyLoading}
 							error={journeyError}
 							playing={journeyPlaying}
 							onnew={() => void runJourney('new')}
-							oncollab={() => (picking = picking === 'to' ? null : 'to')}
 							onpickfrom={() => (picking = 'from')}
 							onplay={playJourney}
 							onagain={() => openJourneys(journeyFrom)}

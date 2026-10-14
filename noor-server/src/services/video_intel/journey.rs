@@ -1,8 +1,7 @@
 //! Journeys across the Atlas (GET /api/videos/atlas/journey).
 //!
-//! - Collab chain: from one artist to another where every step is a real
-//!   video both artists are on (a video by A that features B, or the
-//!   reverse). Fewest steps, ties to the more popular link videos.
+//! - Collabs: everyone an artist shares a video with (a video by A that
+//!   features B, or the reverse), shown on the artist card and the map.
 //! - Somewhere new: from where the listener is to a scene they have barely
 //!   seen, over the related-artist graph, preferring artists they have not
 //!   watched, ending at one of the destination's top artists.
@@ -23,8 +22,6 @@ use super::archive;
 use super::light::{self, LightMap};
 use super::scenes::{self, ArtistGraph, EDGE_SOURCES, MIN_PROGRAMMABLE_S, VARIOUS_ARTISTS_ID};
 
-/// A collab chain takes at most this many steps.
-pub const COLLAB_MAX_STEPS: usize = 8;
 /// Somewhere new runs four to eight stops, the start included.
 pub const NEW_MIN_STOPS: usize = 4;
 pub const NEW_MAX_STOPS: usize = 8;
@@ -39,10 +36,7 @@ const NEW_HOP_TOLL: f64 = 0.15;
 /// or in the library or next to it (warm).
 const LIT_TOLL: f64 = 1.0;
 const WARM_TOLL: f64 = 0.3;
-/// Link videos kept per pair: the best, and a second so a chain through a
-/// video's main artist never plays that video twice.
-const LINKS_PER_PAIR: usize = 2;
-/// A programmable link outweighs any popularity when chains tie on steps.
+/// A programmable link outweighs any popularity.
 const PROGRAMMABLE_BONUS: i64 = 100;
 
 // --------------------------------------------------------------- caches
@@ -114,8 +108,7 @@ impl Link {
             .then(other.video_id.cmp(&self.video_id))
     }
 
-    /// What a chain gains by taking this link; ties on steps go to the
-    /// larger sum.
+    /// How much a link is worth showing: programmable first, then popular.
     fn value(&self) -> i64 {
         self.popularity.clamp(0, 100)
             + if self.programmable {
@@ -137,10 +130,6 @@ pub struct CollabVideo {
     pub popularity: i64,
 }
 
-/// One stop of a chain: the artist and the link from the stop before
-/// (None for the start).
-pub type CollabStop = (i64, Option<Link>);
-
 /// Undirected graph of artists who share a video: the main artist linked to
 /// each featured artist, nodes by ascending TIDAL id, CSR rows.
 #[derive(Debug, Default)]
@@ -150,8 +139,8 @@ pub struct CollabGraph {
     targets: Vec<u32>,
     /// Per CSR entry, its pair's index into `links`.
     pairs: Vec<u32>,
-    /// Per pair, its best links (at most `LINKS_PER_PAIR`), best first.
-    links: Vec<Vec<Link>>,
+    /// Per pair, its best link.
+    links: Vec<Link>,
 }
 
 impl CollabGraph {
@@ -207,9 +196,7 @@ impl CollabGraph {
                 cursor[from] += 1;
             }
             list.sort_by(Link::order);
-            list.dedup_by_key(|link| link.video_id);
-            list.truncate(LINKS_PER_PAIR);
-            links.push(list);
+            links.push(list[0]);
         }
         Self {
             ids,
@@ -269,177 +256,22 @@ impl CollabGraph {
         self.ids.binary_search(&id).ok()
     }
 
-    /// The chain from `from` to `to` with the fewest steps (at most
-    /// `max_steps`), ties to the larger sum of link values, through artists
-    /// `allowed` accepts (the endpoints always pass). No artist and no video
-    /// appears twice: a video links its main artist to each featured one, so
-    /// it could only repeat on the two steps through its main artist, and the
-    /// search runs over (arriving pair, link) states to rule that out.
-    ///
-    /// Hops to the goal (a BFS that ignores the video rule) bound the search
-    /// to the shortest corridor; a longer bound is tried only when the video
-    /// rule blocks every chain that short.
-    pub fn chain(
-        &self,
-        from: i64,
-        to: i64,
-        max_steps: usize,
-        allowed: impl Fn(i64) -> bool,
-    ) -> Option<Vec<CollabStop>> {
-        let start = self.index_of(from)?;
-        let goal = self.index_of(to)?;
-        if start == goal {
-            return None;
-        }
-        let max_steps = max_steps.min(u8::MAX as usize - 1);
-        let mut to_goal = vec![u8::MAX; self.ids.len()];
-        to_goal[goal] = 0;
-        let mut frontier = vec![goal];
-        for depth in 1..=max_steps {
-            let mut next = Vec::new();
-            for node in frontier {
-                for &target in &self.targets[self.offsets[node]..self.offsets[node + 1]] {
-                    let target = target as usize;
-                    if to_goal[target] != u8::MAX {
-                        continue;
-                    }
-                    // The start ends a chain; it is never passed through.
-                    if target == start || allowed(self.ids[target]) {
-                        to_goal[target] = depth as u8;
-                        if target != start {
-                            next.push(target);
-                        }
-                    }
-                }
-            }
-            if next.is_empty() {
-                break;
-            }
-            frontier = next;
-        }
-        let shortest = to_goal[start] as usize;
-        (shortest..=max_steps).find_map(|bound| self.search(start, goal, bound, &to_goal, &allowed))
-    }
-
-    /// Dijkstra over (arriving pair, link) states on (steps, -value), never
-    /// leaving the corridor where steps so far plus hops to the goal fit in
-    /// `bound`.
-    fn search(
-        &self,
-        start: usize,
-        goal: usize,
-        bound: usize,
-        to_goal: &[u8],
-        allowed: &impl Fn(i64) -> bool,
-    ) -> Option<Vec<CollabStop>> {
-        #[derive(PartialEq, Eq)]
-        struct Open {
-            steps: u32,
-            value: i64,
-            state: usize,
-        }
-        impl Ord for Open {
-            fn cmp(&self, other: &Self) -> Ordering {
-                other
-                    .steps
-                    .cmp(&self.steps)
-                    .then(self.value.cmp(&other.value))
-                    .then(other.state.cmp(&self.state))
-            }
-        }
-        impl PartialOrd for Open {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-        const NONE: usize = usize::MAX;
-        let better = |a: (u32, i64), b: (u32, i64)| a.0 < b.0 || (a.0 == b.0 && a.1 > b.1);
-
-        // State = CSR entry * LINKS_PER_PAIR + link slot: arrived over that
-        // entry's pair with that link.
-        let states = self.targets.len() * LINKS_PER_PAIR;
-        let mut best: Vec<(u32, i64)> = vec![(u32::MAX, i64::MIN); states];
-        let mut came: Vec<usize> = vec![NONE; states];
-        let mut heap = BinaryHeap::new();
-        let node_of = |state: usize| self.targets[state / LINKS_PER_PAIR] as usize;
-        let link_of = |state: usize| {
-            self.links[self.pairs[state / LINKS_PER_PAIR] as usize][state % LINKS_PER_PAIR]
+    /// Everyone `id` shares a video with, each with the pair's best link,
+    /// best link first (programmable, then popular), ties by id.
+    pub fn collaborators(&self, id: i64) -> Vec<(i64, Link)> {
+        let Some(node) = self.index_of(id) else {
+            return Vec::new();
         };
-        // Whether `node` is already a stop on the way to `state`.
-        let on_path = |came: &[usize], mut state: usize, node: usize| {
-            while state != NONE {
-                if node_of(state) == node {
-                    return true;
-                }
-                state = came[state];
-            }
-            node == start
-        };
-        let expand = |node: usize,
-                      arrived: usize,
-                      cost: (u32, i64),
-                      best: &mut Vec<(u32, i64)>,
-                      came: &mut Vec<usize>,
-                      heap: &mut BinaryHeap<Open>| {
-            let incoming = (arrived != NONE).then(|| link_of(arrived).video_id);
-            for entry in self.offsets[node]..self.offsets[node + 1] {
-                let next = self.targets[entry] as usize;
-                let left = to_goal[next];
-                if left == u8::MAX
-                    || cost.0 as usize + 1 + left as usize > bound
-                    || (next != goal && !allowed(self.ids[next]))
-                    || (arrived == NONE && next == start)
-                    || (arrived != NONE && on_path(came, arrived, next))
-                {
-                    continue;
-                }
-                let pair = &self.links[self.pairs[entry] as usize];
-                for (slot, link) in pair.iter().enumerate() {
-                    if incoming == Some(link.video_id) {
-                        continue;
-                    }
-                    let state = entry * LINKS_PER_PAIR + slot;
-                    let total = (cost.0 + 1, cost.1 + link.value());
-                    if better(total, best[state]) {
-                        best[state] = total;
-                        came[state] = arrived;
-                        heap.push(Open {
-                            steps: total.0,
-                            value: total.1,
-                            state,
-                        });
-                    }
-                }
-            }
-        };
-        expand(start, NONE, (0, 0), &mut best, &mut came, &mut heap);
-        while let Some(Open {
-            steps,
-            value,
-            state,
-        }) = heap.pop()
-        {
-            if (steps, value) != best[state] {
-                continue;
-            }
-            let node = node_of(state);
-            if node == goal {
-                let mut path = Vec::with_capacity(steps as usize + 1);
-                let mut at = state;
-                while at != NONE {
-                    path.push((self.ids[node_of(at)], Some(link_of(at))));
-                    at = came[at];
-                }
-                path.push((self.ids[start], None));
-                path.reverse();
-                return Some(path);
-            }
-            if steps as usize >= bound {
-                continue;
-            }
-            expand(node, state, (steps, value), &mut best, &mut came, &mut heap);
-        }
-        None
+        let mut out: Vec<(i64, Link)> = (self.offsets[node]..self.offsets[node + 1])
+            .map(|entry| {
+                (
+                    self.ids[self.targets[entry] as usize],
+                    self.links[self.pairs[entry] as usize],
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.value().cmp(&a.1.value()).then(a.0.cmp(&b.0)));
+        out
     }
 }
 
@@ -525,10 +357,6 @@ impl MapFacts {
             graph,
             &scenes::load_popularity(conn)?,
         ))
-    }
-
-    pub fn on_map(&self, id: i64) -> bool {
-        self.artists.contains_key(&id)
     }
 
     pub fn charted(&self, id: i64) -> bool {
@@ -914,10 +742,6 @@ mod tests {
         }
     }
 
-    fn ids(path: &[CollabStop]) -> Vec<i64> {
-        path.iter().map(|(id, _)| *id).collect()
-    }
-
     #[test]
     fn pairs_keep_their_best_links_programmable_and_official_first() {
         let mut clip = video(1, 10, &[20], 90);
@@ -934,49 +758,29 @@ mod tests {
             vec![10, 20],
             "various artists and self links dropped"
         );
-        let links: Vec<i64> = graph.links[0].iter().map(|l| l.video_id).collect();
-        assert_eq!(links, vec![3, 2], "official beats popular, clips fall off");
+        assert_eq!(
+            graph.links[0].video_id, 3,
+            "official beats popular, clips fall off"
+        );
     }
 
     #[test]
-    fn chains_take_the_fewest_steps_then_the_popular_links() {
+    fn collaborators_come_best_link_first() {
+        let mut clip = video(4, 1, &[5], 99);
+        clip.programmable = false;
         let graph = CollabGraph::from_videos(&[
-            video(1, 1, &[2], 1),
-            video(2, 3, &[2], 1),
-            video(3, 1, &[4], 50),
-            video(4, 4, &[3], 50),
-            video(5, 1, &[5], 99),
-            video(6, 5, &[6], 99),
-            video(7, 6, &[3], 99),
+            video(1, 1, &[2], 10),
+            video(2, 3, &[1], 60),
+            video(3, 1, &[2, 4], 60),
+            clip,
         ]);
-        let path = graph.chain(1, 3, 8, |_| true).unwrap();
-        assert_eq!(ids(&path), vec![1, 4, 3]);
-        assert_eq!(path[1].1.unwrap().video_id, 3);
-        assert_eq!(path[2].1.unwrap().video_id, 4);
-        let around = graph.chain(1, 3, 8, |id| id != 4 && id != 2).unwrap();
-        assert_eq!(ids(&around), vec![1, 5, 6, 3]);
-        assert!(graph.chain(1, 3, 1, |_| true).is_none());
-        assert!(graph.chain(1, 99, 8, |_| true).is_none());
-    }
-
-    #[test]
-    fn a_chain_never_plays_a_video_twice_through_its_main_artist() {
-        let graph =
-            CollabGraph::from_videos(&[video(1, 51, &[52, 53], 80), video(2, 51, &[53], 10)]);
-        let path = graph.chain(52, 53, 8, |_| true).unwrap();
-        assert_eq!(ids(&path), vec![52, 51, 53]);
-        assert_eq!(path[1].1.unwrap().video_id, 1);
-        assert_eq!(path[2].1.unwrap().video_id, 2);
-        let only = CollabGraph::from_videos(&[video(1, 51, &[52, 53], 80)]);
-        assert!(only.chain(52, 53, 8, |_| true).is_none());
-    }
-
-    #[test]
-    fn chains_stop_at_the_step_cap() {
-        let videos: Vec<CollabVideo> = (0..9).map(|i| video(i, 100 + i, &[101 + i], 1)).collect();
-        let graph = CollabGraph::from_videos(&videos);
-        assert_eq!(graph.chain(100, 108, 8, |_| true).unwrap().len(), 9);
-        assert!(graph.chain(100, 109, 8, |_| true).is_none());
+        let ids: Vec<(i64, i64)> = graph
+            .collaborators(1)
+            .into_iter()
+            .map(|(id, link)| (id, link.video_id))
+            .collect();
+        assert_eq!(ids, vec![(2, 3), (3, 2), (4, 3), (5, 4)]);
+        assert!(graph.collaborators(99).is_empty());
     }
 
     #[test]

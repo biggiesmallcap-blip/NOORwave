@@ -47,6 +47,8 @@ function card(id: number, extra: Partial<AtlasArtistCard> = {}): AtlasArtistCard
 		genres: [],
 		best: [video(id * 100, id)],
 		neighbors: [],
+		collabs: [],
+		collabs_total: 0,
 		...extra,
 	};
 }

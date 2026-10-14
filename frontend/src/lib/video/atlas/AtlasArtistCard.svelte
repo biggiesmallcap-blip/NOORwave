@@ -1,7 +1,9 @@
 <script lang="ts">
 	// An artist on the Atlas: where they sit, how lit they are for you, their
-	// best cuts (playable as a queue), radio, the neighbours you can fly to, and
-	// for uncharted artists a probe that asks the crawler to chart them next.
+	// best cuts (playable as a queue), radio, a journey that starts here, the
+	// artists they share videos with (drawn on the map too), the neighbours
+	// you can fly to, and for uncharted artists a probe that asks the crawler
+	// to chart them next.
 	import type { AtlasArtistCard, ExploreVideo, Light } from '$lib/api/video_explore_types';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
@@ -25,7 +27,7 @@
 		onretry,
 		onscene,
 		onneighbor,
-		onroute,
+		onjourney,
 		onprobe,
 	}: {
 		id: number;
@@ -43,7 +45,8 @@
 		onretry: () => void;
 		onscene: (() => void) | null;
 		onneighbor: (id: number) => void;
-		onroute: () => void;
+		/** Start a journey somewhere new from this artist. */
+		onjourney: () => void;
 		onprobe: () => void;
 	} = $props();
 
@@ -51,6 +54,8 @@
 	let effectiveLight = $derived((card?.light ?? light) as Light);
 	let uncharted = $derived(card ? !card.charted : hue === null);
 	let best = $derived(card?.best ?? []);
+	let collabs = $derived(card?.collabs ?? []);
+	let collabQueue = $derived(collabs.flatMap((collab) => (collab.video ? [collab.video] : [])));
 
 	function artistMenu(event: MouseEvent, artist: { id: number; name: string }) {
 		openContextMenu(event, buildArtistMenu({ tidal_id: artist.id, name: artist.name }), artist.name);
@@ -62,6 +67,10 @@
 
 	function playFrom(video: ExploreVideo) {
 		void playAtlasQueue(video, best, `${displayName}: best cuts`);
+	}
+
+	function playCollab(video: ExploreVideo) {
+		void playAtlasQueue(video, collabQueue, `${displayName}: collabs`);
 	}
 </script>
 
@@ -104,8 +113,15 @@
 			Play best cuts
 		</button>
 		<button type="button" class="btn stage-secondary" disabled={best.length === 0} onclick={() => best[0] && void playAtlasRadio(best[0], displayName)}>Radio</button>
-		<button type="button" class="btn stage-ghost" onclick={onroute} title="Start a journey from this artist (J)">Journey from here</button>
 	</div>
+
+	<button type="button" class="journey" onclick={onjourney} title="Journey somewhere new (J)">
+		<span class="journey-glyph" aria-hidden="true"></span>
+		<span class="journey-text">
+			<span class="journey-name">Journey somewhere new</span>
+			<span class="journey-copy">A playlist into a scene new to you</span>
+		</span>
+	</button>
 
 	{#if uncharted}
 		<div class="probe">
@@ -147,6 +163,33 @@
 			</section>
 		{:else}
 			<p class="note">No playable cuts in the catalog yet.</p>
+		{/if}
+		{#if collabs.length > 0}
+			<section class="group" aria-label="Collabs">
+				<h3 class="label">Collabs{#if card.collabs_total > collabs.length}<span class="count">{card.collabs_total}</span>{/if}</h3>
+				<ul class="rows">
+					{#each collabs as collab (collab.id)}
+						<li>
+							{#if collab.video}
+								{@const video = collab.video}
+								<button type="button" class="row video-row" onclick={() => playCollab(video)} oncontextmenu={(event) => videoMenu(event, video)}>
+									<span class="art small"><ArtworkImage src={video.artwork_url} size={320} className="thumb" alt={video.title} fallbackText={collab.name} tint /></span>
+									<span class="row-text">
+										<span class="row-name">{collab.name}</span>
+										<span class="row-sub">{video.title}</span>
+									</span>
+									<span class="row-meta">{formatRuntime(video.duration_ms)}</span>
+								</button>
+							{:else}
+								<button type="button" class="row" onclick={() => onneighbor(collab.id)} oncontextmenu={(event) => artistMenu(event, collab)}>
+									<span class="dot" style={`background: ${lightSwatch(collab.light, hue)}`} aria-hidden="true"></span>
+									<span class="row-name">{collab.name}</span>
+								</button>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			</section>
 		{/if}
 		{#if card.neighbors.length > 0}
 			<section class="group" aria-label="Neighbours">
@@ -255,5 +298,66 @@
 	.fill {
 		fill: currentColor;
 		stroke: none;
+	}
+
+	/* One quiet row: the journey and what it is, no choices. */
+	.journey {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		width: 100%;
+		padding: var(--space-2) var(--space-3);
+		border: 1px solid var(--stage-line);
+		border-radius: var(--radius-md);
+		background: transparent;
+		color: var(--stage-text);
+		text-align: left;
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			border-color var(--motion-fast);
+	}
+
+	.journey:hover {
+		border-color: rgba(255, 230, 168, 0.45);
+		background: rgba(255, 230, 168, 0.06);
+	}
+
+	.journey:focus-visible {
+		outline: 2px solid #ffe6a8;
+		outline-offset: 2px;
+	}
+
+	.journey-glyph {
+		flex: none;
+		width: 14px;
+		height: 2px;
+		border-radius: 2px;
+		background: #ffe6a8;
+		box-shadow: 0 0 8px #ffd27a;
+	}
+
+	.journey-text {
+		display: grid;
+		min-width: 0;
+	}
+
+	.journey-name {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.journey-copy {
+		overflow: hidden;
+		color: var(--stage-text-3);
+		font-size: var(--font-size-xs);
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.count {
+		margin-left: var(--space-2);
+		color: var(--stage-text-3);
+		font-variant-numeric: tabular-nums;
 	}
 </style>
