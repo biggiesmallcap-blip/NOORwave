@@ -19,6 +19,7 @@ import type {
 	ExploreMode,
 	SongVersionsResponse,
 	VideoCensus,
+	VideoTodayResponse,
 	VideoChannelsResponse,
 	VideoConcert,
 } from './video_explore_types';
@@ -2523,6 +2524,10 @@ export const api = {
 		const query: Record<string, string> = { kind: params.kind, from: String(params.from) };
 		if (params.scene != null) query.scene = String(params.scene);
 		return fetchApi<AtlasJourneyResponse>('/api/videos/atlas/journey', query);
+	},
+
+	getVideoToday(): Promise<VideoTodayResponse> {
+		return fetchApi<VideoTodayResponse>('/api/videos/today');
 	},
 
 	getVideoChannels(): Promise<VideoChannelsResponse> {

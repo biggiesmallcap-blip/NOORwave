@@ -371,6 +371,27 @@ export interface VideoChannelsResponse {
 	channels: VideoChannel[];
 }
 
+/** Today: short pieces under the dial, one artist each, written from what
+ *  is known (catalog, history, a biography, Wikidata), never generated. */
+export interface TodayPiece {
+	kind: 'today' | 'new' | 'archive' | 'elsewhere';
+	kicker: string;
+	artist_id: number;
+	name: string;
+	paragraphs: string[];
+	/** The first sentences of a biography, and where it is from. */
+	bio: { text: string; source: string } | null;
+	photo_url: string | null;
+	scene_id: number | null;
+	/** Up to three to start with, best first. */
+	videos: ExploreVideo[];
+}
+
+export interface VideoTodayResponse {
+	day: string;
+	pieces: TodayPiece[];
+}
+
 export interface ChannelGuideResponse {
 	channel_id: string;
 	day: string;

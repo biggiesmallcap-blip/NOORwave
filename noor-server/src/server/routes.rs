@@ -101,6 +101,7 @@ mod video_channel_routes;
 mod video_discovery_routes;
 mod video_intel_routes;
 mod video_station_routes;
+mod video_today_routes;
 pub use discovery_routes::{TrainingSpawn, spawn_discovery_training};
 pub use tidal_sync_routes::trigger_auto_sync;
 
@@ -810,6 +811,10 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/videos/channels",
             get(video_channel_routes::get_video_channels),
+        )
+        .route(
+            "/api/videos/today",
+            get(video_today_routes::get_video_today),
         )
         .route(
             "/api/videos/channels/{id}/guide",

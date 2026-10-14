@@ -102,6 +102,26 @@ impl LastFmClient {
         Self { http, api_key }
     }
 
+    /// An artist's biography from `artist.getInfo` (the full text, else the
+    /// summary), raw: HTML and the "Read more" link included.
+    pub async fn artist_bio(&self, artist: &str) -> Result<Option<String>> {
+        let payload = self
+            .get_json(&[
+                ("method", "artist.getinfo".to_string()),
+                ("artist", artist.to_string()),
+            ])
+            .await?;
+        let bio = payload.get("artist").and_then(|artist| artist.get("bio"));
+        let text = |key: &str| {
+            bio.and_then(|bio| bio.get(key))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        Ok(text("content").or_else(|| text("summary")))
+    }
+
     pub async fn artist_top_tags(
         &self,
         artist: &str,

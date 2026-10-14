@@ -15,6 +15,7 @@
 	import { dialFamilies } from '$lib/video/onair/families';
 	import { isTypingTarget } from '$lib/video/onair/keymap';
 	import SceneIndex from '$lib/video/onair/SceneIndex.svelte';
+	import TodayPieces from '$lib/video/onair/TodayPieces.svelte';
 	import {
 		airTick,
 		channelLineup,
@@ -269,6 +270,8 @@
 				<SceneIndex families={grouped.families} {slots} {onAirId} tuningId={tuning} ontune={(picked) => void tune(picked)} />
 			</section>
 		{/if}
+
+		<TodayPieces />
 	{/if}
 
 	<p class="elsewhere">

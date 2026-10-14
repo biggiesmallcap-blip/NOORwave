@@ -417,7 +417,7 @@ pub(super) fn atlas_payload(conn: &Connection) -> anyhow::Result<AtlasResponse> 
 /// Up to `limit` programmable videos, best first, one per song. Uses the
 /// catalog stage's cuts and quality once they exist; before that, the most
 /// popular videos of 90 s or more.
-fn best_videos(
+pub(super) fn best_videos(
     conn: &Connection,
     artist_id: i64,
     limit: usize,
@@ -462,7 +462,7 @@ fn best_videos(
 }
 
 /// (programmable videos, hours of them) for one artist.
-fn playable(conn: &Connection, artist_id: i64) -> anyhow::Result<(i64, f64)> {
+pub(super) fn playable(conn: &Connection, artist_id: i64) -> anyhow::Result<(i64, f64)> {
     if artist_id == VARIOUS_ARTISTS_ID {
         return Ok((0, 0.0));
     }
@@ -509,7 +509,7 @@ fn facet(conn: &Connection, artist_id: i64) -> anyhow::Result<Option<FacetRow>> 
 }
 
 /// A name for any artist id: facets, then the catalog, then the ledger.
-fn artist_name(conn: &Connection, artist_id: i64) -> anyhow::Result<Option<String>> {
+pub(super) fn artist_name(conn: &Connection, artist_id: i64) -> anyhow::Result<Option<String>> {
     Ok(conn
         .query_row(
             "SELECT COALESCE(

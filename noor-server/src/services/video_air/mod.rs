@@ -27,6 +27,7 @@ pub mod programmer;
 pub mod session;
 pub mod steer;
 pub mod taste;
+pub mod today;
 pub mod universe;
 
 use anyhow::Result;
