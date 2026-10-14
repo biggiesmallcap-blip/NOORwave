@@ -303,6 +303,15 @@ pub fn pace(setting: DiscoverySetting) -> Option<Duration> {
     }
 }
 
+/// Thumbnails fetched at once per round: 8 on Full (a map of 15,000
+/// artists in about a quarter of an hour), 1 on Limited.
+pub fn parallel_for(setting: DiscoverySetting) -> usize {
+    match setting {
+        DiscoverySetting::Full => 8,
+        _ => 1,
+    }
+}
+
 /// Why a thumbnail could not be had.
 #[derive(Debug)]
 pub enum FetchError {
@@ -316,6 +325,14 @@ pub enum FetchError {
 /// Fetches one thumbnail. The job's goes over HTTP; tests pass a fake.
 pub trait Fetch {
     fn fetch(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, FetchError>> + Send;
+
+    /// `fetch` for a URL the future owns, so a round can run several.
+    fn fetch_owned(&self, url: String) -> impl Future<Output = Result<Vec<u8>, FetchError>> + Send
+    where
+        Self: Sync,
+    {
+        async move { self.fetch(&url).await }
+    }
 }
 
 pub struct HttpFetch(pub reqwest::Client);
@@ -496,7 +513,7 @@ pub struct Worker<F> {
     unreachable: u32,
 }
 
-impl<F: Fetch> Worker<F> {
+impl<F: Fetch + Sync> Worker<F> {
     pub fn new(db: Database, fetch: F) -> Self {
         Self {
             db: JobDb::new(db),
@@ -556,51 +573,66 @@ impl<F: Fetch> Worker<F> {
         if batch.is_empty() {
             return Ok(IDLE);
         }
-        for item in batch {
+        let mut parallel = parallel_for(setting);
+        let mut rest = batch.as_slice();
+        while !rest.is_empty() {
             if (self.building)() {
                 return Ok(BUILD_WAIT);
             }
-            let fetched = match self.fetch.fetch(&thumb_url(&item.art)).await {
-                Ok(bytes) => Ok(bytes),
-                Err(FetchError::Refused(reason)) => Err(reason),
-                Err(FetchError::Unreachable(reason)) => {
-                    self.unreachable += 1;
-                    tracing::debug!(target: "noor.video_intel", %reason, "picture CDN unreachable");
-                    // 1, 2, ... 10 minutes while it stays down.
-                    return Ok(IDLE * self.unreachable.min(10));
-                }
-            };
-            self.unreachable = 0;
-            let log = self.done + 1;
-            let (outcome, setting, counts) = self
-                .db
-                .run(move |conn| {
-                    let outcome = record(conn, &item, fetched)?;
-                    let counts = (matches!(outcome, Outcome::Done(_))
-                        && log.is_multiple_of(LOG_EVERY))
-                    .then(|| status_counts(conn))
-                    .transpose()?;
-                    Ok((outcome, discovery_setting::load(conn)?, counts))
-                })
-                .await?;
-            if matches!(outcome, Outcome::Done(_)) {
-                self.done += 1;
-                if let Some((ready, pending, failed)) = counts {
-                    tracing::info!(
-                        target: "noor.video_intel",
-                        done = self.done,
-                        ready,
-                        pending,
-                        failed,
-                        "atlas pictures progress"
-                    );
+            let (chunk, tail) = rest.split_at(parallel.min(rest.len()));
+            rest = tail;
+            // A few thumbnails at once on Full; each is still stored on its
+            // own, so stopping part way loses at most the ones in flight.
+            let fetches = chunk
+                .iter()
+                .map(|item| self.fetch.fetch_owned(thumb_url(&item.art)));
+            let results = futures::future::join_all(fetches).await;
+            let mut setting = setting;
+            for (item, result) in chunk.iter().cloned().zip(results) {
+                let fetched = match result {
+                    Ok(bytes) => Ok(bytes),
+                    Err(FetchError::Refused(reason)) => Err(reason),
+                    Err(FetchError::Unreachable(reason)) => {
+                        self.unreachable += 1;
+                        tracing::debug!(target: "noor.video_intel", %reason, "picture CDN unreachable");
+                        // 1, 2, ... 10 minutes while it stays down.
+                        return Ok(IDLE * self.unreachable.min(10));
+                    }
+                };
+                self.unreachable = 0;
+                let log = self.done + 1;
+                let (outcome, now, counts) = self
+                    .db
+                    .run(move |conn| {
+                        let outcome = record(conn, &item, fetched)?;
+                        let counts = (matches!(outcome, Outcome::Done(_))
+                            && log.is_multiple_of(LOG_EVERY))
+                        .then(|| status_counts(conn))
+                        .transpose()?;
+                        Ok((outcome, discovery_setting::load(conn)?, counts))
+                    })
+                    .await?;
+                setting = now;
+                if matches!(outcome, Outcome::Done(_)) {
+                    self.done += 1;
+                    if let Some((ready, pending, failed)) = counts {
+                        tracing::info!(
+                            target: "noor.video_intel",
+                            done = self.done,
+                            ready,
+                            pending,
+                            failed,
+                            "atlas pictures progress"
+                        );
+                    }
                 }
             }
             // The setting is read after every fetch, so turning discovery
-            // off stops the job at once.
+            // off stops the job at once (and Limited drops to one at a time).
             let Some(spacing) = (self.pace)(setting) else {
                 return Ok(IDLE);
             };
+            parallel = parallel_for(setting);
             tokio::time::sleep(spacing).await;
         }
         Ok(Duration::ZERO)
@@ -763,6 +795,13 @@ mod tests {
             thumb_url("6a0ff657/cfc9/47f6/9270/c84d128eeb09"),
             "https://resources.tidal.com/images/6a0ff657/cfc9/47f6/9270/c84d128eeb09/80x80.jpg"
         );
+    }
+
+    #[test]
+    fn full_fetches_eight_at_a_time_limited_one() {
+        assert_eq!(parallel_for(DiscoverySetting::Full), 8);
+        assert_eq!(parallel_for(DiscoverySetting::Limited), 1);
+        assert_eq!(parallel_for(DiscoverySetting::Off), 1);
     }
 
     #[test]
