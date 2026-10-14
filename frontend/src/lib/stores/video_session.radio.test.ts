@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { api, type TidalSearchVideo } from '$lib/api/client';
 
-import { advanceVideo, clearVideoSession, noteVideoProgress, playVideo, playVideoStation, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession, videoStationOnAir } from './video_session';
+import { advanceVideo, clearVideoSession, extendVideoQueue, noteVideoProgress, playVideo, playVideoStation, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession, videoStationOnAir } from './video_session';
 
 vi.mock('$lib/api/client', () => ({
 	api: {
@@ -116,6 +116,56 @@ test('a growing queue takes new picks from its source before radio', async () =>
 	expect(extend).toHaveBeenCalledTimes(2);
 	expect(api.getVideoRadioNext).toHaveBeenCalled();
 	expect(get(videoSession).continuous).toBe(true);
+});
+
+test('turning autoplay off while the queue asks its source for more is respected', async () => {
+	let deliver!: (items: TidalSearchVideo[]) => void;
+	const extend = vi.fn(() => new Promise<TidalSearchVideo[]>((resolve) => { deliver = resolve; }));
+	const liked = [video(1, 10, 'A', 'One')];
+	await playVideo(liked[0], { queue: liked, source: 'search', sourceLabel: 'Liked videos', autoplay: true, extend }, preloadedStream);
+	const ending = advanceVideo();
+	await vi.waitFor(() => expect(extend).toHaveBeenCalled());
+	videoSession.setAutoplay(false);
+	deliver([video(2, 20, 'B', 'Two')]);
+	expect(await ending).toBe(true);
+	expect(get(videoSession).current?.tidal_id).toBe(1);
+	expect(get(videoSession).autoplay).toBe(false);
+	expect(get(videoSession).continuous).toBe(false);
+	expect(api.getVideoRadioNext).not.toHaveBeenCalled();
+});
+
+test('a queue picked while the old one asked its source plays on, without radio', async () => {
+	let deliver!: (items: TidalSearchVideo[]) => void;
+	const extend = vi.fn(() => new Promise<TidalSearchVideo[]>((resolve) => { deliver = resolve; }));
+	const playing = video(1, 10, 'A', 'One');
+	const after = video(5, 50, 'E', 'Five');
+	vi.mocked(api.getTidalVideoStream).mockResolvedValue({
+		hls_url: 'https://example.test/stream.m3u8', expires_at: null, quality: 'HIGH',
+	});
+	await playVideo(playing, { queue: [playing], source: 'search', sourceLabel: 'Liked videos', autoplay: true, extend }, preloadedStream);
+	const ending = advanceVideo();
+	await vi.waitFor(() => expect(extend).toHaveBeenCalled());
+	// The same video picked again from a shelf: same id, a new queue with more after it.
+	await playVideo(playing, { queue: [playing, after], source: 'mix', sourceLabel: 'Shelf', autoplay: true });
+	deliver([]);
+	expect(await ending).toBe(true);
+	expect(get(videoSession).current).toEqual(after);
+	expect(get(videoSession).sourceLabel).toBe('Shelf');
+	expect(get(videoSession).continuous).toBe(false);
+	expect(api.getVideoRadioNext).not.toHaveBeenCalled();
+});
+
+test('starting and stopping radio leaves the previous queue source behind', async () => {
+	const extend = vi.fn().mockResolvedValue([video(5, 50, 'E', 'Five')]);
+	vi.mocked(api.getVideoRadioNext).mockResolvedValue({ items: [], unfamiliar_video_ids: [] });
+	const liked = [video(1, 10, 'A', 'One')];
+	await playVideo(liked[0], { queue: liked, source: 'search', sourceLabel: 'Liked videos', autoplay: true, extend }, preloadedStream);
+	videoSession.startRadio();
+	await vi.waitFor(() => expect(get(videoSession).radioSearching).toBe(false));
+	videoSession.stopRadio();
+	expect(await extendVideoQueue(true)).toBe(0);
+	await advanceVideo();
+	expect(extend).not.toHaveBeenCalled();
 });
 
 test('a new queue drops the source of the previous queue', async () => {

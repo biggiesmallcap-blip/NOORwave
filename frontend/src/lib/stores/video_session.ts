@@ -148,6 +148,7 @@ export const videoSession = {
 		clearStation();
 		persistAutoplayPreference(true);
 		const queue = radioStartQueue(state.current);
+		setExtender(null, queue);
 		update({ queue, continuous: true, autoplay: true, radioIssue: null,
 			radioSearching: false, radioDiscoveryMessage: null, radioHits: [],
 			radioSeedArtistId: state.current.artist_id ?? null, radioSeedArtistName: state.current.artist_name ?? null,
@@ -265,7 +266,10 @@ let radioStationId: string | null = null;
 let radioStationTitle: string | null = null;
 let radioStationNonce = '';
 // A plain queue's own way to grow (VideoPlayContext.extend), what it has
-// already queued, and a pause after a pass that found nothing new.
+// already queued, and a pause after a pass that found nothing new. The
+// generation moves whenever another queue (or radio) replaces this one, so
+// an end-of-queue step that waited on the source can tell it was replaced.
+let queueGeneration = 0;
 let queueExtender: (() => Promise<VideoSessionItem[]>) | null = null;
 let extendSeenIds = new Set<number>();
 let extendSeenSongs = new Set<string>();
@@ -274,6 +278,7 @@ let extendQuietUntil = 0;
 const EXTEND_QUIET_MS = 60_000;
 
 function setExtender(extend: (() => Promise<VideoSessionItem[]>) | null, queue: VideoSessionItem[]) {
+	queueGeneration += 1;
 	queueExtender = extend;
 	extendSeenIds = new Set(queue.map((video) => video.tidal_id));
 	extendSeenSongs = new Set(queue.map(videoSongKey));
@@ -677,19 +682,24 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 	if (!next) {
 		if (!state.continuous) {
 			// A plain queue first asks its own source for more, then carries
-			// on as radio from what it played.
-			if ((await extendVideoQueue(true)) > 0) {
-				const grown = get(session);
-				if (grown.current?.tidal_id !== state.current?.tidal_id) return true;
-				const following = grown.queue[grown.currentIndex + 1];
-				if (following) return playVideo(following, {
-					queue: grown.queue, source: grown.source,
-					sourceLabel: grown.sourceLabel, autoplay: true, continuous: false,
-				}, { step: true });
-			}
+			// on as radio from what it played. The listener can act while the
+			// source answers: everything is read again after the wait.
+			const queueAt = queueGeneration;
+			await extendVideoQueue(true);
 			const settled = get(session);
-			if (settled.current?.tidal_id !== state.current?.tidal_id) return true;
-			if (!settled.continuous) carryOnAsRadio(settled);
+			if (settled.current?.tidal_id !== state.current?.tidal_id || !settled.autoplay) return true;
+			// Grown by the source, added to by hand, or replaced by a queue
+			// that goes on past this video: play what is next there.
+			const following = settled.queue[settled.currentIndex + 1];
+			if (following) return playVideo(following, {
+				queue: settled.queue, source: settled.source,
+				sourceLabel: settled.sourceLabel, autoplay: true, continuous: settled.continuous,
+			}, { step: true });
+			if (!settled.continuous) {
+				// A plain queue that replaced this one is not ours to turn into radio.
+				if (queueGeneration !== queueAt) return true;
+				carryOnAsRadio(settled);
+			}
 		}
 		const replenished = await refillUntilNext(state.current?.tidal_id);
 		// A click may have replaced radio while its request was in flight.
