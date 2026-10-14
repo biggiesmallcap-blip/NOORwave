@@ -17,6 +17,7 @@
 	import { creditFor, lowerThirdPhase, splitTitle, type CreditSource } from './lower_third';
 	import { remotePresses } from './remote';
 	import { tuneChannel, tunedRecently } from './tune';
+	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 
 	// The broadcast layer over the stage while a channel is on air, on the
 	// watch page and in fullscreen: the channel bug, the lower third credits,
@@ -51,15 +52,21 @@
 	let flipTimer: ReturnType<typeof setTimeout> | null = null;
 	let noteTimer: ReturnType<typeof setTimeout> | null = null;
 
-	// Changing channel: the picture is covered by the new channel's ident
-	// (its colour, number, name and what is on) from the moment the tune
-	// starts until the new video is really playing, so the black frame and
-	// the loading text in between never show.
+	// Changing channel: from the moment the tune starts until the new video
+	// is really playing, the picture is the new video's own still (softened,
+	// a little dark) under the usual channel card, so the black frame and the
+	// loading text in between never show; then it dissolves into the video.
 	let curtain = $state<{ channel: VideoChannel; fromId: number | null } | null>(null);
 	let curtainTimer: ReturnType<typeof setTimeout> | null = null;
 
+	/** The position last seen since the new video arrived: the curtain lifts
+	 *  only on a position that moved forward after that, so the old video's
+	 *  position (still reported for a moment) cannot lift it. */
+	let curtainSeen: number | null = null;
+
 	function raiseCurtain(target: VideoChannel, fromId: number | null) {
 		if (get(reduceMotion)) return;
+		curtainSeen = null;
 		curtain = { channel: target, fromId };
 		if (curtainTimer) clearTimeout(curtainTimer);
 		curtainTimer = setTimeout(lowerCurtain, CURTAIN_MAX_MS);
@@ -75,10 +82,13 @@
 		if (!curtain) return;
 		const id = current?.tidal_id ?? null;
 		const arrived = id !== null && id !== curtain.fromId;
+		if (!arrived) return;
+		const seen = curtainSeen;
+		curtainSeen = positionS;
+		const moving = seen !== null && positionS > seen && positionS >= startedAtS + CURTAIN_LIFT_S;
 		// Only the new video's own failure lifts it early: an error left over
 		// from the one before must not.
-		const moving = arrived && positionS >= startedAtS + CURTAIN_LIFT_S;
-		if (moving || (arrived && $videoSession.error && !$videoSession.loading)) lowerCurtain();
+		if (moving || ($videoSession.error && !$videoSession.loading)) lowerCurtain();
 	});
 
 	let lineup = $derived($channelLineup);
@@ -95,6 +105,7 @@
 
 	let flipSlot = $derived(flipCard ? liveSlot(flipCard, elapsed) : null);
 	let curtainSlot = $derived(curtain ? liveSlot(curtain.channel, elapsed) : null);
+	let curtainArt = $derived(curtainSlot?.program?.video.artwork_url ?? null);
 	let flipVideo = $derived(flipSlot?.program?.video ?? null);
 
 	const flipper = createFlipper<VideoChannel>({
@@ -269,9 +280,15 @@
 </script>
 
 <div class="onair-stage" class:fullscreen style:--ch-hue={hue}>
+	<!-- Under everything else on the stage: the bug and cards stay on top. -->
+	{#if curtain}
+		<div class="curtain" out:fade={{ duration: 420 }} aria-hidden="true">
+			{#if curtainArt}
+				<ArtworkImage src={curtainArt} size={640} fallbackText="" decorative fadeIn loading="eager" fetchPriority="high" />
+			{/if}
 	<!-- The bug: number and name, top right, quiet like a broadcaster's mark.
 	     While digits are typed it shows them instead. -->
-	<div class="bug" class:typing={digits.length > 0} class:hidden={guideOpen || curtain !== null} aria-live="polite">
+	<div class="bug" class:typing={digits.length > 0} class:hidden={guideOpen} aria-live="polite">
 		{#if digits}
 			<span class="bug-no" aria-label={`Channel ${digits}`}>{digits.padEnd(2, '_')}</span>
 		{:else}
@@ -298,18 +315,10 @@
 		{/key}
 	{/if}
 
-	{#if curtain}
-		{@const video = curtainSlot?.program?.video ?? null}
-		<div class="curtain" style:--ch-hue={channelHue(curtain.channel)} out:fade={{ duration: 280 }} aria-hidden="true">
-			<span class="cu-no">{channelNumber(curtain.channel.no)}</span>
-			<span class="cu-name">{curtain.channel.title}</span>
-			{#if video}
-				<span class="cu-now">{splitTitle(video.title).song}{#if video.artist_name}<span class="cu-artist">{video.artist_name}</span>{/if}</span>
-			{/if}
 		</div>
 	{/if}
 
-	{#if flipCard && !curtain}
+	{#if flipCard}
 		<div class="flip-card" style:--ch-hue={channelHue(flipCard)} aria-live="assertive">
 			<span class="fc-no">{channelNumber(flipCard.no)}</span>
 			<div class="fc-text">
@@ -647,53 +656,30 @@
 	}
 
 	/* ---- The flip's luminance dip: 160 ms down and back up ---- */
-	/* The channel's ident over the picture while the new video loads: its
-	   colour in a soft wash, the number large, the name, what is on. */
+	/* While the new video loads: its own still, full bleed, softened and a
+	   little dark, drifting in slowly. Black underneath, never a colour. */
 	.curtain {
 		position: absolute;
 		inset: 0;
-		z-index: 2;
-		display: grid;
-		place-content: center;
-		justify-items: center;
-		gap: 6px;
-		background:
-			radial-gradient(70% 70% at 50% 45%, oklch(34% 0.09 calc(var(--ch-hue) * 1deg)), transparent 75%),
-			#050508;
-		animation: curtain-in 140ms ease-out both;
+		overflow: hidden;
+		background: #000;
+		animation: curtain-in 160ms ease-out both;
+	}
+	.curtain :global(img) {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		filter: brightness(0.62) saturate(0.9) blur(1.5px);
+		transform: scale(1.04);
+		animation: curtain-drift 6s ease-out both;
 	}
 	@keyframes curtain-in {
 		from { opacity: 0; }
 		to { opacity: 1; }
 	}
-	.cu-no {
-		font-family: var(--font-mono);
-		font-size: clamp(2.5rem, 7vw, 5rem);
-		font-weight: var(--font-weight-medium);
-		line-height: 1;
-		color: oklch(82% 0.13 calc(var(--ch-hue) * 1deg));
-	}
-	.cu-name {
-		font-size: clamp(1rem, 1.6vw, 1.5rem);
-		font-weight: var(--font-weight-semibold);
-		color: #fff;
-	}
-	.cu-now {
-		display: grid;
-		justify-items: center;
-		gap: 2px;
-		margin-top: 10px;
-		font-family: var(--font-display);
-		font-size: clamp(0.95rem, 1.2vw, 1.15rem);
-		font-style: italic;
-		color: rgba(255, 255, 255, 0.82);
-		animation: curtain-in 300ms 160ms ease-out both;
-	}
-	.cu-artist {
-		font-family: var(--font-body);
-		font-size: var(--font-size-xs);
-		font-style: normal;
-		color: rgba(255, 255, 255, 0.6);
+	@keyframes curtain-drift {
+		from { transform: scale(1.08); }
+		to { transform: scale(1.04); }
 	}
 
 	.dip {
