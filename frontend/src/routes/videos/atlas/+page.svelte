@@ -12,7 +12,9 @@
 
 	const POLL_MS = 10_000;
 
-	let loaded = $state<LoadedAtlas | null>(cachedAtlas());
+	// Raw: the map is replaced whole, never edited, and a deep proxy over
+	// 15k artists would tax every read the renderer makes.
+	let loaded = $state.raw<LoadedAtlas | null>(cachedAtlas());
 	let building = $state(false);
 	let error = $state<unknown>(null);
 	let slow = $state(false);

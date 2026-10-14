@@ -108,8 +108,10 @@
 	let followedArtist = -1;
 
 	// The looks' own data (shared with the mini map).
-	let pictures = $state<AtlasPicturesResponse | null>(atlasPictures.cached());
-	let you = $state<AtlasYouResponse | null>(atlasYou.cached());
+	// Raw state: each answer is replaced whole, and the renderer reads them
+	// in tight loops where a deep proxy costs hundreds of milliseconds.
+	let pictures = $state.raw<AtlasPicturesResponse | null>(atlasPictures.cached());
+	let you = $state.raw<AtlasYouResponse | null>(atlasYou.cached());
 
 	let tip = $state<{ x: number; y: number; title: string; meta: string; hint: string } | null>(null);
 	let hereScene = $state(-1);

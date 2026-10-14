@@ -97,7 +97,8 @@
 	// The mini map only mounts once the Atlas is loaded and the artist on
 	// stage is on it, so an uncharted artist (or a cold map) leaves the slot
 	// empty and the rows keep the full width.
-	let atlas = $state<LoadedAtlas | null>(cachedAtlas());
+	// Raw: replaced whole, read in the mini map's tight loops.
+	let atlas = $state.raw<LoadedAtlas | null>(cachedAtlas());
 	let trail = $state<number[]>(sessionTrail);
 	// A cold link may carry only the video id; the song lookup knows the artist.
 	let stageArtistId = $derived(current?.artist_id ?? stageRows.versions?.song.artist_id ?? null);
