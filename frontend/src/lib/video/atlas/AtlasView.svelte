@@ -1835,6 +1835,130 @@
 		text-wrap: balance;
 	}
 
+	/* The artist and scene cards open on a picture: a still that runs to the
+	   panel's edges and fades into it at the bottom, then the name and a
+	   few plain sentences, as Today's pieces do. */
+	.panel :global(.hero) {
+		position: relative;
+		margin: calc(var(--space-4) * -1) calc(var(--card-pad) * -1) calc(var(--space-1) * -1);
+	}
+
+	.panel :global(.hero-pic) {
+		position: relative;
+		display: block;
+		width: 100%;
+		aspect-ratio: 16 / 9;
+		padding: 0;
+		border: 0;
+		overflow: hidden;
+		background: rgba(255, 255, 255, 0.04);
+		cursor: pointer;
+		-webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent);
+		mask-image: linear-gradient(to bottom, #000 62%, transparent);
+	}
+
+	.panel :global(.hero-wait) {
+		cursor: default;
+		animation: hero-breathe 1.6s ease-in-out infinite alternate;
+	}
+
+	@keyframes hero-breathe {
+		from { background: rgba(255, 255, 255, 0.03); }
+		to { background: rgba(255, 255, 255, 0.07); }
+	}
+
+	.panel :global(.hero-img) {
+		display: block;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		transition: transform 600ms var(--ease-standard);
+	}
+
+	.panel :global(.hero-pic:hover .hero-img) {
+		transform: scale(1.02);
+	}
+
+	.panel :global(.hero-pic:focus-visible) {
+		outline: 2px solid var(--stage-text);
+		outline-offset: -4px;
+	}
+
+	.panel :global(.hero-play) {
+		position: absolute;
+		left: var(--card-pad);
+		top: 50%;
+		display: grid;
+		place-items: center;
+		width: 42px;
+		height: 42px;
+		margin-top: -21px;
+		border-radius: 50%;
+		background: rgba(0, 0, 0, 0.55);
+		color: #fff;
+		opacity: 0;
+		transition: opacity var(--motion-base);
+	}
+
+	.panel :global(.hero-play svg) {
+		width: 17px;
+		height: 17px;
+		fill: currentColor;
+	}
+
+	.panel :global(.hero-pic:hover .hero-play),
+	.panel :global(.hero-pic:focus-visible .hero-play) {
+		opacity: 1;
+	}
+
+	/* Close on the picture sits on a dark disc so it reads on any still. */
+	.panel :global(.close.on-pic) {
+		position: absolute;
+		top: var(--space-3);
+		right: var(--space-3);
+		background: rgba(0, 0, 0, 0.5);
+		color: #fff;
+	}
+
+	.panel :global(.close.on-pic:hover) {
+		background: rgba(0, 0, 0, 0.72);
+	}
+
+	.panel :global(.name-row) {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--space-2);
+	}
+
+	.panel :global(.name-row .title) {
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-medium);
+		letter-spacing: -0.01em;
+	}
+
+	/* A few plain sentences instead of stats, chips and coloured badges. */
+	.panel :global(.lede) {
+		margin: 0;
+		color: var(--stage-text-2);
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+		text-wrap: pretty;
+	}
+
+	/* Rows without a leading mark: the name, then what is known. */
+	.panel :global(.row.plain) {
+		grid-template-columns: minmax(0, 1fr) auto;
+	}
+
+	/* Known artists say so in a word, not a colour. */
+	.panel :global(.watched) {
+		margin-left: 8px;
+		color: var(--stage-text-3);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-regular, 400);
+	}
+
 	.panel :global(.actions) {
 		display: flex;
 		flex-wrap: wrap;
@@ -2067,8 +2191,13 @@
 			animation: none;
 		}
 
-		.panel :global(.sk-row) {
+		.panel :global(.sk-row),
+		.panel :global(.hero-wait) {
 			animation: none;
+		}
+
+		.panel :global(.hero-img) {
+			transition: none;
 		}
 	}
 

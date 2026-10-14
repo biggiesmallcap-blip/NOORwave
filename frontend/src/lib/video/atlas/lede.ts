@@ -16,11 +16,23 @@ export function hoursWords(hours: number): string {
 	return `${shown} ${shown === '1' ? 'hour' : 'hours'}`;
 }
 
-/** "house", "house and pop", "house, pop and electronic" (the first three). */
-export function genreWords(genres: readonly string[]): string {
-	const list = genres.map((genre) => genre.trim()).filter(Boolean).slice(0, 3);
+/** "a", "a and b", "a, b and c": the first `max` items as a sentence. */
+export function listWords(items: readonly string[], max = 3): string {
+	const list = items.map((item) => item.trim()).filter(Boolean).slice(0, max);
 	if (list.length <= 1) return list[0] ?? '';
 	return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+/** "house", "house and pop", "house, pop and electronic" (the first three). */
+export function genreWords(genres: readonly string[]): string {
+	return listWords(genres, 3);
+}
+
+/** How much of a scene you have seen, as a sentence. */
+export function sceneSeenLine(seenVideos: number, litArtists: number): string {
+	if (seenVideos <= 0) return 'You have not watched any of it yet.';
+	const from = litArtists > 0 ? `, from ${litArtists.toLocaleString()} of its artists` : '';
+	return `You have seen ${seenVideos.toLocaleString()} of its videos${from}.`;
 }
 
 /** How well you know the artist, as a sentence (none for uncharted: the

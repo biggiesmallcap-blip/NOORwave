@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { KNOWN_LINE, genreWords, hoursWords } from './lede';
+import { KNOWN_LINE, genreWords, hoursWords, listWords, sceneSeenLine } from './lede';
 
 describe('artist card lede', () => {
 	test('hours read as words', () => {
@@ -16,6 +16,15 @@ describe('artist card lede', () => {
 		expect(genreWords(['house'])).toBe('house');
 		expect(genreWords(['house', 'pop'])).toBe('house and pop');
 		expect(genreWords(['house', 'pop', 'electronic', 'r&b'])).toBe('house, pop and electronic');
+	});
+
+	test('a scene names its exemplars and how much of it you have seen', () => {
+		expect(listWords(['Billy Joel', 'Elton John', 'Paul McCartney', 'Fleetwood Mac', 'Yes'], 4)).toBe(
+			'Billy Joel, Elton John, Paul McCartney and Fleetwood Mac'
+		);
+		expect(sceneSeenLine(0, 0)).toBe('You have not watched any of it yet.');
+		expect(sceneSeenLine(32, 18)).toBe('You have seen 32 of its videos, from 18 of its artists.');
+		expect(sceneSeenLine(3, 0)).toBe('You have seen 3 of its videos.');
 	});
 
 	test('knowing an artist is said, not coloured', () => {

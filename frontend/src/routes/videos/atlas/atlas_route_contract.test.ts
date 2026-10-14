@@ -64,7 +64,7 @@ describe('atlas route contract', () => {
 		expect(sceneCard).toContain('{#if scene.channel_no != null}');
 		expect(sceneCard).toContain('sceneArchiveUrl(scene.id)');
 		expect(sceneCard).toContain('playAtlasQueue(video, card?.sample ?? [video], scene.name)');
-		expect(sceneCard).toContain('Seen {formatCount(scene.seen_videos)} of {formatCount(scene.videos)}');
+		expect(sceneCard).toContain('{sceneSeenLine(scene.seen_videos, scene.lit_artists)}');
 	});
 
 	test('every artist and video reference carries the shared context menu', () => {

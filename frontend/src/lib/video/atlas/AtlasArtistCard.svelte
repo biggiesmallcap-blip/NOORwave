@@ -13,7 +13,7 @@
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { KNOWN_LINE, genreWords, hoursWords } from './lede';
 	import { formatRuntime, playAtlasQueue, playAtlasRadio } from './play';
-	import { formatCount, lightSwatch } from './style';
+	import { formatCount } from './style';
 
 	let {
 		id,
@@ -192,9 +192,11 @@
 									<span class="row-meta">{formatRuntime(video.duration_ms)}</span>
 								</button>
 							{:else}
-								<button type="button" class="row" onclick={() => onneighbor(collab.id)} oncontextmenu={(event) => artistMenu(event, collab)}>
-									<span class="dot" style={`background: ${lightSwatch(collab.light, hue)}`} aria-hidden="true"></span>
-									<span class="row-name">{collab.name}</span>
+								<button type="button" class="row plain" onclick={() => onneighbor(collab.id)} oncontextmenu={(event) => artistMenu(event, collab)}>
+									<span class="row-name">
+										{collab.name}
+										{#if collab.light === 3}<span class="watched" title="You have watched, liked or saved them">watched</span>{/if}
+									</span>
 								</button>
 							{/if}
 						</li>
@@ -208,9 +210,11 @@
 				<ul class="rows">
 					{#each card.neighbors.slice(0, 10) as neighbor (neighbor.id)}
 						<li>
-							<button type="button" class="row" onclick={() => onneighbor(neighbor.id)} oncontextmenu={(event) => artistMenu(event, neighbor)}>
-								<span class="dot" style={`background: ${lightSwatch(neighbor.light, hue)}`} aria-hidden="true"></span>
-								<span class="row-name">{neighbor.name}</span>
+							<button type="button" class="row plain" onclick={() => onneighbor(neighbor.id)} oncontextmenu={(event) => artistMenu(event, neighbor)}>
+								<span class="row-name">
+									{neighbor.name}
+									{#if neighbor.light === 3}<span class="watched" title="You have watched, liked or saved them">watched</span>{/if}
+								</span>
 								<span class="row-tag">{neighbor.source}</span>
 							</button>
 						</li>
@@ -222,108 +226,8 @@
 </article>
 
 <style>
-	/* Shared card anatomy lives on the panel in AtlasView. */
-
-	/* The picture runs to the panel's edges and fades into it at the
-	   bottom, so the name sits under it without a hard line. */
-	.hero {
-		position: relative;
-		margin: calc(var(--space-4) * -1) calc(var(--card-pad) * -1) calc(var(--space-1) * -1);
-	}
-
-	.hero-pic {
-		position: relative;
-		display: block;
-		width: 100%;
-		aspect-ratio: 16 / 9;
-		padding: 0;
-		border: 0;
-		overflow: hidden;
-		background: rgba(255, 255, 255, 0.04);
-		cursor: pointer;
-		-webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent);
-		mask-image: linear-gradient(to bottom, #000 62%, transparent);
-	}
-
-	.hero-wait {
-		cursor: default;
-		animation: hero-breathe 1.6s ease-in-out infinite alternate;
-	}
-
-	@keyframes hero-breathe {
-		from { background: rgba(255, 255, 255, 0.03); }
-		to { background: rgba(255, 255, 255, 0.07); }
-	}
-
-	.hero-pic :global(.hero-img) {
-		display: block;
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		transition: transform 600ms var(--ease-standard);
-	}
-
-	.hero-pic:hover :global(.hero-img) {
-		transform: scale(1.02);
-	}
-
-	.hero-pic:focus-visible {
-		outline: 2px solid var(--stage-text);
-		outline-offset: -4px;
-	}
-
-	.hero-play {
-		position: absolute;
-		left: var(--card-pad);
-		top: 50%;
-		display: grid;
-		place-items: center;
-		width: 42px;
-		height: 42px;
-		margin-top: -21px;
-		border-radius: 50%;
-		background: rgba(0, 0, 0, 0.55);
-		color: #fff;
-		opacity: 0;
-		transition: opacity var(--motion-base);
-	}
-
-	.hero-play svg {
-		width: 17px;
-		height: 17px;
-		fill: currentColor;
-	}
-
-	.hero-pic:hover .hero-play,
-	.hero-pic:focus-visible .hero-play {
-		opacity: 1;
-	}
-
-	/* Close sits on the picture, on a dark disc so it reads on any still. */
-	.close.on-pic {
-		position: absolute;
-		top: var(--space-3);
-		right: var(--space-3);
-		background: rgba(0, 0, 0, 0.5);
-		color: #fff;
-	}
-
-	.close.on-pic:hover {
-		background: rgba(0, 0, 0, 0.72);
-	}
-
-	.name-row {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: var(--space-2);
-	}
-
-	.artist :global(.title) {
-		font-size: var(--font-size-3xl);
-		font-weight: var(--font-weight-medium);
-		letter-spacing: -0.01em;
-	}
+	/* Shared card anatomy (the picture, name row, lede, rows) lives on the
+	   panel in AtlasView. */
 
 	.title-link {
 		color: inherit;
@@ -336,16 +240,8 @@
 		text-underline-offset: 5px;
 	}
 
-	/* A few plain sentences instead of stats, chips and a coloured badge. */
-	.lede {
-		margin: 0;
-		color: var(--stage-text-2);
-		font-size: var(--font-size-sm);
-		line-height: var(--line-height-normal);
-		text-wrap: pretty;
-	}
-
-	.scene-link {
+	.scene-link,
+	.journey-go {
 		padding: 0;
 		border: 0;
 		background: none;
@@ -358,8 +254,16 @@
 		cursor: pointer;
 	}
 
-	.scene-link:hover {
+	.scene-link:hover,
+	.journey-go:hover {
 		text-decoration-color: currentColor;
+	}
+
+	.scene-link:focus-visible,
+	.journey-go:focus-visible {
+		outline: 2px solid var(--stage-text);
+		outline-offset: 2px;
+		border-radius: 2px;
 	}
 
 	/* The journey, said in one line: the action, then what it is. */
@@ -371,28 +275,7 @@
 	}
 
 	.journey-go {
-		padding: 0;
-		border: 0;
-		background: none;
-		color: var(--stage-text);
-		font: inherit;
 		font-weight: var(--font-weight-semibold);
-		text-decoration: underline;
-		text-decoration-color: rgba(255, 255, 255, 0.3);
-		text-decoration-thickness: 1px;
-		text-underline-offset: 3px;
-		cursor: pointer;
-	}
-
-	.journey-go:hover {
-		text-decoration-color: currentColor;
-	}
-
-	.scene-link:focus-visible,
-	.journey-go:focus-visible {
-		outline: 2px solid var(--stage-text);
-		outline-offset: 2px;
-		border-radius: 2px;
 	}
 
 	.probe {
@@ -424,15 +307,5 @@
 		margin-left: var(--space-2);
 		color: var(--stage-text-3);
 		font-variant-numeric: tabular-nums;
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.hero-wait {
-			animation: none;
-		}
-
-		.hero-pic :global(.hero-img) {
-			transition: none;
-		}
 	}
 </style>

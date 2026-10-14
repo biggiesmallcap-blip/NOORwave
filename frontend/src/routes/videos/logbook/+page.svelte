@@ -96,6 +96,7 @@
 	<title>Logbook - NOOR</title>
 </svelte:head>
 
+<div class="logbook-frame">
 <div class="logbook">
 	<section class="entries" aria-label="Your videos">
 		<a class="entry" href="/videos/liked">
@@ -281,10 +282,16 @@
 		</section>
 	{/if}
 </div>
+</div>
 
 <style>
 	/* Width, gutters and the bottom inset come from the video layout. A calm
 	   page: rows on the ground, numbers in columns, no tiles or borders. */
+	.logbook-frame {
+		container-type: inline-size;
+		min-width: 0;
+	}
+
 	.logbook {
 		container-type: inline-size;
 		display: grid;
@@ -795,6 +802,47 @@
 
 	.more:hover {
 		background: var(--bg-hover);
+	}
+
+	/* Wide screens (1440p and 4K): two columns instead of one narrow one.
+	   Your shelves and steering on the left, the catalog on the right, the
+	   scenes across both underneath. */
+	@container (min-width: 1560px) {
+		.logbook {
+			max-width: none;
+			grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+			grid-template-areas:
+				'entries census'
+				'steers census'
+				'scenes scenes';
+			grid-template-rows: auto 1fr auto;
+			column-gap: clamp(56px, 4vw, 120px);
+			align-items: start;
+		}
+
+		.entries {
+			grid-area: entries;
+		}
+
+		.steers {
+			grid-area: steers;
+		}
+
+		.census {
+			grid-area: census;
+		}
+
+		.scenes {
+			grid-area: scenes;
+		}
+
+		.scene-grid {
+			grid-template-columns: repeat(4, minmax(0, 1fr));
+		}
+
+		.steer-row {
+			grid-template-columns: 52px minmax(0, 1fr) 72px auto 64px;
+		}
 	}
 
 	@container (max-width: 900px) {
