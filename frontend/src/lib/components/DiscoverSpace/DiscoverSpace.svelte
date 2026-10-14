@@ -74,6 +74,51 @@
 	const ZOOM_MIN = 0.25;
 	const ZOOM_MAX = 3.0;
 
+	// Frame the graph instead of holding a fixed zoom: a small space used to sit
+	// as a few dots in the middle of the stage. The camera eases toward the
+	// framing every frame (so it follows the physics as the graph spreads) until
+	// the listener pans or zooms; the Fit button hands control back.
+	const FIT_ZOOM_MAX = 1.6;
+	const FIT_PAD = 72; // CSS px kept clear around the graph; the toolbar sits on top
+	const FIT_EASE = 0.14;
+	let userMovedCamera = $state(false);
+	let cameraAnimating = false;
+
+	function fitTarget(nodes: DiscoverTrackNode[]): Camera | null {
+		if (!canvas || nodes.length === 0) return null;
+		const w = canvas.clientWidth;
+		const h = canvas.clientHeight;
+		if (w === 0 || h === 0) return null;
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const n of nodes) {
+			const r = n.radius + 24; // room for the label under each star
+			minX = Math.min(minX, n.x - r);
+			maxX = Math.max(maxX, n.x + r);
+			minY = Math.min(minY, n.y - r);
+			maxY = Math.max(maxY, n.y + r);
+		}
+		const zoom = Math.min(
+			Math.max(1, w - FIT_PAD * 2) / (maxX - minX),
+			Math.max(1, h - FIT_PAD * 2) / (maxY - minY),
+		);
+		return { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.max(ZOOM_MIN, Math.min(FIT_ZOOM_MAX, zoom)) };
+	}
+
+	function followFit(nodes: DiscoverTrackNode[], snap: boolean): void {
+		if (userMovedCamera || cameraAnimating || isWarping) return;
+		const target = fitTarget(nodes);
+		if (!target) return;
+		const k = snap || prefersReducedMotion ? 1 : FIT_EASE;
+		camera.x += (target.x - camera.x) * k;
+		camera.y += (target.y - camera.y) * k;
+		camera.zoom += (target.zoom - camera.zoom) * k;
+	}
+
+	export function fitToGraph(): void {
+		userMovedCamera = false;
+		followFit($discoverSpaceStore.nodes, false);
+	}
+
 	// Interaction state
 	let isPanning = false;
 	let panStart = { x: 0, y: 0, cx: 0, cy: 0 };
@@ -145,14 +190,9 @@
 		const isFirstSet = lastNodeSetKey === '';
 		lastNodeSetKey = key;
 		if (nodes.length === 0 || isWarping) return;
-		const cx = nodes.reduce((sum, n) => sum + n.x, 0) / nodes.length;
-		const cy = nodes.reduce((sum, n) => sum + n.y, 0) / nodes.length;
-		if (isFirstSet || prefersReducedMotion) {
-			camera.x = cx;
-			camera.y = cy;
-		} else {
-			animateCamera({ x: cx, y: cy, zoom: 0.7 }, 400);
-		}
+		// A new space takes the framing back; the loop eases toward it.
+		userMovedCamera = false;
+		if (isFirstSet) followFit(nodes, true);
 	});
 
 	async function runHyperspaceSearch(query: string): Promise<void> {
@@ -190,13 +230,8 @@
 			warpProgress = 0;
 			isWarping = false;
 
-			// Snap camera to new centroid
-			const nodes = $discoverSpaceStore.nodes;
-			if (nodes.length > 0) {
-				const cx = nodes.reduce((s, n) => s + n.x, 0) / nodes.length;
-				const cy = nodes.reduce((s, n) => s + n.y, 0) / nodes.length;
-				animateCamera({ x: cx, y: cy, zoom: 0.7 }, 400);
-			}
+			// The render loop frames the new results from here.
+			userMovedCamera = false;
 		}
 	}
 
@@ -207,16 +242,17 @@
 	function animateCamera(target: Partial<Camera>, durationMs: number): Promise<void> {
 		const start = { ...camera };
 		const startTime = performance.now();
+		cameraAnimating = true;
 		return new Promise((res) => {
 			function step() {
-				if (!alive) { res(); return; }
+				if (!alive) { cameraAnimating = false; res(); return; }
 				const t = Math.min(1, (performance.now() - startTime) / durationMs);
 				const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
 				if (target.x != null) camera.x = start.x + (target.x - start.x) * ease;
 				if (target.y != null) camera.y = start.y + (target.y - start.y) * ease;
 				if (target.zoom != null) camera.zoom = start.zoom + (target.zoom - start.zoom) * ease;
 				if (t < 1) auxRafId = requestAnimationFrame(step);
-				else res();
+				else { cameraAnimating = false; res(); }
 			}
 			auxRafId = requestAnimationFrame(step);
 		});
@@ -284,6 +320,8 @@
 			}
 			tick += dtFrames; // animation clock always advances for halo/pulse animations
 		}
+
+		followFit(nodes, false);
 
 		// Build lookups
 		const nodeMap  = new Map(nodes.map((n) => [n.trackId, n]));
@@ -387,6 +425,7 @@
 		}
 
 		if (!isPanning) return;
+		if (Math.abs(e.clientX - panStart.x) >= 4 || Math.abs(e.clientY - panStart.y) >= 4) userMovedCamera = true;
 		const dx = (e.clientX - panStart.x) / camera.zoom;
 		const dy = (e.clientY - panStart.y) / camera.zoom;
 		camera.x = panStart.cx - dx;
@@ -416,6 +455,7 @@
 		if (e.ctrlKey || e.metaKey) return; // yield to global UI-zoom handler
 		lastPointerAt = performance.now();
 		e.preventDefault();
+		userMovedCamera = true;
 		const factor = e.deltaY < 0 ? 1.1 : 0.9;
 		camera.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, camera.zoom * factor));
 	}
@@ -485,6 +525,10 @@
 	onwheel={onWheel}
 ></canvas>
 
+{#if userMovedCamera && $discoverSpaceStore.nodes.length > 0}
+	<button class="fit-btn" type="button" onclick={fitToGraph} title="Frame the whole space">Fit</button>
+{/if}
+
 {#if debugEnabled}
 	<div class="debug-overlay" aria-hidden="true">
 		<span>Nodes: {$discoverSpaceStore.nodes.length}</span>
@@ -513,6 +557,24 @@
 	.discover-canvas:active {
 		cursor: grabbing;
 	}
+
+	.fit-btn {
+		position: absolute;
+		right: 12px;
+		bottom: 12px;
+		z-index: 10;
+		min-height: 30px;
+		padding: 0 var(--space-3);
+		border: 1px solid var(--border-muted);
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--bg-surface-strong) 90%, transparent);
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		cursor: pointer;
+		transition: color var(--motion-fast), border-color var(--motion-fast);
+	}
+	.fit-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
 
 	.debug-overlay {
 		position: absolute;

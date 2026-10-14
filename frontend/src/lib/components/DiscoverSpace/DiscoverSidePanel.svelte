@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { tidalSearchTrackToPlayable } from '$lib/utils/track';
 	import { lockSeed, branchHere, setRadioRoute, discoverSpaceStore } from './discover_space_store';
-	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS, LENS_LABELS, LENS_DESCRIPTIONS } from './discover_space_story';
+	import { REASON_LABELS, REASON_EXPLANATIONS, SOURCE_LABELS, SIDE_PANEL_ACTIONS, ERROR_TOASTS } from './discover_space_story';
 	import type { DiscoverTrackNode, DiscoverReason } from './discover_space_types';
 	import { api, getApiBase, authFetch, type TidalPlayable } from '$lib/api/client';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
@@ -19,6 +19,19 @@
 	let isStartingRadio = $state(false);
 	let isHiding = $state(false);
 	let resolvingAction = $state<'play-now' | 'play-next' | 'radio' | null>(null);
+
+	// Secondary actions live behind More; it closes on a new node, an outside
+	// press, Escape, or once an action runs.
+	let moreOpen = $state(false);
+	let moreWrap = $state<HTMLDivElement | null>(null);
+	$effect(() => {
+		void node?.id;
+		moreOpen = false;
+	});
+	function runMore(action: () => unknown): void {
+		moreOpen = false;
+		void action();
+	}
 
 	function nodeFallbackPlayable(targetNode: DiscoverTrackNode): PlayableTrack | null {
 		return targetNode.playable;
@@ -38,8 +51,9 @@
 		return [playable.artist, playable.title].filter(Boolean).join(' ');
 	}
 
+	// One initial on a tinted tile, like Search, instead of two-letter codes.
 	function fallbackText(value: string): string {
-		return value.trim().slice(0, 2).toUpperCase() || 'NOOR';
+		return value.trim().charAt(0).toUpperCase() || 'N';
 	}
 
 	async function resolveExternalPlayable(
@@ -217,27 +231,33 @@
 	}
 </script>
 
+<svelte:window
+	onpointerdown={(event) => {
+		if (moreOpen && moreWrap && !moreWrap.contains(event.target as Node)) moreOpen = false;
+	}}
+	onkeydown={(event) => {
+		if (moreOpen && event.key === 'Escape') moreOpen = false;
+	}}
+/>
+
 <aside
 	class="side-panel"
-	class:empty={!node}
+	class:empty={!node && !seedNode}
 	role="region"
 	aria-label="Track details"
 >
 	{#if node}
 		<div class="panel-header">
-			{#if node.artworkUrl}
-				<ArtworkImage
-					className="artwork"
-					src={node.artworkUrl}
-					alt={`${node.title} artwork`}
-					size={320}
-					fallbackText={fallbackText(node.title)}
-				/>
-			{:else}
-				<div class="artwork-placeholder" aria-hidden="true"></div>
-			{/if}
+			<ArtworkImage
+				className="artwork"
+				src={node.artworkUrl}
+				alt={`${node.title} artwork`}
+				size={320}
+				fallbackText={fallbackText(node.title)}
+				tint={true}
+			/>
 			<div class="panel-title-group">
-				<div class="panel-title">{node.title}</div>
+				<div class="panel-title" title={node.title}>{node.title}</div>
 				<div class="panel-artist">{node.artist}</div>
 				{#if node.albumTitle}
 					<div class="panel-album">{node.albumTitle}</div>
@@ -245,67 +265,34 @@
 			</div>
 		</div>
 
-		<!-- Sonic fingerprint chips -->
-		<div class="fingerprint" aria-label="Audio features">
-			{#if node.energy != null}
-				<div class="fp-chip">
-					<span class="fp-label">Energy</span>
-					<span class="fp-value">{Math.round(node.energy * 100)}%</span>
-					<div class="fp-bar"><div class="fp-fill" style:width="{node.energy * 100}%"></div></div>
-				</div>
-			{/if}
-			{#if node.danceability != null}
-				<div class="fp-chip">
-					<span class="fp-label">Dance</span>
-					<span class="fp-value">{Math.round(node.danceability * 100)}%</span>
-					<div class="fp-bar"><div class="fp-fill" style:width="{node.danceability * 100}%"></div></div>
-				</div>
-			{/if}
-			{#if node.bpm != null}
-				<div class="fp-chip narrow">
-					<span class="fp-label">BPM</span>
-					<span class="fp-value">{Math.round(node.bpm)}</span>
-				</div>
-			{/if}
-			{#if node.camelotKey}
-				<div class="fp-chip narrow">
-					<span class="fp-label">Key</span>
-					<span class="fp-value">{node.camelotKey}</span>
-				</div>
-			{/if}
-		</div>
+		<!-- Sonic fingerprint -->
+		{#if node.bpm != null || node.camelotKey || node.energy != null || node.danceability != null}
+			<div class="fingerprint" aria-label="Audio features">
+				{#if node.bpm != null}<span class="fp-chip"><span class="fp-label">BPM</span>{Math.round(node.bpm)}</span>{/if}
+				{#if node.camelotKey}<span class="fp-chip"><span class="fp-label">Key</span>{node.camelotKey}</span>{/if}
+				{#if node.energy != null}<span class="fp-chip"><span class="fp-label">Energy</span>{Math.round(node.energy * 100)}%</span>{/if}
+				{#if node.danceability != null}<span class="fp-chip"><span class="fp-label">Dance</span>{Math.round(node.danceability * 100)}%</span>{/if}
+			</div>
+		{/if}
 
 		<!-- Why it connects -->
 		<div class="why-section">
-			<div class="why-heading">Why it connects</div>
-			{#if node.why}
-				<div class="why-line">{node.why}</div>
-			{/if}
-			<div class="why-reason">
+			<div class="why-head">
 				<span class="reason-pill">{REASON_LABELS[node.primaryReason]}</span>
-				<span class="reason-explanation">{REASON_EXPLANATIONS[node.primaryReason]}</span>
+				<span class="conf-label">{Math.round(node.confidence * 100)}% match</span>
 			</div>
-			{#if node.reasonTags.length > 1}
-				<div class="extra-reasons">
-					{#each node.reasonTags.slice(1) as reason}
-						<span class="reason-mini">{REASON_LABELS[reason]}</span>
-					{/each}
-				</div>
-			{/if}
-			<div class="conf-row">
-				<div class="conf-bar"><div class="conf-fill" style:width="{node.confidence * 100}%"></div></div>
-				<span class="conf-label">{Math.round(node.confidence * 100)}% confidence</span>
+			<p class="why-line">{node.why || REASON_EXPLANATIONS[node.primaryReason]}</p>
+			<div class="meta-row">
+				{#if node.topGenre}<span class="meta-tag genre">{node.topGenre}</span>{/if}
+				<span class="meta-tag">{SOURCE_LABELS[node.source]}</span>
+				{#each node.reasonTags.slice(1) as reason}
+					<span class="meta-tag">{REASON_LABELS[reason]}</span>
+				{/each}
+				{#if node.isColdStart}<span class="meta-tag">Cold start</span>{/if}
 			</div>
 		</div>
 
-		<!-- Genre / source metadata -->
-		<div class="meta-row">
-			{#if node.topGenre}<span class="meta-tag genre">{node.topGenre}</span>{/if}
-			<span class="meta-tag source">{SOURCE_LABELS[node.source]}</span>
-			{#if node.isColdStart}<span class="meta-tag cold">Cold start</span>{/if}
-		</div>
-
-		<!-- Action stack -->
+		<!-- Actions: three primary, the rest behind More -->
 		<div class="actions" role="group" aria-label="Track actions">
 			<button
 				class="action-btn primary"
@@ -314,25 +301,8 @@
 				aria-busy={resolvingAction === 'play-now'}
 				aria-label="Play {node.title} now"
 			>
-				{#if resolvingAction === 'play-now'}<span class="button-spinner" aria-hidden="true"></span> Resolving...{:else}{SIDE_PANEL_ACTIONS.playNow}{/if}
-			</button>
-			<button
-				class="action-btn"
-				onclick={handlePlayNext}
-				disabled={resolvingAction !== null}
-				aria-busy={resolvingAction === 'play-next'}
-				aria-label="Play {node.title} next"
-			>
-				{#if resolvingAction === 'play-next'}<span class="button-spinner" aria-hidden="true"></span> Resolving...{:else}{SIDE_PANEL_ACTIONS.playNext}{/if}
-			</button>
-			<button
-				class="action-btn"
-				onclick={handleStartRadioHere}
-				disabled={isStartingRadio || resolvingAction !== null}
-				aria-busy={resolvingAction === 'radio'}
-				aria-label="Start radio from {node.title}"
-			>
-				{#if resolvingAction === 'radio'}<span class="button-spinner" aria-hidden="true"></span> Resolving...{:else if isStartingRadio}Starting...{:else}{SIDE_PANEL_ACTIONS.startRadioHere}{/if}
+				{#if resolvingAction === 'play-now'}<span class="button-spinner" aria-hidden="true"></span>{/if}
+				Play
 			</button>
 			<button
 				class="action-btn"
@@ -342,33 +312,46 @@
 			>
 				{SIDE_PANEL_ACTIONS.branchHere}
 			</button>
-			<button class="action-btn" onclick={handleLockAsAnchor} aria-label="Lock {node.title} as seed anchor">
-				{$discoverSpaceStore.lockedSeedId === node.trackId ? '🔒 Locked' : SIDE_PANEL_ACTIONS.lockAsAnchor}
-			</button>
 			<button
 				class="action-btn"
-				class:active={node.inPlaylistBuilder}
-				onclick={handleAddToPlaylist}
-				aria-label="{node.inPlaylistBuilder ? 'Remove from' : 'Add to'} playlist"
+				onclick={handleStartRadioHere}
+				disabled={isStartingRadio || resolvingAction !== null}
+				aria-busy={resolvingAction === 'radio'}
+				aria-label="Start radio from {node.title}"
 			>
-				{node.inPlaylistBuilder ? '★ In playlist' : SIDE_PANEL_ACTIONS.addToPlaylist}
+				{#if resolvingAction === 'radio' || isStartingRadio}<span class="button-spinner" aria-hidden="true"></span>{/if}
+				Radio
 			</button>
-			<button
-				class="action-btn"
-				onclick={handleAddToBlend}
-				disabled={$discoverSpaceStore.blendSeeds.length >= 4}
-				aria-label="Add {node.title} to blend"
-			>
-				Add to blend
-			</button>
-			<button
-				class="action-btn destructive"
-				onclick={handleHideFromRadio}
-				disabled={isHiding}
-				aria-label="Hide {node.title} from radio"
-			>
-				{isHiding ? 'Hiding…' : SIDE_PANEL_ACTIONS.hideFromRadio}
-			</button>
+			<div class="more-wrap" bind:this={moreWrap}>
+				<button
+					class="action-btn icon"
+					onclick={() => (moreOpen = !moreOpen)}
+					aria-haspopup="menu"
+					aria-expanded={moreOpen}
+					aria-label="More actions for {node.title}"
+				>
+					<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3" /><circle cx="8" cy="8" r="1.3" /><circle cx="12.5" cy="8" r="1.3" /></svg>
+				</button>
+				{#if moreOpen}
+					<div class="more-menu" role="menu">
+						<button role="menuitem" onclick={() => runMore(handlePlayNext)} disabled={resolvingAction !== null}>
+							{resolvingAction === 'play-next' ? 'Resolving...' : SIDE_PANEL_ACTIONS.playNext}
+						</button>
+						<button role="menuitem" onclick={() => runMore(handleLockAsAnchor)}>
+							{$discoverSpaceStore.lockedSeedId === node.trackId ? 'Locked as anchor' : SIDE_PANEL_ACTIONS.lockAsAnchor}
+						</button>
+						<button role="menuitem" onclick={() => runMore(handleAddToPlaylist)}>
+							{node.inPlaylistBuilder ? 'Remove from playlist' : SIDE_PANEL_ACTIONS.addToPlaylist}
+						</button>
+						<button role="menuitem" onclick={() => runMore(handleAddToBlend)} disabled={$discoverSpaceStore.blendSeeds.length >= 4}>
+							Add to blend
+						</button>
+						<button role="menuitem" class="destructive" onclick={() => runMore(handleHideFromRadio)} disabled={isHiding}>
+							{isHiding ? 'Hiding...' : SIDE_PANEL_ACTIONS.hideFromRadio}
+						</button>
+					</div>
+				{/if}
+			</div>
 		</div>
 
 		<!-- Screen reader summary -->
@@ -379,162 +362,166 @@
 			Source: {SOURCE_LABELS[node.source]}.
 		</p>
 	{:else if seedNode}
-		<!-- Idle state: show anchor star context + instructions -->
+		<!-- Idle: the anchor the map grows from -->
 		<div class="panel-idle">
-			<div class="idle-anchor">
-				{#if seedNode.artworkUrl}
-					<ArtworkImage
-						className="idle-artwork"
-						src={seedNode.artworkUrl}
-						size={320}
-						fallbackText={fallbackText(seedNode.title)}
-						decorative={true}
-					/>
-				{:else}
-					<div class="idle-artwork-placeholder" aria-hidden="true"></div>
+			<ArtworkImage
+				className="idle-artwork"
+				src={seedNode.artworkUrl}
+				size={320}
+				fallbackText={fallbackText(seedNode.title)}
+				decorative={true}
+				tint={true}
+			/>
+			<div class="idle-anchor-info">
+				<div class="idle-anchor-label">Anchor</div>
+				<div class="idle-anchor-title" title={seedNode.title}>{seedNode.title}</div>
+				<div class="idle-anchor-artist">{seedNode.artist}</div>
+				{#if seedNode.genres.length > 0}
+					<div class="idle-genres">
+						{#each seedNode.genres.slice(0, 3) as g}
+							<span class="meta-tag genre">{g}</span>
+						{/each}
+					</div>
 				{/if}
-				<div class="idle-anchor-info">
-					<div class="idle-anchor-label">Anchor Star</div>
-					<div class="idle-anchor-title">{seedNode.title}</div>
-					<div class="idle-anchor-artist">{seedNode.artist}</div>
-				</div>
 			</div>
-
-			{#if seedNode.genres.length > 0}
-				<div class="idle-genres">
-					{#each seedNode.genres.slice(0, 3) as g}
-						<span class="idle-genre-tag">{g}</span>
-					{/each}
-				</div>
-			{/if}
-
-			<div class="idle-lens">
-				<span class="idle-lens-name">{LENS_LABELS[$discoverSpaceStore.lens]}</span>
-				<span class="idle-lens-desc">{LENS_DESCRIPTIONS[$discoverSpaceStore.lens]}</span>
-			</div>
-
-			<div class="idle-instructions">
-				<div class="idle-instr-row"><span class="idle-dot" aria-hidden="true">·</span> Hover a star to inspect it</div>
-				<div class="idle-instr-row"><span class="idle-dot" aria-hidden="true">·</span> Click a star to open its chart</div>
-				<div class="idle-instr-row"><span class="idle-dot" aria-hidden="true">·</span> Start radio here to trace a route</div>
-			</div>
-		</div>
-	{:else}
-		<div class="panel-empty">
-			<span class="panel-empty-icon" aria-hidden="true">◈</span>
-			<span>Play something to seed the map</span>
 		</div>
 	{/if}
 </aside>
 
 <style>
+	/* No inner scroll: the More menu has to escape the card, and the results
+	   list under it is the part that gives up height. Stacks above the list so
+	   the menu paints over it. */
 	.side-panel {
-		height: 100%;
-		overflow-y: auto;
-		padding: 12px;
+		position: relative;
+		z-index: 2;
+		flex-shrink: 0;
+		padding: var(--space-4);
 		display: flex;
 		flex-direction: column;
-		gap: 12px;
-		border-left: 1px solid var(--border-subtle);
+		gap: var(--space-3);
+		border-radius: var(--radius-lg);
+		/* Frosted, in the theme colours, like the results list under it. */
+		background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
+		backdrop-filter: var(--blur-base);
+		-webkit-backdrop-filter: var(--blur-base);
+		border: 1px solid var(--panel-border);
 	}
-	.panel-empty {
-		height: 100%;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 8px;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-sm);
-	}
-	.panel-empty-icon { font-size: var(--font-size-2xl); opacity: 0.3; }
+	.side-panel.empty { display: none; }
 
-	.panel-header { display: flex; gap: 10px; align-items: flex-start; }
-	.panel-header :global(.artwork) { width: 56px; height: 56px; border-radius: 6px; flex-shrink: 0; }
+	.panel-header { display: flex; gap: var(--space-3); align-items: center; min-width: 0; }
+	.panel-header :global(.artwork) { width: 72px; height: 72px; border-radius: var(--radius-md); flex-shrink: 0; box-shadow: 0 4px 14px var(--player-art-shadow); }
 	.panel-header :global(img.artwork) { object-fit: cover; display: block; }
-	.panel-header :global(.artwork.fallback) { display: grid; place-items: center; background: var(--bg-surface); }
-	.panel-header :global(.artwork.fallback span) { font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); color: var(--text-secondary); }
-	.artwork-placeholder { width: 56px; height: 56px; border-radius: 6px; background: var(--bg-surface); flex-shrink: 0; }
+	.panel-header :global(.artwork.fallback) { display: grid; place-items: center; }
+	.panel-header :global(.artwork.fallback span) { font-size: var(--font-size-md); font-weight: var(--font-weight-semibold); }
 	.panel-title-group { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-	.panel-title { font-weight: var(--font-weight-semibold); font-size: var(--font-size-sm); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.panel-artist { font-size: var(--font-size-xs); color: var(--text-secondary); }
-	.panel-album { font-size: var(--font-size-xs); color: var(--text-tertiary); }
+	.panel-title {
+		font-weight: var(--font-weight-semibold);
+		font-size: var(--font-size-md);
+		line-height: var(--line-height-snug);
+		color: var(--text-primary);
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+	.panel-artist { font-size: var(--font-size-sm); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.panel-album { font-size: var(--font-size-xs); color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 	.fingerprint { display: flex; flex-wrap: wrap; gap: 6px; }
 	.fp-chip {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 5px;
+		padding: 4px 9px;
+		border-radius: 999px;
 		background: var(--bg-surface);
-		border: 1px solid var(--panel-border);
-		border-radius: 6px;
-		padding: 5px 8px;
-		display: flex;
-		flex-direction: column;
-		gap: 3px;
-		flex: 1;
-		min-width: 60px;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-primary);
+		font-variant-numeric: tabular-nums;
 	}
-	.fp-chip.narrow { min-width: 44px; flex: 0; }
-	.fp-label { font-size: var(--font-size-2xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-tertiary); }
-	.fp-value { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); font-variant-numeric: tabular-nums; }
-	.fp-bar { height: 3px; background: var(--bg-hover); border-radius: 999px; overflow: hidden; }
-	.fp-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+	.fp-label { font-size: var(--font-size-2xs); font-weight: var(--font-weight-medium); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-tertiary); }
 
 	.why-section { display: flex; flex-direction: column; gap: 6px; }
-	.why-line { font-size: var(--font-size-xs); color: var(--accent-strong); }
-	.why-heading { font-size: var(--font-size-2xs); text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-tertiary); }
-	.why-reason { display: flex; flex-direction: column; gap: 3px; }
-	.reason-pill { font-size: var(--font-size-2xs); font-weight: var(--font-weight-semibold); color: var(--accent-strong); }
-	.reason-explanation { font-size: var(--font-size-xs); color: var(--text-tertiary); line-height: var(--line-height-normal); }
-	.extra-reasons { display: flex; flex-wrap: wrap; gap: 4px; }
-	.reason-mini {
-		padding: 1px 6px;
-		border-radius: 4px;
-		background: var(--accent-soft);
-		color: var(--accent-strong);
+	.why-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+	.reason-pill { font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); color: var(--accent-strong); }
+	.conf-label { font-size: var(--font-size-xs); color: var(--text-tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+	.why-line { margin: 0; font-size: var(--font-size-sm); line-height: var(--line-height-normal); color: var(--text-secondary); }
+
+	.meta-row, .idle-genres { display: flex; flex-wrap: wrap; gap: 4px; }
+	.meta-tag {
+		padding: 2px 8px;
+		border-radius: 999px;
+		background: var(--bg-surface);
+		color: var(--text-tertiary);
 		font-size: var(--font-size-2xs);
 	}
-	.conf-row { display: flex; align-items: center; gap: 6px; }
-	.conf-bar { flex: 1; height: 3px; background: var(--bg-hover); border-radius: 999px; overflow: hidden; }
-	.conf-fill { height: 100%; background: var(--accent); border-radius: 999px; }
-	.conf-label { font-size: var(--font-size-2xs); color: var(--text-tertiary); white-space: nowrap; }
-
-	.meta-row { display: flex; flex-wrap: wrap; gap: 4px; }
-	.meta-tag { padding: 2px 7px; border-radius: 4px; font-size: var(--font-size-2xs); }
 	.meta-tag.genre { background: color-mix(in srgb, var(--state-success) 14%, transparent); color: var(--state-success); }
-	.meta-tag.source { background: var(--accent-soft); color: var(--accent-strong); }
-	.meta-tag.cold { background: var(--bg-surface); color: var(--text-tertiary); }
 
-	.actions { display: flex; flex-direction: column; gap: 5px; }
+	.actions { display: flex; gap: 6px; align-items: center; }
 	.action-btn {
-		padding: 8px 12px;
-		border-radius: 8px;
-		border: 1px solid var(--panel-border);
-		background: var(--bg-surface);
-		color: var(--text-secondary);
-		font-size: var(--font-size-xs);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		min-height: 34px;
+		padding: 0 var(--space-3);
+		border-radius: 999px;
+		border: 1px solid var(--border-muted);
+		background: transparent;
+		color: var(--text-primary);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
+		white-space: nowrap;
 		cursor: pointer;
-		text-align: left;
-		transition: background var(--motion-fast), color var(--motion-fast);
+		transition: background var(--motion-fast), border-color var(--motion-fast), filter var(--motion-fast);
 	}
-	.action-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
-	.action-btn.primary {
-		background: var(--accent-line);
-		border-color: var(--accent-line);
-		color: var(--accent-strong);
-	}
-	.action-btn.primary:hover:not(:disabled) { background: var(--accent-line); }
-	.action-btn.active { color: var(--state-warning); border-color: color-mix(in srgb, var(--state-warning) 40%, transparent); }
-	.action-btn.destructive { color: var(--state-error); }
-	.action-btn.destructive:hover:not(:disabled) { color: var(--state-error); background: color-mix(in srgb, var(--state-error) 10%, transparent); }
+	.action-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
+	.action-btn.primary { flex: 1; border-color: var(--accent); background: var(--accent); color: var(--text-on-accent); }
+	.action-btn.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+	.action-btn.icon { width: 34px; padding: 0; }
+	.action-btn.icon svg { width: 16px; height: 16px; fill: currentColor; }
 	.action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+	.more-wrap { position: relative; margin-left: auto; }
+	.more-menu {
+		position: absolute;
+		right: 0;
+		top: calc(100% + 6px);
+		z-index: 20;
+		min-width: 190px;
+		padding: 4px;
+		display: flex;
+		flex-direction: column;
+		border-radius: var(--radius-md);
+		background: var(--bg-surface-strong);
+		border: 1px solid var(--panel-border);
+		box-shadow: var(--panel-shadow);
+	}
+	.more-menu button {
+		min-height: 34px;
+		padding: 0 var(--space-3);
+		border: 0;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-primary);
+		font-size: var(--font-size-sm);
+		text-align: left;
+		cursor: pointer;
+	}
+	.more-menu button:hover:not(:disabled), .more-menu button:focus-visible { background: var(--bg-hover); }
+	.more-menu button.destructive { color: var(--state-error); }
+	.more-menu button:disabled { opacity: 0.4; cursor: not-allowed; }
+
 	.button-spinner {
 		display: inline-block;
 		width: 0.75rem;
 		height: 0.75rem;
-		margin-right: 6px;
 		border: 2px solid var(--border-strong);
 		border-top-color: currentColor;
 		border-radius: 999px;
-		vertical-align: -1px;
 		animation: button-spin 0.8s linear infinite;
 	}
 	@keyframes button-spin {
@@ -552,55 +539,19 @@
 		border: 0;
 	}
 
-	/* Idle state (seed selected but no node clicked) */
-	.panel-idle {
-		display: flex;
-		flex-direction: column;
-		gap: 14px;
-		padding: 4px 0;
-	}
-	.idle-anchor {
-		display: flex;
-		gap: 10px;
-		align-items: flex-start;
-	}
-	.idle-anchor :global(.idle-artwork) {
-		width: 40px; height: 40px; border-radius: 5px; flex-shrink: 0;
-		box-shadow: 0 0 0 1px var(--accent-glow), 0 0 10px var(--accent-glow);
-	}
-	.idle-anchor :global(img.idle-artwork) { object-fit: cover; display: block; }
-	.idle-anchor :global(.idle-artwork.fallback) { display: grid; place-items: center; background: var(--accent-soft); border: 1px solid var(--accent-line); }
-	.idle-anchor :global(.idle-artwork.fallback span) { font-size: var(--font-size-2xs); font-weight: var(--font-weight-semibold); color: var(--text-secondary); }
-	.idle-artwork-placeholder {
-		width: 40px; height: 40px; border-radius: 5px; flex-shrink: 0;
-		background: var(--accent-soft);
-		border: 1px solid var(--accent-line);
-	}
-	.idle-anchor-info { flex: 1; min-width: 0; }
+	/* Idle: the anchor the map grows from */
+	.panel-idle { display: flex; gap: var(--space-3); align-items: center; min-width: 0; }
+	.panel-idle :global(.idle-artwork) { width: 56px; height: 56px; border-radius: var(--radius-md); flex-shrink: 0; box-shadow: 0 0 0 2px var(--accent-line); }
+	.panel-idle :global(img.idle-artwork) { object-fit: cover; display: block; }
+	.panel-idle :global(.idle-artwork.fallback) { display: grid; place-items: center; }
+	.panel-idle :global(.idle-artwork.fallback span) { font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); }
+	.idle-anchor-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 	.idle-anchor-label {
 		font-size: var(--font-size-2xs); text-transform: uppercase; letter-spacing: 0.1em;
-		color: var(--accent-strong); margin-bottom: 2px;
+		color: var(--accent-strong);
 	}
 	.idle-anchor-title { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.idle-anchor-artist { font-size: var(--font-size-xs); color: var(--text-tertiary); }
+	.idle-anchor-artist { font-size: var(--font-size-xs); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.idle-genres { margin-top: 4px; }
 
-	.idle-genres { display: flex; flex-wrap: wrap; gap: 4px; }
-	.idle-genre-tag {
-		padding: 2px 7px; border-radius: 4px; font-size: var(--font-size-2xs);
-		background: color-mix(in srgb, var(--state-success) 14%, transparent); color: var(--state-success);
-	}
-
-	.idle-lens {
-		display: flex; flex-direction: column; gap: 3px;
-		padding: 8px 10px;
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		border-radius: 6px;
-	}
-	.idle-lens-name { font-size: var(--font-size-2xs); text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent-strong); }
-	.idle-lens-desc { font-size: var(--font-size-xs); color: var(--text-tertiary); line-height: var(--line-height-normal); }
-
-	.idle-instructions { display: flex; flex-direction: column; gap: 5px; padding-top: 2px; }
-	.idle-instr-row { font-size: var(--font-size-xs); color: var(--text-tertiary); display: flex; align-items: flex-start; gap: 6px; line-height: var(--line-height-normal); }
-	.idle-dot { flex-shrink: 0; color: var(--accent-strong); font-size: var(--font-size-md); line-height: var(--line-height-tight); }
 </style>

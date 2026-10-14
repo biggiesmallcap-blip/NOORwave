@@ -47,8 +47,9 @@
 			onclick={() => (showLegend = !showLegend)}
 			aria-expanded={showLegend}
 			aria-label="Toggle legend"
+			title="What the colours mean"
 		>
-			◈
+			<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 7.2v3.6M8 5.1v.1" /></svg>
 		</button>
 	</div>
 
@@ -112,7 +113,7 @@
 		padding: 3px;
 	}
 	.lens-btn {
-		padding: 4px 12px;
+		padding: 4px 10px;
 		border-radius: 999px;
 		border: none;
 		background: transparent;
@@ -130,8 +131,11 @@
 		color: var(--text-primary);
 	}
 	.legend-toggle {
+		display: inline-grid;
+		place-items: center;
 		padding: 4px 8px;
 	}
+	.legend-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
 	.legend-body {
 		display: flex;
 		flex-direction: column;

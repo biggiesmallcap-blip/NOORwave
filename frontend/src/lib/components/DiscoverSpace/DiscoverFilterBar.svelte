@@ -173,9 +173,13 @@
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--panel-border);
-		border-radius: 12px;
-		padding: 6px 10px;
+		border-radius: 18px;
+		padding: 3px 12px 3px 3px;
 		max-width: 460px;
+	}
+	.filter-bar.expanded {
+		padding: 6px 12px 12px 6px;
+		border-radius: var(--radius-lg);
 	}
 	.filter-row {
 		display: flex;
@@ -209,8 +213,8 @@
 		white-space: nowrap;
 	}
 	.coherence-slider {
-		flex: 1;
-		min-width: 60px;
+		flex: none;
+		width: 96px;
 		accent-color: var(--accent);
 	}
 	.drop-note {
