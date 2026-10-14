@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 
 const PAGE = 'src/routes/videos/liked/+page.svelte';
+const WALL = 'src/lib/video/liked_wall.ts';
 const VIDEOS_PAGE = 'src/routes/videos/+page.svelte';
 const CLIENT = 'src/lib/api/client.ts';
 const APP_CSS = 'src/app.css';
@@ -44,9 +45,11 @@ describe('liked videos contract', () => {
 		// Grouping is the server's call (one definition of "same song"), so the
 		// page keys on song_key and never re-derives identity.
 		const page = readFileSync(PAGE, 'utf8');
+		const wall = readFileSync(WALL, 'utf8');
 		expect(page).toContain('{#each shown as video, index (video.song_key)}');
-		expect(page).toContain('function face(video: LikedVideo): LikedVideoVersion');
-		expect(page).toContain('return video.versions[0];');
+		expect(page).toContain('const face = likedFace;');
+		expect(wall).toContain('export function likedFace(video: LikedVideo): LikedVideoVersion');
+		expect(wall).toContain('return video.versions[0];');
 	});
 
 	test('the versions chip is its own control, so tapping the card still plays', () => {
@@ -70,9 +73,19 @@ describe('liked videos contract', () => {
 		const page = readFileSync(PAGE, 'utf8');
 		expect(page).toContain("import { playVideo } from '$lib/stores/video_session'");
 		// One shared entry point, so no surface can drift into its own playback path.
-		expect(page).toContain("await playVideo(queue[index], { queue, source: 'search', sourceLabel })");
+		expect(page).toContain('await playVideo(queue[index], {');
+		expect(page).toContain("source: 'search',");
 		expect(page).toContain('async function playAll()');
 		expect(page).toContain('async function shuffle()');
+	});
+
+	test('a queue started while the scan is still running keeps asking the wall for new matches', () => {
+		// Play all on a 1.9k-like library early in the scan queued only what had
+		// been found at that moment, and stopped there.
+		const page = readFileSync(PAGE, 'utf8');
+		expect(page).toContain('const growing = running || scanPending;');
+		expect(page).toContain('extend: likedWallExtender(lens, Boolean(opts.shuffle))');
+		expect(page).toContain("await start(wallQueue(), 0, { playThrough: true });");
 	});
 
 	test('the ticked genre names the queue, which is what "play genre" means here', () => {
@@ -82,8 +95,10 @@ describe('liked videos contract', () => {
 
 	test('genre and year pills filter, and a year-less card drops out under a year pill', () => {
 		const page = readFileSync(PAGE, 'utf8');
-		expect(page).toContain("rows = rows.filter((v) => v.genre === activeGenre)");
-		expect(page).toContain('rows = rows.filter((v) => v.album_year === activeYear)');
+		const wall = readFileSync(WALL, 'utf8');
+		expect(page).toContain('let lens = $derived<LikedWallLens>({ query, genre: activeGenre, year: activeYear, sort });');
+		expect(wall).toContain('rows = rows.filter((v) => v.genre === lens.genre)');
+		expect(wall).toContain('rows = rows.filter((v) => v.album_year === lens.year)');
 		// Pills are built from the data, so a library with no years shows none.
 		expect(page).toContain('videos.map((v) => v.album_year)');
 		expect(page).toContain('videos.map((v) => v.genre)');

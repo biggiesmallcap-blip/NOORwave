@@ -26,6 +26,8 @@
 	import DiscoverTrainingStrip from '$lib/components/DiscoverSpace/DiscoverTrainingStrip.svelte';
 	import DiscoverHelp from '$lib/components/DiscoverSpace/DiscoverHelp.svelte';
 	import SearchField from '$lib/search/ui/SearchField.svelte';
+	import { palette } from '$lib/stores/palette';
+	import { applyPaletteTheme } from '$lib/components/wallpaper/paletteTheme';
 	import type { DiscoverTrackNode, RadioMode } from '$lib/components/DiscoverSpace/discover_space_types';
 	import { PAGE_TITLE, PAGE_SUBTITLE, SEARCH_PLACEHOLDER, EMPTY_STATE } from '$lib/components/DiscoverSpace/discover_space_story';
 
@@ -46,6 +48,11 @@
 	let anchorNode = $derived(
 		$discoverSpaceStore.nodes.find((n) => n.isSeed || n.trackId === resolvedSeedId) ?? null
 	);
+	let seedLocked = $derived($discoverSpaceStore.lockedSeedId !== null);
+	let seedTitle = $derived(
+		anchorNode?.title
+		?? ($currentTrack && $currentTrack.id === $discoverSpaceStore.activeSeedId ? $currentTrack.title : null)
+	);
 
 	// ── Interaction state ─────────────────────────────────────────────────────
 	let hoveredNode = $state<DiscoverTrackNode | null>(null);
@@ -56,6 +63,13 @@
 	let searchQuery = $state('');
 	let isSearching = $state(false);
 	let spaceCanvas: DiscoverSpace | undefined = $state();
+	// The canvas is a dark stage in every theme. Scope the dark token set, with
+	// this palette's dark ground and accents, to the canvas area so its overlays
+	// stay legible in light mode (same pattern as the Genres night sky).
+	let stageEl = $state<HTMLDivElement | null>(null);
+	$effect(() => {
+		if (stageEl) applyPaletteTheme(stageEl, $palette, 'dark');
+	});
 	let blendAction = $state<'add' | 'play' | 'radio' | null>(null);
 	let lastNodeSignature = '';
 
@@ -197,12 +211,39 @@
 <svelte:window onmouseleave={() => { hoveredNode = null; }} />
 
 <div class="discoverspace-page">
-	<!-- Header -->
+	<!-- Header: title, seed, search and help on one row -->
 	<div class="page-header">
 		<div class="header-text">
 			<h1 class="t-page-title">{PAGE_TITLE}</h1>
 			<p class="tagline">{PAGE_SUBTITLE}</p>
 		</div>
+
+		{#if $discoverSpaceStore.activeSeedId !== null}
+			<div class="seed-chip" class:locked={seedLocked}>
+				<span class="seed-source">{seedLocked ? 'Locked seed' : 'Seeded from playing'}</span>
+				{#if seedTitle}
+					<span class="seed-title" title={seedTitle}>{seedTitle}</span>
+				{/if}
+				<button
+					class="seed-toggle"
+					onclick={handleToggleLock}
+					disabled={$currentTrack?.id == null && $discoverSpaceStore.lockedSeedId === null}
+					aria-pressed={seedLocked}
+					title={seedLocked ? 'Follow what is playing again' : 'Keep this seed while the music changes'}
+				>
+					<svg viewBox="0 0 16 16" aria-hidden="true">
+						{#if seedLocked}
+							<path d="M4.5 7V5a3.5 3.5 0 0 1 7 0v2" />
+						{:else}
+							<path d="M4.5 7V5a3.5 3.5 0 0 1 6.8-1.2" />
+						{/if}
+						<rect x="3" y="7" width="10" height="7" rx="1.5" />
+					</svg>
+					{seedLocked ? 'Unlock' : 'Lock'}
+				</button>
+			</div>
+		{/if}
+
 		<form class="search-form" onsubmit={handleSearch}>
 			<SearchField
 				bind:value={searchQuery}
@@ -212,33 +253,18 @@
 				disabled={isSearching}
 				placeholder={SEARCH_PLACEHOLDER}
 			/>
-			<button class="search-btn" type="submit" disabled={isSearching || !searchQuery.trim()}>
-				{isSearching ? '⟳' : '⤑'}
+			<button
+				class="search-btn"
+				type="submit"
+				disabled={isSearching || !searchQuery.trim()}
+				aria-busy={isSearching}
+				aria-label="Jump to this sound"
+			>
+				<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" /></svg>
 			</button>
 		</form>
 		<DiscoverHelp />
 	</div>
-
-	<!-- Seed pill -->
-	{#if $discoverSpaceStore.activeSeedId !== null}
-		<div class="seed-pill">
-			<span class="seed-source">
-				{$discoverSpaceStore.activeSeedSource === 'locked' ? '🔒 Locked seed' : '▶ Auto-seeded from playing'}
-			</span>
-			{#if $currentTrack && $currentTrack.id === $discoverSpaceStore.activeSeedId}
-				<span class="seed-title">{$currentTrack.title}</span>
-			{/if}
-			<button
-				class="seed-toggle"
-				onclick={handleToggleLock}
-				disabled={$currentTrack?.id == null && $discoverSpaceStore.lockedSeedId === null}
-			>
-				{$discoverSpaceStore.lockedSeedId !== null ? 'Unlock' : 'Lock seed'}
-			</button>
-		</div>
-	{/if}
-
-	<DiscoverFilterBar />
 
 	<DiscoverBreadcrumb />
 
@@ -282,7 +308,6 @@
 		</div>
 	{/if}
 
-	<!-- Automix bar -->
 	{#if $automixEnabled}
 		<div class="automix-bar">
 			<span class="automix-dot" aria-hidden="true"></span>
@@ -295,26 +320,22 @@
 		</div>
 	{/if}
 
-	<!-- Main layout -->
+	<!-- Stage and rail: the rail drops under the stage when the workspace is narrow -->
 	<div class="page-layout">
-		<!-- Canvas area -->
-		<div class="canvas-area">
-			<!-- Empty / loading states -->
+		<div class="canvas-area" data-theme="dark" bind:this={stageEl}>
 			{#if resolvedSeedId === null}
 				<div class="empty-state">
-					<div class="empty-icon" aria-hidden="true">◈</div>
 					<div class="empty-title">{EMPTY_STATE.noSeed.title}</div>
 					<div class="empty-copy">{EMPTY_STATE.noSeed.copy}</div>
 				</div>
 			{:else if $discoverSpaceStore.loading && $discoverSpaceStore.nodes.length === 0}
 				<div class="empty-state">
-					<div class="empty-icon spinning" aria-hidden="true">◈</div>
+					<span class="empty-spinner" aria-hidden="true"></span>
 					<div class="empty-title">{EMPTY_STATE.loading.title}</div>
 					<div class="empty-copy">{EMPTY_STATE.loading.copy}</div>
 				</div>
 			{:else if $discoverSpaceStore.error && $discoverSpaceStore.nodes.length === 0}
 				<div class="empty-state">
-					<div class="empty-icon" aria-hidden="true">!</div>
 					<div class="empty-title">{EMPTY_STATE.loadFailed.title}</div>
 					<div class="empty-copy">{EMPTY_STATE.loadFailed.copy}</div>
 					<button
@@ -324,7 +345,6 @@
 				</div>
 			{:else if $discoverSpaceStore.nodes.length === 0}
 				<div class="empty-state">
-					<div class="empty-icon" aria-hidden="true">◈</div>
 					<div class="empty-title">{EMPTY_STATE.noTracks.title}</div>
 					<div class="empty-copy">{EMPTY_STATE.noTracks.copy}</div>
 				</div>
@@ -339,22 +359,19 @@
 				/>
 			{/if}
 
-			<!-- Lens control floats over canvas (top-left) -->
-			{#if $discoverSpaceStore.nodes.length > 0}
-				<div class="canvas-overlay top-left">
+			<!-- Toolbar floats over the stage: lens on the left, filters on the right -->
+			<div class="canvas-toolbar">
+				{#if $discoverSpaceStore.nodes.length > 0}
 					<DiscoverLensControl />
+				{/if}
+				<div class="toolbar-end">
+					<DiscoverFilterBar />
 				</div>
-			{/if}
-
-			<!-- Training strip bottom-center -->
-			<div class="canvas-overlay bottom-center">
-				<DiscoverTrainingStrip />
 			</div>
 
-			<!-- Seed refresh progress pill (top-right while computing) -->
 			{#if $discoverSpaceStore.refreshProgress !== null}
 				{@const rp = $discoverSpaceStore.refreshProgress}
-				<div class="canvas-overlay top-right">
+				<div class="canvas-overlay bottom-left">
 					<div class="refresh-pill">
 						<span class="refresh-spinner" aria-hidden="true"></span>
 						<span class="refresh-label">
@@ -363,22 +380,26 @@
 						<span class="refresh-pct">{Math.round(rp.progress * 100)}%</span>
 					</div>
 				</div>
+			{:else if $discoverSpaceStore.nodes.length > 0 && !selectedNode}
+				<p class="canvas-hint">Closer to the anchor ranks higher. Hover a star to inspect it.</p>
 			{/if}
+
+			<div class="canvas-overlay bottom-center">
+				<DiscoverTrainingStrip />
+			</div>
 		</div>
 
-		<!-- Ranked list (collapsible middle column) -->
-		<DiscoverRankedList onSelectNode={(node) => handleSelectNode(node)} />
-
-		<!-- Side panel -->
-		<DiscoverSidePanel
-			node={selectedNode}
-			seedNode={anchorNode}
-			onAddToPlaylist={handleAddToPlaylist}
-			onAddToBlend={handleAddToBlend}
-		/>
+		<div class="space-rail">
+			<DiscoverSidePanel
+				node={selectedNode}
+				seedNode={anchorNode}
+				onAddToPlaylist={handleAddToPlaylist}
+				onAddToBlend={handleAddToBlend}
+			/>
+			<DiscoverRankedList onSelectNode={(node) => handleSelectNode(node)} />
+		</div>
 	</div>
 
-	<!-- Hover card -->
 	<DiscoverHoverCard
 		node={hoveredNode}
 		mouseX={hoverX}
@@ -393,18 +414,19 @@
 		height: calc(100vh - 80px);
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-3, 12px);
+		gap: var(--space-3);
 		overflow: hidden;
 	}
 
+	/* -- Header ----------------------------------------------------------- */
 	.page-header {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-4, 16px);
+		gap: var(--space-4);
 		flex-shrink: 0;
+		min-width: 0;
 	}
-	.header-text { display: flex; flex-direction: column; gap: 2px; }
+	.header-text { display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
 	.tagline {
 		margin: 0;
 		font-size: var(--font-size-sm);
@@ -415,105 +437,122 @@
 		color: var(--text-primary);
 	}
 
+	.seed-chip {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		min-width: 0;
+		flex: 0 1 auto;
+		max-width: 460px;
+		padding: 4px 4px 4px var(--space-3);
+		border-radius: 999px;
+		background: var(--bg-surface);
+		font-size: var(--font-size-xs);
+	}
+	.seed-chip.locked { background: var(--accent-soft); }
+	.seed-source { color: var(--text-tertiary); white-space: nowrap; }
+	.seed-title {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-weight: var(--font-weight-semibold);
+		color: var(--text-primary);
+	}
+	.seed-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		flex-shrink: 0;
+		min-height: 26px;
+		padding: 0 10px;
+		border: 1px solid var(--border-muted);
+		border-radius: 999px;
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		cursor: pointer;
+		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
+	}
+	.seed-toggle svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+	.seed-toggle:hover:not(:disabled) { color: var(--text-primary); border-color: var(--border-strong); }
+	.seed-chip.locked .seed-toggle { color: var(--accent-strong); border-color: var(--accent-line); }
+	.seed-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+
 	.search-form {
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		flex: 1;
-		max-width: 480px;
+		flex: 1 0 260px;
+		min-width: 0;
+		max-width: 420px;
+		margin-left: auto;
 	}
 	.search-btn {
-		padding: 8px 14px;
-		border-radius: var(--radius-md);
-		border: 1px solid var(--accent-line);
-		background: var(--accent-soft);
-		color: var(--text-primary);
-		cursor: pointer;
-		font-size: var(--font-size-md);
-		transition: background var(--motion-fast), border-color var(--motion-fast);
-	}
-	.search-btn:hover:not(:disabled) { background: var(--accent-line); border-color: var(--accent); }
-	.search-btn:disabled { opacity: 0.4; cursor: default; }
-
-	.seed-pill {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 8px 14px;
-		margin: 0;
-		border-radius: 999px;
-		background: rgba(91,78,248,0.08);
-		border: 1px solid rgba(91,78,248,0.3);
-		font-size: var(--font-size-xs);
-		width: fit-content;
+		display: inline-grid;
+		place-items: center;
 		flex-shrink: 0;
-		margin: 0 var(--space-3, 12px);
-	}
-	.seed-source { color: var(--text-secondary, #a0a0c0); letter-spacing: 0.04em; }
-	.seed-title { font-weight: var(--font-weight-semibold); color: var(--text-primary, #e8e8f0); }
-	.seed-toggle {
-		margin-left: auto;
-		background: transparent;
-		border: 1px solid rgba(91,78,248,0.5);
-		color: #a0a0e8;
-		border-radius: 999px;
-		padding: 4px 12px;
-		font-size: var(--font-size-xs);
+		width: 36px;
+		height: 36px;
+		border-radius: var(--radius-md);
+		border: 0;
+		background: var(--accent);
+		color: var(--text-on-accent);
 		cursor: pointer;
-		transition: background var(--motion-fast), color var(--motion-fast);
+		transition: filter var(--motion-fast), opacity var(--motion-fast);
 	}
-	.seed-toggle:hover:not(:disabled) { background: rgba(91,78,248,0.2); color: #fff; }
-	.seed-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+	.search-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+	.search-btn:hover:not(:disabled) { filter: brightness(1.1); }
+	.search-btn:disabled { opacity: 0.35; cursor: default; }
 
+	/* -- Blend and automix strips ----------------------------------------- */
 	.automix-bar {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		padding: 6px 14px;
-		border-radius: 10px;
-		background: rgba(124,128,255,0.08);
-		border: 1px solid rgba(124,128,255,0.18);
+		border-radius: 999px;
+		background: var(--accent-soft);
 		flex-shrink: 0;
+		width: fit-content;
+		max-width: 100%;
 		font-size: var(--font-size-xs);
-		color: rgba(255,255,255,0.6);
-		margin: 0 var(--space-3, 12px);
+		color: var(--text-secondary);
 	}
 	.automix-dot {
 		width: 7px; height: 7px; border-radius: 50%;
-		background: rgba(124,128,255,1);
-		box-shadow: 0 0 6px rgba(124,128,255,0.8);
+		background: var(--accent);
+		box-shadow: 0 0 6px var(--accent-glow);
 		flex-shrink: 0;
 	}
-	.automix-label { color: rgba(255,255,255,0.8); font-weight: var(--font-weight-medium); }
+	.automix-label { color: var(--text-primary); font-weight: var(--font-weight-medium); }
 	.automix-tag {
 		padding: 2px 7px;
 		border-radius: 999px;
-		background: rgba(124,128,255,0.15);
-		color: rgba(124,128,255,1);
+		background: var(--accent-soft);
+		color: var(--accent-strong);
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-semibold);
 		letter-spacing: 0.04em;
 	}
 	.automix-seed {
-		margin-left: auto;
-		color: rgba(255,255,255,0.35);
+		color: var(--text-tertiary);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		max-width: 260px;
 	}
-	.automix-seed strong { color: rgba(255,255,255,0.6); font-weight: var(--font-weight-medium); }
+	.automix-seed strong { color: var(--text-secondary); font-weight: var(--font-weight-medium); }
 
 	.blend-strip {
 		display: flex;
 		align-items: center;
+		flex-wrap: wrap;
 		gap: 10px;
-		margin: 0 var(--space-3, 12px);
 		padding: 8px 10px;
-		border: 1px solid rgba(94,230,200,0.22);
-		border-radius: 10px;
-		background: rgba(7, 22, 25, 0.72);
-		color: rgba(255,255,255,0.72);
+		border-radius: var(--radius-md);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 		flex-shrink: 0;
 	}
@@ -525,7 +564,7 @@
 		flex: 1;
 	}
 	.blend-label {
-		color: rgba(94,230,200,0.92);
+		color: var(--accent-strong);
 		font-weight: var(--font-weight-semibold);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
@@ -537,24 +576,24 @@
 		max-width: 180px;
 		min-height: 28px;
 		padding: 4px 8px;
-		border: 1px solid rgba(94,230,200,0.24);
+		border: 1px solid var(--accent-line);
 		border-radius: 999px;
-		background: rgba(94,230,200,0.08);
-		color: rgba(235,255,250,0.88);
+		background: var(--accent-soft);
+		color: var(--text-primary);
 		cursor: pointer;
 	}
-	.blend-chip:hover { background: rgba(94,230,200,0.14); }
+	.blend-chip:hover { background: var(--accent-line); }
 	.blend-chip-title {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.blend-chip-remove { color: rgba(255,255,255,0.45); }
+	.blend-chip-remove { color: var(--text-tertiary); }
 	.blend-health {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		color: rgba(255,255,255,0.48);
+		color: var(--text-tertiary);
 		white-space: nowrap;
 	}
 	.blend-actions {
@@ -567,56 +606,89 @@
 	.blend-action {
 		min-height: 30px;
 		padding: 5px 10px;
-		border-radius: 8px;
-		border: 1px solid rgba(255,255,255,0.12);
-		background: rgba(255,255,255,0.06);
-		color: rgba(255,255,255,0.75);
+		border-radius: 999px;
+		border: 1px solid var(--border-muted);
+		background: transparent;
+		color: var(--text-secondary);
 		cursor: pointer;
 	}
 	.blend-action.primary {
-		border-color: rgba(94,230,200,0.4);
-		background: rgba(94,230,200,0.16);
-		color: rgba(235,255,250,0.95);
+		border-color: var(--accent);
+		background: var(--accent);
+		color: var(--text-on-accent);
 	}
-	.blend-action.subtle { color: rgba(255,255,255,0.48); }
-	.blend-action:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
+	.blend-action.subtle { border-color: transparent; color: var(--text-tertiary); }
+	.blend-action:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+	.blend-action.primary:hover:not(:disabled) { background: var(--accent); color: var(--text-on-accent); filter: brightness(1.1); }
 	.blend-action:disabled {
 		opacity: 0.42;
 		cursor: not-allowed;
 	}
 
+	/* -- Stage and rail --------------------------------------------------- */
 	.page-layout {
 		flex: 1;
 		display: grid;
-		/* canvas | collapsible ranked list | side panel */
-		grid-template-columns: 1fr auto 280px;
-		gap: var(--space-3, 12px);
+		grid-template-columns: minmax(0, 1fr) clamp(300px, 28%, 360px);
+		gap: var(--space-3);
 		min-height: 0;
-		padding: 0 var(--space-3, 12px);
-		padding-bottom: var(--space-3, 12px);
 	}
 
 	.canvas-area {
 		position: relative;
 		min-height: 0;
 		height: 100%;
-		border-radius: 12px;
+		border-radius: var(--radius-lg);
 		overflow: hidden;
-		background: #0a0a14;
-		border: 1px solid rgba(255,255,255,0.05);
+		background: var(--bg-base);
+		color: var(--text-primary);
+		border: 1px solid var(--border-subtle);
 	}
+
+	.space-rail {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+		min-height: 0;
+		min-width: 0;
+	}
+
+	.canvas-toolbar {
+		position: absolute;
+		top: 12px;
+		left: 12px;
+		right: 12px;
+		z-index: 10;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-start;
+		gap: var(--space-2);
+		pointer-events: none;
+	}
+	.canvas-toolbar > :global(*) { pointer-events: auto; }
+	.toolbar-end { margin-left: auto; }
 
 	.canvas-overlay {
 		position: absolute;
 		z-index: 10;
 		pointer-events: auto;
 	}
-	.canvas-overlay.top-left { top: 12px; left: 12px; }
-	.canvas-overlay.top-right { top: 12px; right: 12px; }
+	.canvas-overlay.bottom-left { bottom: 12px; left: 12px; }
 	.canvas-overlay.bottom-center {
 		bottom: 12px;
 		left: 50%;
 		transform: translateX(-50%);
+	}
+
+	.canvas-hint {
+		position: absolute;
+		left: 14px;
+		bottom: 14px;
+		z-index: 5;
+		margin: 0;
+		font-size: var(--font-size-xs);
+		color: var(--text-tertiary);
+		pointer-events: none;
 	}
 
 	.refresh-pill {
@@ -625,24 +697,24 @@
 		gap: 7px;
 		padding: 5px 10px 5px 8px;
 		border-radius: 999px;
-		background: rgba(10, 10, 30, 0.82);
-		border: 1px solid rgba(124, 128, 255, 0.3);
+		background: color-mix(in srgb, var(--bg-surface-strong) 88%, transparent);
+		border: 1px solid var(--accent-line);
 		backdrop-filter: blur(6px);
 		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.7);
+		color: var(--text-secondary);
 		white-space: nowrap;
 	}
 	.refresh-spinner {
 		width: 10px;
 		height: 10px;
 		border-radius: 50%;
-		border: 1.5px solid rgba(124, 128, 255, 0.25);
-		border-top-color: rgba(124, 128, 255, 1);
+		border: 1.5px solid var(--accent-line);
+		border-top-color: var(--accent);
 		animation: spin 0.8s linear infinite;
 		flex-shrink: 0;
 	}
-	.refresh-label { color: rgba(200, 200, 255, 0.85); }
-	.refresh-pct { color: rgba(124, 128, 255, 0.9); font-weight: var(--font-weight-semibold); margin-left: 2px; }
+	.refresh-label { color: var(--text-secondary); }
+	.refresh-pct { color: var(--accent-strong); font-weight: var(--font-weight-semibold); margin-left: 2px; }
 
 	.empty-state {
 		position: absolute;
@@ -651,42 +723,60 @@
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 8px;
-		color: rgba(255,255,255,0.35);
+		gap: 6px;
 		text-align: center;
 		padding: 24px;
 	}
-	.empty-icon {
-		font-size: var(--font-size-4xl);
-		opacity: 0.2;
-		margin-bottom: 4px;
-	}
-	.empty-icon.spinning {
-		animation: spin 3s linear infinite;
+	.empty-spinner {
+		width: 22px;
+		height: 22px;
+		margin-bottom: 6px;
+		border-radius: 50%;
+		border: 2px solid var(--border-strong);
+		border-top-color: var(--accent);
+		animation: spin 0.9s linear infinite;
 	}
 	.empty-title {
 		font-weight: var(--font-weight-semibold);
 		font-size: var(--font-size-md);
-		color: rgba(255,255,255,0.5);
+		color: var(--text-primary);
 	}
 	.empty-copy {
+		max-width: 36ch;
 		font-size: var(--font-size-sm);
-		color: rgba(255,255,255,0.3);
+		color: var(--text-secondary);
 	}
 	.retry-btn {
 		margin-top: 12px;
 		padding: 8px 20px;
-		border-radius: 8px;
-		border: 1px solid rgba(124,128,255,0.3);
-		background: rgba(124,128,255,0.12);
-		color: rgba(160,165,255,0.9);
+		border-radius: 999px;
+		border: 1px solid var(--accent-line);
+		background: var(--accent-soft);
+		color: var(--accent-strong);
 		font-size: var(--font-size-sm);
 		cursor: pointer;
 		transition: background var(--motion-fast);
 	}
-	.retry-btn:hover { background: rgba(124,128,255,0.22); }
+	.retry-btn:hover { background: var(--accent-line); }
 
 	@keyframes spin {
 		to { transform: rotate(360deg); }
+	}
+
+	/* Narrow workspace: stack the rail under a fixed-height stage and let the
+	   page scroll, instead of squeezing the stage to a sliver. */
+	@container workspace (max-width: 860px) {
+		.discoverspace-page { height: auto; overflow: visible; }
+		.page-header { flex-wrap: wrap; }
+		/* Basis 0 so the chip shrinks into the first row instead of pushing help onto its own line. */
+		.seed-chip { flex: 1 1 0; max-width: max-content; }
+		.search-form { flex-basis: 100%; max-width: none; margin-left: 0; order: 3; }
+		.page-layout { flex: none; grid-template-columns: minmax(0, 1fr); }
+		.canvas-area { height: clamp(360px, 62vh, 620px); }
+		.space-rail {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+			align-items: start;
+		}
 	}
 </style>

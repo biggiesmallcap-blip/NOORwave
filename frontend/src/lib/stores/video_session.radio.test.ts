@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { api, type TidalSearchVideo } from '$lib/api/client';
 
-import { advanceVideo, clearVideoSession, noteVideoProgress, playVideo, playVideoStation, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession, videoStationOnAir } from './video_session';
+import { advanceVideo, clearVideoSession, extendVideoQueue, noteVideoProgress, playVideo, playVideoStation, radioRetryPolicy, refillVideoRadio, reportVideoEnded, videoSession, videoStationOnAir } from './video_session';
 
 vi.mock('$lib/api/client', () => ({
 	api: {
@@ -23,21 +23,25 @@ function video(id: number, artistId: number, artistName: string, title: string):
 	};
 }
 
+const preloadedStream = { preloaded: { url: 'https://example.test/stream.m3u8', expiresAt: null } };
+
 afterEach(() => {
 	clearVideoSession();
 	vi.clearAllMocks();
 	radioRetryPolicy.delayMs = 4000;
 });
 
-test('a shelf queue plays every artist in order and stops without starting radio', async () => {
+test('a shelf queue plays every artist in order, then carries on as library radio', async () => {
 	const shelf = [
 		video(1, 10, 'Holy Fuck', 'Elevate'),
 		video(2, 20, 'Jimmy Cliff', 'Life'),
 		video(3, 30, 'JAY-Z', 'Dead Presidents'),
 	];
+	const found = video(4, 40, 'Nas', 'N.Y. State of Mind');
 	vi.mocked(api.getTidalVideoStream).mockResolvedValue({
 		hls_url: 'https://example.test/stream.m3u8', expires_at: null, quality: 'HIGH',
 	});
+	vi.mocked(api.getVideoRadioNext).mockResolvedValue({ items: [found], unfamiliar_video_ids: [] });
 
 	await playVideo(shelf[0], {
 		queue: shelf, source: 'mix', sourceLabel: 'Your library, on camera', autoplay: true,
@@ -48,8 +52,131 @@ test('a shelf queue plays every artist in order and stops without starting radio
 	expect(get(videoSession).current).toEqual(shelf[1]);
 	expect(await advanceVideo()).toBe(true);
 	expect(get(videoSession).current).toEqual(shelf[2]);
+	expect(api.getVideoRadioNext).not.toHaveBeenCalled();
+
+	expect(await advanceVideo()).toBe(true);
+	expect(get(videoSession).current).toEqual(found);
+	expect(get(videoSession).continuous).toBe(true);
+	expect(get(videoSession).sourceLabel).toBe('Video radio');
+	// Library radio from what played: no single seed, the shelf held out,
+	// its last artists as the place to flow on from.
+	expect(api.getVideoRadioNext).toHaveBeenCalledWith(expect.objectContaining({
+		seed_artist_id: null, seed_artist_name: null, seed_video_id: null,
+		exclude_video_ids: [1, 2, 3], recent_artist_ids: [10, 20, 30],
+	}));
+});
+
+test('with autoplay off a shelf stops at its end and never starts radio', async () => {
+	const shelf = [video(1, 10, 'A', 'One'), video(2, 20, 'B', 'Two')];
+	await playVideo(shelf[1], { queue: shelf, source: 'mix', sourceLabel: 'Shelf', autoplay: false }, preloadedStream);
 	expect(await advanceVideo()).toBe(false);
 	expect(api.getVideoRadioNext).not.toHaveBeenCalled();
+	expect(get(videoSession).continuous).toBe(false);
+});
+
+test('radio running dry leaves autoplay on, for this session and the next', async () => {
+	const saved = new Map<string, string>([['noor_video_autoplay_next', 'true']]);
+	vi.stubGlobal('localStorage', {
+		getItem: (key: string) => saved.get(key) ?? null,
+		setItem: (key: string, value: string) => void saved.set(key, value),
+	});
+	const only = video(1, 10, 'A', 'One');
+	vi.mocked(api.getVideoRadioNext).mockResolvedValue({ items: [], unfamiliar_video_ids: [] });
+	await playVideo(only, { queue: [only], source: 'mix', sourceLabel: 'Shelf', autoplay: true }, preloadedStream);
+	expect(await advanceVideo()).toBe(false);
+	videoSession.radioExhausted(1);
+	expect(get(videoSession).radioIssue).toContain('Radio could not find another video');
+	expect(get(videoSession).continuous).toBe(false);
+	expect(get(videoSession).autoplay).toBe(true);
+	expect(saved.get('noor_video_autoplay_next')).toBe('true');
+	vi.unstubAllGlobals();
+});
+
+test('a growing queue takes new picks from its source before radio', async () => {
+	const first = [video(1, 10, 'A', 'One'), video(2, 20, 'B', 'Two')];
+	const later = video(3, 30, 'C', 'Three');
+	const extend = vi.fn()
+		// Everything so far, an alternate cut of a queued song, and one new match.
+		.mockResolvedValueOnce([...first, video(9, 20, 'B', 'Two (Live)'), later])
+		.mockResolvedValue([...first, later]);
+	vi.mocked(api.getTidalVideoStream).mockResolvedValue({
+		hls_url: 'https://example.test/stream.m3u8', expires_at: null, quality: 'HIGH',
+	});
+	vi.mocked(api.getVideoRadioNext).mockResolvedValue({ items: [], unfamiliar_video_ids: [] });
+
+	await playVideo(first[1], { queue: first, source: 'search', sourceLabel: 'Liked videos', autoplay: true, extend }, preloadedStream);
+	expect(await advanceVideo()).toBe(true);
+	expect(get(videoSession).current).toEqual(later);
+	expect(get(videoSession).queue.map((item) => item.tidal_id)).toEqual([1, 2, 3]);
+	expect(get(videoSession).continuous).toBe(false);
+	expect(api.getVideoRadioNext).not.toHaveBeenCalled();
+
+	// Nothing new the second time: radio carries on.
+	expect(await advanceVideo()).toBe(false);
+	expect(extend).toHaveBeenCalledTimes(2);
+	expect(api.getVideoRadioNext).toHaveBeenCalled();
+	expect(get(videoSession).continuous).toBe(true);
+});
+
+test('turning autoplay off while the queue asks its source for more is respected', async () => {
+	let deliver!: (items: TidalSearchVideo[]) => void;
+	const extend = vi.fn(() => new Promise<TidalSearchVideo[]>((resolve) => { deliver = resolve; }));
+	const liked = [video(1, 10, 'A', 'One')];
+	await playVideo(liked[0], { queue: liked, source: 'search', sourceLabel: 'Liked videos', autoplay: true, extend }, preloadedStream);
+	const ending = advanceVideo();
+	await vi.waitFor(() => expect(extend).toHaveBeenCalled());
+	videoSession.setAutoplay(false);
+	deliver([video(2, 20, 'B', 'Two')]);
+	expect(await ending).toBe(true);
+	expect(get(videoSession).current?.tidal_id).toBe(1);
+	expect(get(videoSession).autoplay).toBe(false);
+	expect(get(videoSession).continuous).toBe(false);
+	expect(api.getVideoRadioNext).not.toHaveBeenCalled();
+});
+
+test('a queue picked while the old one asked its source plays on, without radio', async () => {
+	let deliver!: (items: TidalSearchVideo[]) => void;
+	const extend = vi.fn(() => new Promise<TidalSearchVideo[]>((resolve) => { deliver = resolve; }));
+	const playing = video(1, 10, 'A', 'One');
+	const after = video(5, 50, 'E', 'Five');
+	vi.mocked(api.getTidalVideoStream).mockResolvedValue({
+		hls_url: 'https://example.test/stream.m3u8', expires_at: null, quality: 'HIGH',
+	});
+	await playVideo(playing, { queue: [playing], source: 'search', sourceLabel: 'Liked videos', autoplay: true, extend }, preloadedStream);
+	const ending = advanceVideo();
+	await vi.waitFor(() => expect(extend).toHaveBeenCalled());
+	// The same video picked again from a shelf: same id, a new queue with more after it.
+	await playVideo(playing, { queue: [playing, after], source: 'mix', sourceLabel: 'Shelf', autoplay: true });
+	deliver([]);
+	expect(await ending).toBe(true);
+	expect(get(videoSession).current).toEqual(after);
+	expect(get(videoSession).sourceLabel).toBe('Shelf');
+	expect(get(videoSession).continuous).toBe(false);
+	expect(api.getVideoRadioNext).not.toHaveBeenCalled();
+});
+
+test('starting and stopping radio leaves the previous queue source behind', async () => {
+	const extend = vi.fn().mockResolvedValue([video(5, 50, 'E', 'Five')]);
+	vi.mocked(api.getVideoRadioNext).mockResolvedValue({ items: [], unfamiliar_video_ids: [] });
+	const liked = [video(1, 10, 'A', 'One')];
+	await playVideo(liked[0], { queue: liked, source: 'search', sourceLabel: 'Liked videos', autoplay: true, extend }, preloadedStream);
+	videoSession.startRadio();
+	await vi.waitFor(() => expect(get(videoSession).radioSearching).toBe(false));
+	videoSession.stopRadio();
+	expect(await extendVideoQueue(true)).toBe(0);
+	await advanceVideo();
+	expect(extend).not.toHaveBeenCalled();
+});
+
+test('a new queue drops the source of the previous queue', async () => {
+	const extend = vi.fn().mockResolvedValue([video(5, 50, 'E', 'Five')]);
+	vi.mocked(api.getVideoRadioNext).mockResolvedValue({ items: [], unfamiliar_video_ids: [] });
+	const liked = [video(1, 10, 'A', 'One')];
+	const shelf = [video(2, 20, 'B', 'Two')];
+	await playVideo(liked[0], { queue: liked, source: 'search', sourceLabel: 'Liked videos', autoplay: true, extend }, preloadedStream);
+	await playVideo(shelf[0], { queue: shelf, source: 'mix', sourceLabel: 'Shelf', autoplay: true }, preloadedStream);
+	await advanceVideo();
+	expect(extend).not.toHaveBeenCalled();
 });
 
 test('library radio keeps a mixed opening queue and appends even a large discovery batch', async () => {

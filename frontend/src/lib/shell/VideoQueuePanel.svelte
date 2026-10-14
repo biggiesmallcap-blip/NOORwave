@@ -142,7 +142,7 @@
 			? (!$videoSession.autoplay ? 'Radio paused. Turn on autoplay to resume.'
 				: $videoSession.radioSearching ? `Checking ${$videoSession.radioSeedArtistName ?? 'this artist'} and related artists…`
 				: $videoSession.radioDiscoveryMessage ?? 'Radio checks related artists as the queue plays.')
-			: 'Radio adds new videos beyond this queue.')}
+			: $videoSession.autoplay ? 'When this queue ends, radio carries on from it.' : 'Radio adds new videos beyond this queue.')}
 	</p>
 	{#if $videoSession.continuous && !$videoChannelOnAir && $videoSession.radioHits.length > 0}
 		<div class="video-radio-hits" aria-label="Recent radio discoveries">

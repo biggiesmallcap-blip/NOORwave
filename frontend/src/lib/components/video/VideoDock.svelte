@@ -10,6 +10,7 @@
 	import { isPlaying } from '$lib/stores/player';
 	import {
 		advanceVideo,
+		extendVideoQueue,
 		nextVideo,
 		noteVideoProgress,
 		previousVideo,
@@ -694,8 +695,10 @@
 	$effect(() => {
 		const next = upNext;
 		const autoplay = $videoSession.autoplay;
-		if ($videoSession.continuous && autoplay && $videoSession.queue.length - $videoSession.currentIndex <= 5) {
-			void refillVideoRadio();
+		if (autoplay && $videoSession.queue.length - $videoSession.currentIndex <= 5) {
+			// Radio refills; a plain queue asks its own source (the liked wall).
+			if ($videoSession.continuous) void refillVideoRadio();
+			else void extendVideoQueue();
 		}
 		if (!autoplay || !next) {
 			prefetchSeq += 1;
@@ -728,11 +731,13 @@
 	async function handleEnded() {
 		reportVideoEnded();
 		const endedVideoId = $videoSession.current?.tidal_id;
-		const wasRadio = $videoSession.continuous && $videoSession.autoplay;
+		const autoplay = $videoSession.autoplay;
 		const preloaded = prefetched?.videoId === upNext?.tidal_id ? prefetched : null;
+		// With autoplay on, a plain queue that ends carries on as radio; only
+		// when even radio finds nothing does it stop, with a note. Autoplay
+		// itself is never switched off here, so the next queue plays through.
 		const advanced = await advanceVideo({ preloaded });
-		if (!advanced && wasRadio && endedVideoId != null) videoSession.radioExhausted(endedVideoId);
-		else if (!advanced && $videoSession.current?.tidal_id === endedVideoId) videoSession.setAutoplay(false);
+		if (!advanced && autoplay && endedVideoId != null) videoSession.radioExhausted(endedVideoId);
 	}
 
 	function handlePlay() {

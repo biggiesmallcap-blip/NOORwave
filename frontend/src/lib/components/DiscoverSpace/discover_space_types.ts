@@ -13,6 +13,7 @@ export type DiscoverReason =
 	| 'genre'
 	| 'energy'
 	| 'external'
+	| 'similar'
 	| 'unknown';
 
 export type DiscoverLens = 'energy' | 'reason' | 'confidence' | 'source' | 'genre';
@@ -101,7 +102,12 @@ export interface DiscoverTrackNode {
 	inPlaylistBuilder: boolean;
 	isRouteOnly: boolean;              // ghost node for radio route
 
-	// Layout (server hint or client-computed)
+	// Layout. rank (0 = best) and the target radius/angle come from
+	// assignLayoutTargets; placed marks a node that has had its first position.
+	rank?: number;
+	targetR?: number;
+	targetAngle?: number;
+	placed?: boolean;
 	x: number;
 	y: number;
 	vx: number;

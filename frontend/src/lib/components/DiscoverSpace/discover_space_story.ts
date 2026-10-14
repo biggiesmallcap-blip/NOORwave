@@ -34,6 +34,7 @@ export const REASON_LABELS: Record<DiscoverReason, string> = {
 	genre: 'Genre overlap',
 	energy: 'Energy match',
 	external: 'External signal',
+	similar: 'Sounds similar',
 	unknown: 'Related',
 };
 
@@ -46,6 +47,7 @@ export const REASON_EXPLANATIONS: Record<DiscoverReason, string> = {
 	genre: 'Rooted in the same genre or subgenre family.',
 	energy: 'These tracks hit a similar physical intensity.',
 	external: 'Connected via Last.fm, Discogs, or external taste graphs.',
+	similar: 'Your listening model places these tracks close together.',
 	unknown: 'A deeper connection your model has detected.',
 };
 
@@ -72,11 +74,11 @@ export const LENS_LABELS = {
 };
 
 export const LENS_DESCRIPTIONS = {
-	energy:     'Node color shows physical intensity — blue is calm, orange is intense.',
-	reason:     'Color shows why each track connects: harmonic, behavioral, tempo, and more.',
-	confidence: 'Bright nodes are well-supported; dim/shimmering nodes are cold discoveries.',
-	source:     'Ring color shows where the track came from — library, Last.fm, or the engine.',
-	genre:      'Colors and clouds reveal sonic territories by genre family.',
+	energy:     'Color shows intensity, blue for calm to orange for intense. Grey means no audio analysis yet.',
+	reason:     'Color shows why each track connects: similar sound, listening pattern, tempo, and more.',
+	confidence: 'Bright stars are well supported; dim ones are cold discoveries.',
+	source:     'Color shows where the track came from: your library, Last.fm, or the engine.',
+	genre:      'Color shows the genre family, matching its direction from the anchor. Grey means no genre yet.',
 };
 
 export const SOURCE_LABELS = {

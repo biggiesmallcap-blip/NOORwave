@@ -52,36 +52,36 @@
 		align-items: center;
 		gap: 8px;
 		padding: 6px 14px;
-		background: rgba(10, 10, 20, 0.85);
+		background: color-mix(in srgb, var(--bg-surface-strong) 90%, transparent);
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--accent-line);
 		border-radius: 999px;
 		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.6);
+		color: var(--text-secondary);
 	}
 	.training-dot {
 		width: 6px; height: 6px; border-radius: 50%;
-		background: rgba(124, 128, 255, 0.9);
-		box-shadow: 0 0 6px rgba(124, 128, 255, 0.7);
+		background: var(--accent);
+		box-shadow: 0 0 6px var(--accent-glow);
 		flex-shrink: 0;
 		animation: pulse 1.5s ease-in-out infinite;
 	}
 	.training-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.training-bar {
 		width: 80px; height: 3px;
-		background: rgba(255,255,255,0.08);
+		background: var(--bg-hover);
 		border-radius: 999px;
 		overflow: hidden;
 		flex-shrink: 0;
 	}
 	.training-fill {
 		height: 100%;
-		background: rgba(124, 128, 255, 0.7);
+		background: var(--accent);
 		border-radius: 999px;
 		transition: width var(--motion-slow);
 	}
-	.training-count { font-size: var(--font-size-2xs); color: rgba(255,255,255,0.35); white-space: nowrap; }
+	.training-count { font-size: var(--font-size-2xs); color: var(--text-tertiary); white-space: nowrap; }
 
 	@keyframes pulse {
 		0%, 100% { opacity: 1; }
