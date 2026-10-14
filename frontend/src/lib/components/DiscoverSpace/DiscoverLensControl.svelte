@@ -13,6 +13,16 @@
 
 	const reasonOrder: DiscoverReason[] = ['similar', 'behavioral', 'harmonic', 'bpm', 'artist', 'genre', 'energy', 'external', 'unknown'];
 	const sourceOrder = ['library', 'lastfm', 'engine', 'external'] as const;
+
+	// The key lists only what is on the map right now, so it stays short.
+	let presentReasons = $derived.by(() => {
+		const seen = new Set($discoverSpaceStore.nodes.filter((n) => !n.isSeed).map((n) => n.primaryReason));
+		return reasonOrder.filter((r) => seen.has(r));
+	});
+	let presentSources = $derived.by(() => {
+		const seen = new Set<string>($discoverSpaceStore.nodes.filter((n) => !n.isSeed).map((n) => n.source));
+		return sourceOrder.filter((s) => seen.has(s));
+	});
 	const energyGradient = `linear-gradient(90deg, ${energyColor(0)}, ${energyColor(0.5)}, ${energyColor(1)})`;
 
 	// Genre key: only the families on the map right now, biggest first.
@@ -57,21 +67,21 @@
 		<div class="legend-body">
 			<p class="legend-encoding">Closer ranks higher. Bigger is surer. Direction is genre.</p>
 
-			<div class="legend-section">
+			<div class="legend-section" class:grid={$discoverSpaceStore.lens !== 'energy' && $discoverSpaceStore.lens !== 'confidence'}>
 				<div class="legend-heading">Color: {LENS_LABELS[$discoverSpaceStore.lens]}</div>
 				{#if $discoverSpaceStore.lens === 'energy'}
 					<div class="scale" style:background={energyGradient}></div>
 					<div class="scale-labels"><span>Calm</span><span>Intense</span></div>
 					<div class="legend-row"><span class="swatch" style:background={UNKNOWN_FILL}></span><span>No audio analysis yet</span></div>
 				{:else if $discoverSpaceStore.lens === 'reason'}
-					{#each reasonOrder as reason}
+					{#each presentReasons as reason}
 						<div class="legend-row">
 							<span class="swatch" style:background={EDGE_COLORS[reason]}></span>
 							<span>{REASON_LABELS[reason]}</span>
 						</div>
 					{/each}
 				{:else if $discoverSpaceStore.lens === 'source'}
-					{#each sourceOrder as src}
+					{#each presentSources as src}
 						<div class="legend-row">
 							<span class="swatch" style:background={SOURCE_RING[src]}></span>
 							<span>{SOURCE_LABELS[src]}</span>
@@ -158,11 +168,14 @@
 		border: 1px solid var(--panel-border);
 		border-radius: var(--radius-sm);
 		padding: 8px 12px;
-		min-width: 190px;
-		max-width: 230px;
+		min-width: 220px;
+		max-width: 290px;
 		font-size: var(--font-size-xs);
 	}
 	.legend-section { display: flex; flex-direction: column; gap: 4px; }
+	.legend-section.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 10px; }
+	.legend-section.grid .legend-heading { grid-column: 1 / -1; }
+	.legend-section.grid .legend-row span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.legend-heading { color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.08em; font-size: var(--font-size-2xs); margin-bottom: 2px; }
 	.legend-row { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
 	.legend-encoding { margin: 0; color: var(--text-tertiary); font-size: var(--font-size-2xs); line-height: var(--line-height-snug); }
