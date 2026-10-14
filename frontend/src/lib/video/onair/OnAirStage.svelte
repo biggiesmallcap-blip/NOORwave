@@ -663,7 +663,7 @@
 		inset: 0;
 		overflow: hidden;
 		background: #000;
-		animation: curtain-in 160ms ease-out both;
+		animation: curtain-in var(--motion-fast) both;
 	}
 	.curtain :global(img) {
 		width: 100%;
@@ -671,7 +671,7 @@
 		object-fit: cover;
 		filter: brightness(0.62) saturate(0.9) blur(1.5px);
 		transform: scale(1.04);
-		animation: curtain-drift 6s ease-out both;
+		animation: curtain-drift 6s ease-out both; /* motion-ok: a slow drift under the still, not a UI transition */
 	}
 	/* Film grain over the still, so it reads as picture, not a frozen
 	   thumbnail: a seamless tile blended softly, jittering a few times a

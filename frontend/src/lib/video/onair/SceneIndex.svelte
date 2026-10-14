@@ -296,7 +296,7 @@
 	}
 	.text {
 		min-width: 0;
-		line-height: 1.35;
+		line-height: var(--line-height-snug);
 	}
 	.name {
 		color: var(--text-primary);
@@ -355,7 +355,7 @@
 	}
 	/* It comes up softly where it is; it never travels. */
 	.card {
-		animation: preview-in 220ms var(--ease-standard) both;
+		animation: preview-in var(--motion-base) both;
 		overflow: hidden;
 		border-radius: var(--radius-md);
 		background: var(--bg-surface-strong, var(--bg-surface));

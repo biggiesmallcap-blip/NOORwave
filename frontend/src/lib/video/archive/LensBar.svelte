@@ -398,7 +398,7 @@
 		margin-top: 2px;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-regular, 400);
+		font-weight: 400;
 		white-space: normal;
 	}
 

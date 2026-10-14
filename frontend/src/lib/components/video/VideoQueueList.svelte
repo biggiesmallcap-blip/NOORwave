@@ -189,7 +189,7 @@
 	/* Opening the fullscreen queue: rows rise one after another from the
 	   bottom, next first. */
 	.video-queue-list.inverted .video-queue-row {
-		animation: row-rise 260ms var(--ease-standard) both;
+		animation: row-rise var(--motion-base) both;
 		animation-delay: calc(var(--i) * 24ms);
 	}
 

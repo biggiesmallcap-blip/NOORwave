@@ -432,7 +432,7 @@
 		font-size: var(--font-size-3xl);
 		font-style: italic;
 		font-weight: var(--font-weight-medium);
-		line-height: 1.05;
+		line-height: var(--line-height-tight);
 		letter-spacing: -0.01em;
 	}
 	.opener p {

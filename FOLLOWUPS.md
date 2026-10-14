@@ -14,10 +14,10 @@ back to the PR or commit that flagged it.
 
 Left after the Atlas and Air build (On Air, Atlas, Archive, Logbook). None
 blocks it; each is small on its own.
-- Light rule: Archive tiles use a local rule (watched or saved = lit,
-  library = warm); the Atlas uses `services/video_intel/light.rs`, which also
-  counts liked tracks and albums and one-hop warmth. Move the Archive onto
-  light.rs so the dots agree everywhere.
+- Light rule: the Archive's Best first order uses a local rule (watched or
+  saved = lit, library = warm); the Atlas uses `services/video_intel/light.rs`,
+  which also counts liked tracks and albums and one-hop warmth. Move the
+  Archive onto light.rs so its order agrees with the map.
 - Scene names: five scenes still show exemplar names ("Nicki Minaj & Charli
   xcx", "Maroon 5 & Khalid", "Dido & The Cranberries", "Meghan Trainor & Becky
   G", "Chris Webby & Avril Lavigne"); pin names in the curated table in
@@ -26,22 +26,10 @@ blocks it; each is small on its own.
 - On Air: the guide window does not scroll in time while open; Live Stage
   does not interleave concerts; +/- shapes the next 12-item refill rather
   than "the next 10 slots"; taste changes reach tomorrow's day build only.
-- Real-app checks still owed: Tauri native fullscreen with Up/Down channel
-  flips, Esc under the browser Fullscreen API, pinch zoom on a touch screen,
-  and a release build (only debug builds ran against the DB copy).
-- STYLING.md: add a short "stage stays dark" section (On Air stage and the
-  Atlas keep stage-local colours in every theme).
+- Pinch zoom on the Atlas is untested on a touch screen.
 - Archive: hide zero-count lens chips ("Clips 0" under the programmable
   default); lens choices are remembered only in the URL, not across tab hops.
 - Logbook: there is no cheap liked-videos count for its Liked row.
-- Atlas routes are not cached (no `video_routes` table); they answer in under
-  50 ms, so only add one if that changes.
-- Journeys replace Route: once the frontend calls `/api/videos/atlas/journey`
-  only, delete `GET /api/videos/atlas/route` (`video_atlas_routes::route`,
-  its test, `AtlasRoute*` types and `ArtistGraph::route` if nothing else
-  uses it).
-- Migration 077 was taken on this branch; check no other branch claimed 077
-  before merging.
 - Spawned by: branch `bsc/video-exploration-redesign-56c487` (Atlas and Air).
 
 ### tidal: confirm the playlist move toIndex convention live

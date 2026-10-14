@@ -34,7 +34,7 @@
 		if (song.cut_count > 1) {
 			items.splice(1, 0, {
 				label: `Show all ${song.cut_count} cuts`,
-				icon: '≡',
+				icon: '\u2261',
 				onSelect: () => onversions(song),
 			});
 		}

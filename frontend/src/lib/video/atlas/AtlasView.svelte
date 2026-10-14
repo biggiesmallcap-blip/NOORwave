@@ -1597,7 +1597,7 @@
 		font-size: var(--font-size-xl);
 		font-style: italic;
 		font-weight: var(--font-weight-medium);
-		line-height: 1.1;
+		line-height: var(--line-height-tight);
 	}
 
 	.key-close {
@@ -2057,7 +2057,7 @@
 		margin-left: 8px;
 		color: var(--stage-text-3);
 		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-regular, 400);
+		font-weight: 400;
 	}
 
 	.panel :global(.actions) {
