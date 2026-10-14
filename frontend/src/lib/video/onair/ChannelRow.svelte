@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { VideoChannel } from '$lib/api/video_explore_types';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import { noteVideoLaunch } from '$lib/video/launch';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -26,8 +27,12 @@
 	// Long form says when it ends: "until 15:03" reads apart from a song.
 	let longForm = $derived(slot.program != null && slot.program.duration_s >= LONG_FORM_S);
 
-	function tune() {
-		if (!channel.locked) ontune(channel);
+	/** Anything on the row tunes in; the player grows out of its thumbnail. */
+	function tune(event?: MouseEvent) {
+		if (channel.locked) return;
+		const target = event?.currentTarget instanceof Element ? event.currentTarget : null;
+		noteVideoLaunch(target?.closest('.row')?.querySelector('.thumb'));
+		ontune(channel);
 	}
 
 	function videoMenu(event: MouseEvent, target: typeof video) {

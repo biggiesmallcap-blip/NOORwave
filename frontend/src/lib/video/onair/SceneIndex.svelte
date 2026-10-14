@@ -6,6 +6,7 @@
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
 	import { cachedTidalArtwork, upscaleTidalArtwork } from '$lib/utils/artwork';
+	import { noteVideoLaunch } from '$lib/video/launch';
 	import { LONG_FORM_S, channelNumber, formatClock, formatRuntime, unlockLabel, type LiveSlot } from './clock';
 	import type { DialFamily } from './families';
 	import { channelHue } from './lineup';
@@ -57,7 +58,6 @@
 	}
 
 	function show(channel: VideoChannel, el: HTMLElement) {
-		if (channel.locked) return;
 		const at = place(el);
 		if (!at) return;
 		preview = { id: channel.id, ...at };
@@ -113,7 +113,7 @@
 								class="entry"
 								class:on-air={channel.id === onAirId}
 								class:active={preview?.id === channel.id}
-								disabled={channel.locked}
+								aria-disabled={channel.locked}
 								aria-busy={channel.id === tuningId}
 								data-dial-no={channel.no > 0 ? channel.no : undefined}
 								style:--ch-hue={channelHue(channel)}
@@ -124,14 +124,21 @@
 									show(channel, event.currentTarget);
 								}}
 								onblur={away}
-								onclick={() => ontune(channel)}
+								onclick={(event) => {
+									if (channel.locked) return;
+									// The player grows out of the preview's picture when it is
+									// up, else out of the line.
+									const art = preview?.id === channel.id ? root?.querySelector('.preview .art') : null;
+									noteVideoLaunch(art ?? event.currentTarget);
+									ontune(channel);
+								}}
 								oncontextmenu={(event) => videoMenu(event, channel)}
 							>
 								<span class="no">{channel.no > 0 ? channelNumber(channel.no) : '--'}</span>
 								<span class="text">
 									<span class="name">{channel.title}</span>
 									{#if channel.locked}
-										<span class="now">{unlockLabel(channel.unlock)}</span>
+										<span class="now">Coming up, {unlockLabel(channel.unlock)}</span>
 									{:else if video?.artist_name}
 										{#key video.artist_name}
 											<span class="now" in:fade={{ duration: 400 }}>{video.artist_name}</span>
@@ -157,7 +164,19 @@
 			out:fade|global={{ duration: 120 }}
 			aria-hidden="true"
 		>
-			<div class="card">
+			<div class="card" class:waiting={previewChannel.locked}>
+				{#if previewChannel.locked}
+					{@const unlock = previewChannel.unlock}
+					<div class="body">
+						<p class="ch"><span class="ch-no">--</span>Coming up</p>
+						<p class="title">{previewChannel.title}</p>
+						<p class="explain">
+							A scene gets its own channel once it has {unlock?.need_hours ?? 30} hours of video from {unlock?.need_artists || 40} artists.
+							{#if unlock}So far: {Math.floor(unlock.hours)} hours{#if unlock.need_artists}, {unlock.artists ?? 0} artists{/if}.{/if}
+						</p>
+						<p class="next">Video discovery adds more every day; it gets a number when it opens.</p>
+					</div>
+				{:else}
 				<div class="art">
 					{#if program?.video.artwork_url}
 						<ArtworkImage src={program.video.artwork_url} size={640} fallbackText="" decorative fadeIn loading="eager" />
@@ -187,6 +206,7 @@
 						<p class="next"><span class="mono">{formatClock(next.start_s)}</span>{splitTitle(next.video.title).song}{#if next.video.artist_name}<span class="next-artist"> - {next.video.artist_name}</span>{/if}</p>
 					{/if}
 				</div>
+				{/if}
 			</div>
 		</div>
 		{/key}
@@ -316,12 +336,12 @@
 	}
 	.entry.on-air .name { color: var(--accent-strong); }
 	.entry[aria-busy='true'] { opacity: 0.6; }
-	.entry:disabled {
-		cursor: default;
+	/* Coming up: quieter, and it explains itself on hover. */
+	.entry[aria-disabled='true'] {
+		cursor: help;
 	}
-	.entry:disabled .name,
-	.entry:disabled .no { color: var(--text-tertiary); }
-	.entry:disabled .now { font-family: var(--font-mono); }
+	.entry[aria-disabled='true'] .name,
+	.entry[aria-disabled='true'] .no { color: var(--text-tertiary); }
 
 	/* The preview: what is on, beside the line you rest on. */
 	.preview {
@@ -420,6 +440,11 @@
 		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
 		color: var(--text-tertiary);
+	}
+	.explain {
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-normal);
 	}
 	.next {
 		display: block;

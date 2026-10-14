@@ -196,8 +196,14 @@
 			{#if channels.length > 0}<span class="count">{channels.filter((channel) => !channel.locked).length} channels</span>{/if}
 		</p>
 		<div class="explore">
-			<span class="explore-hint">How far channels stray from your taste</span>
+			<span class="explore-label" aria-hidden="true">Explore</span>
 			<Segmented options={EXPLORE_OPTIONS} value={$exploreMode} label="Explore" onchange={(mode) => void changeExplore(mode)} />
+			<!-- What the three mean, on hover or focus: how far channels stray from your taste. -->
+			<div class="explore-help" role="tooltip">
+				<p><strong>Familiar</strong> Mostly your artists and their closest neighbours.</p>
+				<p><strong>Mixed</strong> Your taste, with regular steps out.</p>
+				<p><strong>Adventurous</strong> Further across the map, into scenes you rarely visit.</p>
+			</div>
 		</div>
 	</div>
 
@@ -319,16 +325,56 @@
 		font-size: var(--font-size-xs);
 	}
 	.explore {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: var(--space-3);
 	}
-	.explore-hint {
+	.explore-label {
 		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
+		font-size: var(--font-size-label);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
 	}
-	@media (max-width: 720px) {
-		.explore-hint { display: none; }
+	/* A quiet card under the control after a beat of hover (or on focus). */
+	.explore-help {
+		position: absolute;
+		top: calc(100% + 10px);
+		right: 0;
+		z-index: 10;
+		display: grid;
+		gap: 6px;
+		width: 320px;
+		padding: 12px 14px;
+		border-radius: var(--radius-md);
+		background: var(--bg-surface-strong, var(--bg-surface));
+		box-shadow:
+			0 14px 36px rgba(0, 0, 0, 0.35),
+			0 0 0 1px var(--border-subtle);
+		opacity: 0;
+		transform: translateY(-4px);
+		pointer-events: none;
+		transition:
+			opacity var(--motion-base),
+			transform var(--motion-base);
+	}
+	.explore:hover .explore-help,
+	.explore:focus-within .explore-help {
+		opacity: 1;
+		transform: none;
+		transition-delay: 350ms;
+	}
+	.explore-help p {
+		margin: 0;
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-normal);
+	}
+	.explore-help strong {
+		margin-right: 6px;
+		color: var(--text-primary);
+		font-weight: var(--font-weight-semibold);
 	}
 
 	.tonight {

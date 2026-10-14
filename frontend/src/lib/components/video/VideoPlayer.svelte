@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, type Snippet } from 'svelte';
 	import { get } from 'svelte/store';
 	import type Hls from 'hls.js';
 	import type { VideoQualityMode } from '$lib/api/client';
@@ -46,6 +46,8 @@
 		 *  player's title strip and "Coming next" pill stand down, and the
 		 *  fullscreen pills make room for the channel bug. */
 		broadcast?: boolean;
+		/** Fullscreen only: drawn before the heart (On Air's channel pill). */
+		fsLead?: Snippet;
 	};
 
 	let {
@@ -76,6 +78,7 @@
 		onToggleSaved,
 		startAt = 0,
 		broadcast = false,
+		fsLead,
 	}: Props = $props();
 
 	let container: HTMLDivElement | null = $state(null);
@@ -545,6 +548,7 @@
 
 	{#if fullscreen}
 		<div class="fs-actions">
+			{@render fsLead?.()}
 			{#if onToggleSaved}
 				<button type="button" class="fs-pill heart" class:saved onclick={() => onToggleSaved?.()} disabled={savePending}
 					aria-pressed={saved} aria-label={saved ? 'Remove video from likes' : 'Save video to likes'}

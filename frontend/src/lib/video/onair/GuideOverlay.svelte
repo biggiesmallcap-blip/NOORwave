@@ -22,12 +22,17 @@
 	// block in its channel's colour, a line at now. Arrows move, Enter tunes
 	// the focused channel. It answers keys through handleKey, which the stage
 	// calls before anything else sees them, so it works wherever focus is.
-	let { channels, currentId, nowS, ontune }: {
+	let { channels, currentId, nowS, ontune, onclose, clearBottom = 0 }: {
 		channels: readonly VideoChannel[];
 		currentId: string | null;
 		/** Live seconds since local midnight. */
 		nowS: number;
 		ontune: (channel: VideoChannel) => void;
+		/** The close button, or a click on the margin around the grid. */
+		onclose: () => void;
+		/** Px left clear at the bottom: the player's controls (and in
+		 *  fullscreen the heart, Queue and channel pills) stay usable. */
+		clearBottom?: number;
 	} = $props();
 
 	const CONCURRENCY = 4;
@@ -127,12 +132,26 @@
 	});
 </script>
 
-<div class="guide" role="dialog" aria-label="Channel guide">
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<div
+	class="guide"
+	role="dialog"
+	aria-label="Channel guide"
+	style:bottom={`${clearBottom}px`}
+	tabindex="-1"
+	onclick={(event) => {
+		// The margin around the grid closes it; anything inside does its own thing.
+		if (event.target === event.currentTarget) onclose();
+	}}
+>
 	<header class="head">
 		<span class="title">Guide</span>
 		<span class="keys">
-			<kbd>&uarr;</kbd><kbd>&darr;</kbd> channels <kbd>&larr;</kbd><kbd>&rarr;</kbd> time <kbd>Enter</kbd> tune <kbd>G</kbd> close
+			<kbd>&uarr;</kbd><kbd>&darr;</kbd> channels <kbd>&larr;</kbd><kbd>&rarr;</kbd> time <kbd>Enter</kbd> tune <kbd>Esc</kbd> close
 		</span>
+		<button type="button" class="close" aria-label="Close the guide" title="Close (Esc)" onclick={onclose}>
+			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+		</button>
 	</header>
 
 	<div class="ruler" aria-hidden="true">
@@ -210,8 +229,7 @@
 
 	.head {
 		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
+		align-items: center;
 		gap: var(--space-3);
 		padding-bottom: var(--space-3);
 	}
@@ -223,9 +241,41 @@
 		color: rgba(255, 255, 255, 0.72);
 	}
 	.keys {
+		margin-left: auto;
 		font-size: var(--font-size-2xs);
 		color: rgba(255, 255, 255, 0.5);
 		white-space: nowrap;
+	}
+	/* Big enough to hit without aiming. */
+	.close {
+		display: grid;
+		place-items: center;
+		width: 36px;
+		height: 36px;
+		margin: -6px -6px -6px 0;
+		padding: 0;
+		border: 1px solid rgba(255, 255, 255, 0.16);
+		border-radius: 50%;
+		background: rgba(255, 255, 255, 0.08);
+		color: rgba(255, 255, 255, 0.84);
+		cursor: pointer;
+		transition: background var(--motion-fast), color var(--motion-fast);
+	}
+	.close:hover {
+		background: rgba(255, 255, 255, 0.18);
+		color: #fff;
+	}
+	.close:focus-visible {
+		outline: 2px solid #fff;
+		outline-offset: 2px;
+	}
+	.close svg {
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
 	}
 	kbd {
 		display: inline-block;

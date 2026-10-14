@@ -14,6 +14,7 @@
 	import { onAirKeyAction, type OnAirAction } from './keymap';
 	import { airTick, channelHue, channelLineup, ensureLineup } from './lineup';
 	import { creditFor, lowerThirdPhase, splitTitle, type CreditSource } from './lower_third';
+	import { remotePresses } from './remote';
 	import { tuneChannel } from './tune';
 
 	// The broadcast layer over the stage while a channel is on air, on the
@@ -177,7 +178,11 @@
 	// app's own shortcuts, and only takes the keys it uses.
 	function onKeydown(event: KeyboardEvent) {
 		if (get(contextMenu).open) return;
-		if (guideOpen && guide?.handleKey(event)) {
+		// A button outside the guide (a pill, the player's controls) keeps its
+		// own Enter and Space.
+		const target = event.target instanceof Element ? event.target : null;
+		const ownKeys = (event.key === 'Enter' || event.key === ' ') && target?.closest('button, a, [role="button"]') && !target.closest('.guide');
+		if (guideOpen && !ownKeys && guide?.handleKey(event)) {
 			event.preventDefault();
 			event.stopPropagation();
 			return;
@@ -201,6 +206,15 @@
 		openContextMenu(event, buildVideoMenu(item), item.title);
 	}
 
+	// The on-screen remote (the fullscreen channel pill) presses the same
+	// actions as the keys. A press made before this stage mounted is old.
+	let handledPress = get(remotePresses)?.seq ?? 0;
+	const unsubscribePresses = remotePresses.subscribe((press) => {
+		if (!press || press.seq === handledPress) return;
+		handledPress = press.seq;
+		run(press.action);
+	});
+
 	onMount(() => {
 		void ensureLineup();
 		window.addEventListener('keydown', onKeydown, true);
@@ -208,6 +222,7 @@
 
 	onDestroy(() => {
 		if (typeof window !== 'undefined') window.removeEventListener('keydown', onKeydown, true);
+		unsubscribePresses();
 		flipper.cancel();
 		for (const timer of [digitTimer, flipTimer, noteTimer]) if (timer) clearTimeout(timer);
 	});
@@ -277,7 +292,7 @@
 	{/key}
 
 	{#if guideOpen}
-		<GuideOverlay bind:this={guide} {channels} currentId={channel.id} {nowS} ontune={(target) => flipper.go(target)} />
+		<GuideOverlay bind:this={guide} {channels} currentId={channel.id} {nowS} ontune={(target) => flipper.go(target)} onclose={() => (guideOpen = false)} clearBottom={fullscreen ? 104 : 64} />
 	{/if}
 </div>
 

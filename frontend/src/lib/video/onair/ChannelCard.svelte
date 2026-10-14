@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { VideoChannel } from '$lib/api/video_explore_types';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
+	import { noteVideoLaunch } from '$lib/video/launch';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
@@ -56,7 +57,10 @@
 	<button
 		type="button"
 		class="screen"
-		onclick={() => ontune(channel)}
+		onclick={(event) => {
+			noteVideoLaunch(event.currentTarget);
+			ontune(channel);
+		}}
 		oncontextmenu={screenMenu}
 		aria-label={video ? `Tune in to ${channel.title}: ${video.title}${video.artist_name ? ` by ${video.artist_name}` : ''}` : `Tune in to ${channel.title}`}
 	>
@@ -83,7 +87,10 @@
 	<div class="under">
 		<span class="subtitle">{channel.subtitle}</span>
 		{#if next}
-			<button type="button" class="next" onclick={() => ontune(channel)} oncontextmenu={nextMenu} title={`Next on ${channel.title}`}>
+			<button type="button" class="next" onclick={(event) => {
+				noteVideoLaunch(event.currentTarget.closest('.card')?.querySelector('.screen'));
+				ontune(channel);
+			}} oncontextmenu={nextMenu} title={`Next on ${channel.title}`}>
 				<span class="at">{formatClock(next.start_s)}</span>
 				<span class="next-title">{splitTitle(next.video.title).song}{#if next.video.artist_name}<span class="next-artist">{` - ${next.video.artist_name}`}</span>{/if}</span>
 			</button>
