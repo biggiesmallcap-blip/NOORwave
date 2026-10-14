@@ -55,12 +55,7 @@
 
 	{#if showLegend}
 		<div class="legend-body">
-			<div class="legend-section">
-				<div class="legend-heading">Reading the map</div>
-				<div class="legend-row"><span class="glyph">&#8226;&#8594;</span><span>Closer to the anchor = ranked higher</span></div>
-				<div class="legend-row"><span class="glyph">&#9675;</span><span>Bigger = more confident</span></div>
-				<div class="legend-row"><span class="glyph">&#8635;</span><span>Direction = genre family</span></div>
-			</div>
+			<p class="legend-encoding">Closer ranks higher. Bigger is surer. Direction is genre.</p>
 
 			<div class="legend-section">
 				<div class="legend-heading">Color: {LENS_LABELS[$discoverSpaceStore.lens]}</div>
@@ -96,11 +91,10 @@
 				{/if}
 			</div>
 
-			<div class="legend-section">
-				<div class="legend-heading">Stars</div>
-				<div class="legend-row"><span class="swatch seed"></span><span>Anchor</span></div>
-				<div class="legend-row"><span class="swatch playing"></span><span>Playing</span></div>
-				<div class="legend-row"><span class="swatch playlist"></span><span>In playlist</span></div>
+			<div class="legend-inline">
+				<span class="legend-row"><span class="swatch seed"></span>Anchor</span>
+				<span class="legend-row"><span class="swatch playing"></span>Playing</span>
+				<span class="legend-row"><span class="swatch playlist"></span>Playlist</span>
 			</div>
 		</div>
 	{/if}
@@ -157,7 +151,7 @@
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
+		gap: 8px;
 		background: color-mix(in srgb, var(--bg-surface-strong) 90%, transparent);
 		backdrop-filter: var(--blur-overlay);
 		-webkit-backdrop-filter: var(--blur-overlay);
@@ -171,7 +165,8 @@
 	.legend-section { display: flex; flex-direction: column; gap: 4px; }
 	.legend-heading { color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.08em; font-size: var(--font-size-2xs); margin-bottom: 2px; }
 	.legend-row { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
-	.glyph { width: 14px; flex-shrink: 0; text-align: center; color: var(--text-tertiary); }
+	.legend-encoding { margin: 0; color: var(--text-tertiary); font-size: var(--font-size-2xs); line-height: var(--line-height-snug); }
+	.legend-inline { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-top: 6px; border-top: 1px solid var(--border-subtle); }
 	.scale { height: 8px; border-radius: 999px; }
 	.scale-labels { display: flex; justify-content: space-between; color: var(--text-tertiary); font-size: var(--font-size-2xs); }
 	.swatch {
