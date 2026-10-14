@@ -9,6 +9,10 @@
 //! twice in a 6-hour block, one frontier pick in four led by scene appetite,
 //! and a concert always plays whole. Rules relax (spacing first, then song
 //! repeats) before a channel would go dark.
+//!
+//! Across channels: a day plans its channels one after another, and each
+//! keeps clear of artists the channels before it air at the same time
+//! (`Airtime`), so surfing lands somewhere new. That rule gives way first.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -22,6 +26,10 @@ pub const SPACING: usize = 12;
 /// Every fourth pick comes from the frontier when the pool has one.
 pub const FRONTIER_EVERY: usize = 4;
 const REJECTION_TRIES: usize = 24;
+/// A pick keeps clear of the artist on other channels from a minute before
+/// it starts until this long after (about two songs).
+pub const CLEAR_S: i64 = 8 * 60;
+const MINUTE_S: i64 = 60;
 /// Frontier artists without a scene compete with this appetite.
 const SCENELESS_APPETITE: f64 = 0.5;
 
@@ -138,6 +146,44 @@ impl Program {
     }
 }
 
+/// Which artists the channels planned so far air, minute by minute.
+#[derive(Debug, Default)]
+pub struct Airtime {
+    minutes: Vec<Vec<i64>>,
+}
+
+impl Airtime {
+    /// `artist` airs over [start_s, end_s).
+    pub fn record(&mut self, artist: i64, start_s: i64, end_s: i64) {
+        let first = (start_s.max(0) / MINUTE_S) as usize;
+        let last = ((end_s - 1).max(start_s).max(0) / MINUTE_S) as usize;
+        if self.minutes.len() <= last {
+            self.minutes.resize_with(last + 1, Vec::new);
+        }
+        for minute in &mut self.minutes[first..=last] {
+            if !minute.contains(&artist) {
+                minute.push(artist);
+            }
+        }
+    }
+
+    /// Whether `artist` airs anywhere in [from_s, to_s).
+    pub fn busy(&self, artist: i64, from_s: i64, to_s: i64) -> bool {
+        if to_s <= from_s || self.minutes.is_empty() {
+            return false;
+        }
+        let first = (from_s.max(0) / MINUTE_S) as usize;
+        let last = (((to_s - 1).max(0) / MINUTE_S) as usize).min(self.minutes.len() - 1);
+        first <= last
+            && self.minutes[first..=last]
+                .iter()
+                .any(|m| m.contains(&artist))
+    }
+}
+
+/// Keep clear of `Airtime` around this start time.
+type Clear<'a> = Option<(&'a Airtime, i64)>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Strictness {
     /// Full spacing window.
@@ -214,7 +260,13 @@ struct State {
 }
 
 impl State {
-    fn eligible(&mut self, pool: &Pool, bucket: usize, strictness: Strictness) -> bool {
+    fn eligible(
+        &mut self,
+        pool: &Pool,
+        bucket: usize,
+        strictness: Strictness,
+        clear: Clear,
+    ) -> bool {
         if self.exhausted.contains(&bucket) {
             return false;
         }
@@ -228,6 +280,11 @@ impl State {
             if blocked {
                 return false;
             }
+        }
+        if let Some((airtime, at_s)) = clear
+            && airtime.busy(entry.artist, at_s - MINUTE_S, at_s + CLEAR_S)
+        {
+            return false;
         }
         if entry.units.iter().all(|unit| self.used.contains(&unit.key)) {
             self.exhausted.insert(bucket);
@@ -246,6 +303,9 @@ pub struct Picker<'a> {
     /// A session refill never repeats what the session excluded and ends
     /// instead of starting over.
     session: bool,
+    /// What other channels air, kept clear of around `at_s`.
+    airtime: Option<&'a Airtime>,
+    at_s: i64,
 }
 
 impl<'a> Picker<'a> {
@@ -295,6 +355,17 @@ impl<'a> Picker<'a> {
             samplers: Samplers { rings, frontier },
             state: State::default(),
             session: false,
+            airtime: None,
+            at_s: 0,
+        }
+    }
+
+    /// With the other channels' airtime first, then without.
+    fn spreads(&self) -> &'static [bool] {
+        if self.airtime.is_some() {
+            &[true, false]
+        } else {
+            &[false]
         }
     }
 
@@ -346,12 +417,19 @@ impl<'a> Picker<'a> {
             && !self.samplers.frontier.is_empty()
             && self.state.picks % FRONTIER_EVERY == FRONTIER_EVERY - 1;
         self.state.picks += 1;
-        if frontier_turn && let Some(bucket) = self.sample_frontier(rng) {
-            return Some(self.take(bucket, rng));
+        if frontier_turn {
+            for &spread in self.spreads() {
+                if let Some(bucket) = self.sample_frontier(rng, spread) {
+                    return Some(self.take(bucket, rng));
+                }
+            }
         }
+        // Spacing on this channel outranks keeping clear of the others.
         for strictness in [Strictness::Spaced, Strictness::Adjacent] {
-            if let Some(bucket) = self.sample_rings(rng, strictness) {
-                return Some(self.take(bucket, rng));
+            for &spread in self.spreads() {
+                if let Some(bucket) = self.sample_rings(rng, strictness, spread) {
+                    return Some(self.take(bucket, rng));
+                }
             }
         }
         // Only tiny pools get here. A daily schedule would rather repeat a
@@ -360,11 +438,11 @@ impl<'a> Picker<'a> {
         if !self.session && !self.state.used.is_empty() {
             self.state.used.clear();
             self.state.exhausted.clear();
-            if let Some(bucket) = self.sample_rings(rng, Strictness::Adjacent) {
+            if let Some(bucket) = self.sample_rings(rng, Strictness::Adjacent, false) {
                 return Some(self.take(bucket, rng));
             }
         }
-        self.sample_rings(rng, Strictness::Any)
+        self.sample_rings(rng, Strictness::Any, false)
             .map(|bucket| self.take(bucket, rng))
     }
 
@@ -374,13 +452,14 @@ impl<'a> Picker<'a> {
         cum: &[(f64, usize)],
         rng: &mut StdRng,
         strictness: Strictness,
+        clear: Clear,
     ) -> Option<usize> {
         if cum.is_empty() {
             return None;
         }
         for _ in 0..REJECTION_TRIES {
             let bucket = sample_cumulative(cum, rng)?;
-            if state.eligible(pool, bucket, strictness) {
+            if state.eligible(pool, bucket, strictness, clear) {
                 return Some(bucket);
             }
         }
@@ -389,14 +468,20 @@ impl<'a> Picker<'a> {
         for (c, bucket) in cum {
             let weight = c - previous;
             previous = *c;
-            if state.eligible(pool, *bucket, strictness) {
+            if state.eligible(pool, *bucket, strictness, clear) {
                 options.push((*bucket, weight));
             }
         }
         weighted_choice(&options, rng)
     }
 
-    fn sample_rings(&mut self, rng: &mut StdRng, strictness: Strictness) -> Option<usize> {
+    fn sample_rings(
+        &mut self,
+        rng: &mut StdRng,
+        strictness: Strictness,
+        spread: bool,
+    ) -> Option<usize> {
+        let clear = self.airtime.filter(|_| spread).map(|air| (air, self.at_s));
         let Picker {
             pool,
             samplers,
@@ -411,7 +496,7 @@ impl<'a> Picker<'a> {
                 .collect();
             let ring = weighted_choice(&options, rng)?;
             if let Some(bucket) =
-                Self::sample_in(pool, state, &samplers.rings[ring], rng, strictness)
+                Self::sample_in(pool, state, &samplers.rings[ring], rng, strictness, clear)
             {
                 return Some(bucket);
             }
@@ -419,7 +504,8 @@ impl<'a> Picker<'a> {
         }
     }
 
-    fn sample_frontier(&mut self, rng: &mut StdRng) -> Option<usize> {
+    fn sample_frontier(&mut self, rng: &mut StdRng, spread: bool) -> Option<usize> {
+        let clear = self.airtime.filter(|_| spread).map(|air| (air, self.at_s));
         let Picker {
             pool,
             samplers,
@@ -442,6 +528,7 @@ impl<'a> Picker<'a> {
                 &samplers.frontier[scene].cum,
                 rng,
                 Strictness::Spaced,
+                clear,
             ) {
                 return Some(bucket);
             }
@@ -521,35 +608,60 @@ impl<'a> Picker<'a> {
     }
 }
 
+/// A channel's day on its own (see `schedule_day_with`).
+#[cfg(test)]
+pub fn schedule_day(pool: &Pool, channel: &str, day: &str) -> Vec<Program> {
+    schedule_day_with(pool, channel, day, &mut Airtime::default())
+}
+
 /// A channel's day: four 6-hour blocks laid back to back from midnight, each
 /// seeded by (channel, day, block). A block starts where the previous one's
 /// last program ended; the last program of the day may run past midnight
-/// (tomorrow's schedule still starts at 0).
-pub fn schedule_day(pool: &Pool, channel: &str, day: &str) -> Vec<Program> {
-    let mut picker = Picker::new(pool);
+/// (tomorrow's schedule still starts at 0). Picks keep clear of what
+/// `airtime` already holds where they can, and the day is added to it.
+pub fn schedule_day_with(
+    pool: &Pool,
+    channel: &str,
+    day: &str,
+    airtime: &mut Airtime,
+) -> Vec<Program> {
     let mut programs: Vec<Program> = Vec::new();
-    let mut cursor = 0i64;
-    for block in 0..BLOCKS {
-        let mut rng = StdRng::seed_from_u64(clock::seed(channel, day, block));
-        picker.new_block();
-        let end = (block as i64 + 1) * BLOCK_S;
-        while cursor < end {
-            let Some((bucket, unit)) = picker.next(&mut rng) else {
-                return programs;
-            };
-            let unit = &pool.buckets[bucket].units[unit];
-            for (video, seconds) in unit.videos() {
-                let seconds = seconds.max(1);
-                programs.push(Program {
-                    slot: programs.len() as i64,
-                    start_s: cursor,
-                    duration_s: seconds,
-                    video_id: video,
-                    why: unit.why.clone(),
-                });
-                cursor += seconds;
+    let mut aired: Vec<(i64, i64, i64)> = Vec::new();
+    {
+        let mut picker = Picker::new(pool);
+        // One artist all day (Spotlight) cannot keep clear of anyone.
+        if pool.flow == Flow::Rotation {
+            picker.airtime = Some(&*airtime);
+        }
+        let mut cursor = 0i64;
+        'day: for block in 0..BLOCKS {
+            let mut rng = StdRng::seed_from_u64(clock::seed(channel, day, block));
+            picker.new_block();
+            let end = (block as i64 + 1) * BLOCK_S;
+            while cursor < end {
+                picker.at_s = cursor;
+                let Some((bucket, unit)) = picker.next(&mut rng) else {
+                    break 'day;
+                };
+                let artist = pool.buckets[bucket].artist;
+                let unit = &pool.buckets[bucket].units[unit];
+                for (video, seconds) in unit.videos() {
+                    let seconds = seconds.max(1);
+                    programs.push(Program {
+                        slot: programs.len() as i64,
+                        start_s: cursor,
+                        duration_s: seconds,
+                        video_id: video,
+                        why: unit.why.clone(),
+                    });
+                    aired.push((artist, cursor, cursor + seconds));
+                    cursor += seconds;
+                }
             }
         }
+    }
+    for (artist, start_s, end_s) in aired {
+        airtime.record(artist, start_s, end_s);
     }
     programs
 }
@@ -827,6 +939,68 @@ pub(crate) mod tests {
                 "no repeat at a cycle seam"
             );
         }
+    }
+
+    /// Same-artist programs on two days that overlap in time.
+    fn clashes(a: &[Program], b: &[Program], artists: &HashMap<i64, i64>) -> usize {
+        a.iter()
+            .filter(|x| {
+                b.iter().any(|y| {
+                    artists[&x.video_id] == artists[&y.video_id]
+                        && x.start_s < y.end_s()
+                        && y.start_s < x.end_s()
+                })
+            })
+            .count()
+    }
+
+    #[test]
+    fn channels_planned_together_keep_artists_apart() {
+        let pool = pool(40, 12);
+        let artists = artist_of(&pool);
+        let apart = schedule_day(&pool, "scene:1", "2026-10-14");
+        let other = schedule_day(&pool, "scene:2", "2026-10-14");
+        assert!(
+            clashes(&apart, &other, &artists) > 0,
+            "on their own they clash"
+        );
+
+        let mut airtime = Airtime::default();
+        let first = schedule_day_with(&pool, "scene:1", "2026-10-14", &mut airtime);
+        let second = schedule_day_with(&pool, "scene:2", "2026-10-14", &mut airtime);
+        assert_eq!(first, apart, "the first channel plans as it would alone");
+        assert_eq!(clashes(&first, &second, &artists), 0);
+        for window in second
+            .iter()
+            .map(|p| artists[&p.video_id])
+            .collect::<Vec<_>>()
+            .windows(SPACING)
+        {
+            let distinct: HashSet<i64> = window.iter().copied().collect();
+            assert_eq!(distinct.len(), SPACING, "its own spacing still holds");
+        }
+    }
+
+    #[test]
+    fn keeping_clear_gives_way_before_a_channel_would_go_dark() {
+        // One artist all day elsewhere, and a channel of that artist alone.
+        let mut airtime = Airtime::default();
+        airtime.record(1000, 0, clock::DAY_S * 2);
+        let pool = pool(1, 4);
+        let programs = schedule_day_with(&pool, "scene:1", "2026-10-14", &mut airtime);
+        assert!(programs.last().unwrap().end_s() >= clock::DAY_S);
+    }
+
+    #[test]
+    fn airtime_knows_who_is_on_by_the_minute() {
+        let mut airtime = Airtime::default();
+        airtime.record(7, 120, 300);
+        assert!(airtime.busy(7, 0, 121));
+        assert!(airtime.busy(7, 290, 400));
+        assert!(!airtime.busy(7, 0, 120), "ends are open");
+        assert!(!airtime.busy(7, 300, 9_000));
+        assert!(!airtime.busy(8, 0, 9_000));
+        assert!(!Airtime::default().busy(7, 0, 60));
     }
 
     #[test]

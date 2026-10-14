@@ -22,7 +22,7 @@ use crate::services::video_stations::{lineup, to_item};
 
 /// Bump when a release changes what a day holds: a stored day from an older
 /// planner is rebuilt on the next request.
-pub const LINEUP_VERSION: u32 = 1;
+pub const LINEUP_VERSION: u32 = 2;
 const LINEUP_KEY_PREFIX: &str = "video_air.lineup:";
 /// Days older than this many days before the built day are dropped.
 const KEEP_DAYS: i64 = 2;
@@ -202,12 +202,31 @@ pub fn build_with(
         rewind_decade: channels::rewind_decade(universe, day),
     };
     let planned = channels::plan(universe, taste, &ctx);
+    // The narrowest channels plan first (Spotlight's one artist, then the
+    // fewest artists): the wide ones have the most room to keep clear.
+    let mut order: Vec<(bool, usize, &str, usize)> = planned
+        .iter()
+        .enumerate()
+        .filter_map(|(index, channel)| {
+            let pool = channel.pool.as_ref()?;
+            let artists = pool.buckets.iter().filter(|b| !b.units.is_empty()).count();
+            Some((
+                pool.flow != programmer::Flow::Cycle,
+                artists,
+                channel.meta.id.as_str(),
+                index,
+            ))
+        })
+        .collect();
+    order.sort();
+    let mut airtime = programmer::Airtime::default();
     let mut schedules: Vec<(String, Vec<Program>)> = Vec::new();
-    for channel in &planned {
+    for (_, _, _, index) in order {
+        let channel = &planned[index];
         let (Some(pool), Some(id)) = (&channel.pool, ChannelId::parse(&channel.meta.id)) else {
             continue;
         };
-        let mut programs = programmer::schedule_day(pool, &channel.meta.id, day);
+        let mut programs = programmer::schedule_day_with(pool, &channel.meta.id, day, &mut airtime);
         for program in programs.iter_mut().filter(|p| p.why.is_empty()) {
             program.why = channels::chip(&id, program.video_id, universe, taste);
         }
@@ -1033,13 +1052,14 @@ mod tests {
             let t_ctx = started.elapsed();
             let planned = channels::plan(&universe, &taste, &ctx);
             let t_plan = started.elapsed();
+            let mut airtime = programmer::Airtime::default();
             let schedules: Vec<(String, Vec<Program>)> = planned
                 .iter()
                 .filter_map(|c| {
                     c.pool.as_ref().map(|pool| {
                         (
                             c.meta.id.clone(),
-                            programmer::schedule_day(pool, &c.meta.id, &day),
+                            programmer::schedule_day_with(pool, &c.meta.id, &day, &mut airtime),
                         )
                     })
                 })
