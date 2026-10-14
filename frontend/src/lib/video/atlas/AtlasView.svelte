@@ -74,7 +74,7 @@
 	let renderer: AtlasRenderer | null = null;
 	let ready = $state(false);
 	let compact = $state(false);
-	let legendOpen = $state(true);
+	let legendOpen = $state(false);
 
 	type Card = { kind: 'scene'; index: number } | { kind: 'artist'; index: number } | { kind: 'journey' };
 	let card = $state<Card | null>(null);
@@ -778,7 +778,7 @@
 		const hasFocus = focus.artist != null || focus.scene != null || focus.trail.length > 0;
 		renderer.setData(data, names, { intro: !hasFocus });
 		drawnData = data;
-		if (compact) legendOpen = false;
+		legendOpen = !compact && readKeyOpen();
 		applyFocus();
 		ready = true;
 		measureTop();
@@ -885,6 +885,28 @@
 		return counts;
 	});
 	let frontierCount = $derived((you?.frontier ?? []).filter((f) => data.indexById.has(f.artist_id)).length);
+	let footTotal = $derived(footCounts[0] + footCounts[1] + footCounts[2]);
+
+	// The key stays shut unless it was left open: it explains the look once,
+	// it does not greet every visit.
+	const KEY_STORE = 'noor.atlas.key.v1';
+
+	function readKeyOpen(): boolean {
+		try {
+			return localStorage.getItem(KEY_STORE) === 'open';
+		} catch {
+			return false;
+		}
+	}
+
+	function setKeyOpen(open: boolean) {
+		legendOpen = open;
+		try {
+			localStorage.setItem(KEY_STORE, open ? 'open' : 'closed');
+		} catch {
+			// The key just opens closed next time.
+		}
+	}
 
 	let selectedIndex = $derived(card?.kind === 'artist' ? card.index : -1);
 	let selectedScene = $derived(card?.kind === 'scene' ? data.scenes[card.index] : null);
@@ -986,60 +1008,64 @@
 	{/if}
 
 	<!-- Legend -->
+	<!-- The key: shut by default, a small "How to read this" until asked.
+	     Open, it says what the look shows in words and shapes (brightness,
+	     rings, lines, size), never by colour alone. -->
 	<div class="legend" class:closed={!legendOpen}>
-		<button type="button" class="legend-toggle" onclick={() => (legendOpen = !legendOpen)} aria-expanded={legendOpen}>
-			{$atlasLook === 'picture' ? 'Picture' : 'You'}
-			<svg viewBox="0 0 24 24" aria-hidden="true"><path d={legendOpen ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6'} /></svg>
-		</button>
 		{#if legendOpen}
+			<header class="key-head">
+				<h3 class="key-title">{$atlasLook === 'picture' ? 'Picture' : 'You'}</h3>
+				<button type="button" class="key-close" onclick={() => setKeyOpen(false)} aria-label="Close the key">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+				</button>
+			</header>
 			{#if $atlasLook === 'picture'}
-				<p class="legend-copy">Every artist in the colour of its own videos' artwork; one not read yet takes its scene's colour. Zoom in close and the dots become the pictures.</p>
+				<p class="legend-copy">Each artist is a dot in the colour of their own videos. The colour is only the picture, there is no code to learn. Zoom in close and the dots become the stills.</p>
 				<ul class="legend-rows">
 					<li>
-						<span class="swatch picture" aria-hidden="true"></span>
-						<span class="l-name">Artwork</span>
-						<span class="l-help">
-							{!pictures || pictures.ready === 0
-								? 'Not read yet: it is read in the background'
-								: pictures.ready < pictures.total * 0.995
-									? `Reading: ${formatCount(pictures.total - pictures.ready)} to go`
-									: 'Read for every artist on the map'}
-						</span>
-						<span class="l-count">{formatCount(pictures?.ready ?? 0)}</span>
+						<span class="shape sizes" aria-hidden="true"><i></i><i></i><i></i></span>
+						<span class="l-text">The bigger the dot, the more videos.</span>
 					</li>
-					<li><span class="swatch l0" aria-hidden="true"></span><span class="l-name">Uncharted</span><span class="l-help">{LIGHT_HELP[0]}</span><span class="l-count">{formatCount(data.lightCounts[0])}</span></li>
+					<li>
+						<span class="shape speck" aria-hidden="true"><i></i></span>
+						<span class="l-text">Faint specks on the outer ring are not linked to the map yet.<span class="l-count">{formatCount(data.lightCounts[0])}</span></span>
+					</li>
 				</ul>
+				{#if !pictures || pictures.ready < pictures.total * 0.995}
+					<p class="legend-foot">
+						{!pictures || pictures.ready === 0
+							? "The stills are being read in the background; until then a dot takes its scene's colour."
+							: `Still reading ${formatCount(pictures.total - pictures.ready)} artists' stills.`}
+					</p>
+				{/if}
 			{:else}
-				<p class="legend-copy">What you watch leaves footprints that fade over weeks, and trails join what you watched in a row. The frontier is next door: artists beside yours you have not tried.</p>
+				<p class="legend-copy">Your watching, drawn on the map. Everything you have not been near steps back into grey.</p>
 				<ul class="legend-rows">
-					{#each ['This week', 'This month', 'Earlier'] as label, step (label)}
-						<li>
-							<span class="swatch" style:background={FOOTPRINT_COLORS[step]} aria-hidden="true"></span>
-							<span class="l-name">{label}</span>
-							<span class="l-help">{step === 0 ? 'Watched in the last 7 days' : step === 1 ? 'In the last 30 days' : 'Up to six months ago'}</span>
-							<span class="l-count">{formatCount(footCounts[step])}</span>
-						</li>
-					{/each}
 					<li>
-						<span class="swatch frontier" style:background={FRONTIER_COLORS[0]} aria-hidden="true"></span>
-						<span class="l-name">Frontier</span>
-						<span class="l-help">Next to what you watch, not watched yet</span>
-						<span class="l-count">{formatCount(frontierCount)}</span>
+						<span class="shape fade" aria-hidden="true">{#each FOOTPRINT_COLORS as color (color)}<i style:background={color}></i>{/each}</span>
+						<span class="l-text">Gold dots: artists you watched. Brightest this week, fading over six months.<span class="l-count">{formatCount(footTotal)}</span></span>
 					</li>
 					<li>
-						<span class="swatch trail" aria-hidden="true"></span>
-						<span class="l-name">Trails</span>
-						<span class="l-help">Watched in a row</span>
-						<span class="l-count">{formatCount(you?.trails.length ?? 0)}</span>
+						<span class="shape ring" aria-hidden="true"><i style:background={FRONTIER_COLORS[0]} style:color={FRONTIER_COLORS[0]}></i></span>
+						<span class="l-text">Pale blue dots, the nearest ringed: next door to what you watch, not tried yet.<span class="l-count">{formatCount(frontierCount)}</span></span>
+					</li>
+					<li>
+						<span class="shape line" aria-hidden="true"><i></i></span>
+						<span class="l-text">Lines join videos you watched one after another.<span class="l-count">{formatCount(you?.trails.length ?? 0)}</span></span>
 					</li>
 				</ul>
 			{/if}
 			{#if data.recent.length > 0}
-				<p class="legend-foot"><span class="pulse-dot" aria-hidden="true"></span>{formatCount(data.recent.length)} charted in the last hour</p>
+				<p class="legend-foot">{formatCount(data.recent.length)} artists charted in the last hour.</p>
 			{/if}
 			{#if rebuilding}
 				<p class="legend-foot">A fresh map is being drawn.</p>
 			{/if}
+		{:else}
+			<button type="button" class="key-open" onclick={() => setKeyOpen(true)} aria-expanded="false">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 11v5" /><circle class="dot-fill" cx="12" cy="8" r="0.6" /></svg>
+				How to read this
+			</button>
 		{/if}
 	</div>
 
@@ -1313,8 +1339,7 @@
 	}
 
 	.tool svg,
-	.stage :global(.close svg),
-	.legend-toggle svg {
+	.stage :global(.close svg) {
 		width: 16px;
 		height: 16px;
 		fill: none;
@@ -1394,126 +1419,213 @@
 
 	/* ---------------------------------------------------------- legend */
 
+	/* The key: a small glass card at the bottom left, shut by default. */
 	.legend {
 		position: absolute;
 		left: var(--space-3);
 		bottom: var(--space-3);
 		z-index: 2;
-		width: min(320px, calc(100% - 2 * var(--space-3)));
-		padding: var(--space-2) var(--space-3) var(--space-3);
+		width: min(300px, calc(100% - 2 * var(--space-3)));
+		padding: var(--space-3) var(--space-4) var(--space-4);
 		border-radius: var(--radius-md);
-		background: var(--stage-glass);
+		background: var(--stage-glass-strong);
 		border: 1px solid var(--stage-line);
 		backdrop-filter: blur(var(--blur-overlay, 14px));
+		animation: rise var(--motion-fast) both;
 	}
 
 	.legend.closed {
 		width: auto;
-		padding-bottom: var(--space-2);
+		padding: 0;
+		border: 0;
+		background: none;
+		backdrop-filter: none;
+		animation: none;
 	}
 
-	.legend-toggle {
+	.key-open {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		height: 32px;
+		padding: 0 14px 0 10px;
+		border-radius: 999px;
+		background: var(--stage-glass);
+		border: 1px solid var(--stage-line);
+		backdrop-filter: blur(var(--blur-overlay, 14px));
+		color: var(--stage-text-2);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-semibold);
+		white-space: nowrap;
+		transition: background var(--motion-fast), color var(--motion-fast);
+	}
+
+	.key-open:hover {
+		background: var(--stage-glass-strong);
+		color: var(--stage-text);
+	}
+
+	.key-open svg,
+	.key-close svg {
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.key-open .dot-fill {
+		fill: currentColor;
+		stroke-width: 1.4;
+	}
+
+	.key-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-2);
-		width: 100%;
+	}
+
+	/* The look's name in the titles' italic serif, as the page openers. */
+	.key-title {
+		margin: 0;
+		color: var(--stage-text);
+		font-family: var(--font-display);
+		font-size: var(--font-size-xl);
+		font-style: italic;
+		font-weight: var(--font-weight-medium);
+		line-height: 1.1;
+	}
+
+	.key-close {
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
+		margin-right: -6px;
+		border-radius: 50%;
 		color: var(--stage-text-2);
-		font-size: var(--font-size-label);
-		font-weight: var(--font-weight-semibold);
-		text-transform: uppercase;
-		letter-spacing: 0.12em;
+		transition: background var(--motion-fast), color var(--motion-fast);
+	}
+
+	.key-close:hover {
+		background: var(--stage-hover);
+		color: var(--stage-text);
+	}
+
+	.key-open:focus-visible,
+	.key-close:focus-visible {
+		outline: 2px solid var(--stage-text);
+		outline-offset: 2px;
+	}
+
+	.legend-copy {
+		margin: var(--space-2) 0 0;
+		color: var(--stage-text-2);
+		font-size: var(--font-size-xs);
+		line-height: var(--line-height-normal);
 	}
 
 	.legend-rows {
 		display: grid;
-		gap: 6px;
-		margin: var(--space-2) 0 0;
+		gap: 10px;
+		margin: var(--space-3) 0 0;
 		padding: 0;
 		list-style: none;
 	}
 
 	.legend-rows li {
 		display: grid;
-		grid-template-columns: 12px auto minmax(0, 1fr) auto;
-		align-items: center;
+		grid-template-columns: 30px minmax(0, 1fr);
+		align-items: start;
 		gap: var(--space-2);
 		font-size: var(--font-size-xs);
+		line-height: var(--line-height-normal);
 	}
 
-	.l-name {
-		color: var(--stage-text);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.l-help {
-		color: var(--stage-text-3);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+	.l-text {
+		color: var(--stage-text-2);
 	}
 
 	.l-count {
-		color: var(--stage-text-2);
-		font-family: var(--font-mono);
-		font-size: var(--font-size-2xs);
+		margin-left: 6px;
+		color: var(--stage-text-3);
 		font-variant-numeric: tabular-nums;
 	}
 
-	.swatch {
-		width: 9px;
-		height: 9px;
+	/* Each row's mark draws what the map draws: sizes, a speck, dots that
+	   fade, a ringed dot, a line. Shape and brightness carry the meaning. */
+	.shape {
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		height: 18px;
+	}
+
+	.shape i {
+		display: block;
+		flex: none;
 		border-radius: 50%;
-		justify-self: center;
 	}
 
-
-
-
-	.swatch.l0 {
-		width: 5px;
-		height: 5px;
-		background: hsla(222, 12%, 66%, 0.6);
+	.shape.sizes i {
+		background: rgba(236, 239, 247, 0.78);
 	}
 
-	/* Picture: a small mosaic of artwork colours. */
-	.swatch.picture {
-		border-radius: 3px;
-		background: conic-gradient(hsl(14, 64%, 66%), hsl(48, 52%, 70%), hsl(150, 40%, 62%), hsl(205, 58%, 68%), hsl(290, 40%, 66%), hsl(220, 6%, 66%), hsl(14, 64%, 66%));
+	.shape.sizes i:nth-child(1) {
+		width: 4px;
+		height: 4px;
 	}
 
-	.swatch.frontier {
-		box-shadow: 0 0 0 2px rgba(120, 220, 230, 0.25);
+	.shape.sizes i:nth-child(2) {
+		width: 7px;
+		height: 7px;
 	}
 
-	.swatch.trail {
-		width: 14px;
+	.shape.sizes i:nth-child(3) {
+		width: 10px;
+		height: 10px;
+	}
+
+	.shape.speck i {
+		width: 4px;
+		height: 4px;
+		margin-left: 3px;
+		background: hsla(222, 12%, 66%, 0.55);
+	}
+
+	.shape.fade i {
+		width: 7px;
+		height: 7px;
+	}
+
+	.shape.ring i {
+		width: 7px;
+		height: 7px;
+		margin-left: 4px;
+		box-shadow: 0 0 0 2px var(--stage-glass-strong), 0 0 0 3px currentColor;
+	}
+
+	.shape.line i {
+		width: 22px;
 		height: 2px;
 		border-radius: 2px;
 		background: hsla(38, 80%, 76%, 0.7);
 	}
 
-	.legend-copy {
-		margin: var(--space-2) 0 0;
+	.legend-foot {
+		margin: var(--space-3) 0 0;
 		color: var(--stage-text-3);
-		font-size: var(--font-size-xs);
+		font-size: var(--font-size-2xs);
 		line-height: var(--line-height-normal);
 	}
 
-	.legend-foot {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		margin: var(--space-2) 0 0;
-		color: var(--stage-text-3);
-		font-size: var(--font-size-2xs);
-	}
-
-	.pulse-dot {
-		width: 9px;
-		height: 9px;
-		border-radius: 50%;
-		border: 1px solid rgba(255, 240, 214, 0.8);
+	@media (prefers-reduced-motion: reduce) {
+		.legend {
+			animation: none;
+		}
 	}
 
 	/* ---------------------------------------------------------- banner, tip */
@@ -1978,13 +2090,6 @@
 		max-width: calc(100% - 2 * var(--space-3));
 	}
 
-	.compact .legend-rows li {
-		grid-template-columns: 12px auto auto;
-	}
-
-	.compact .l-help {
-		display: none;
-	}
 
 	.compact .hud-right {
 		top: auto;

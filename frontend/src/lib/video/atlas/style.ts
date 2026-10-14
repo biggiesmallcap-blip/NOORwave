@@ -23,13 +23,6 @@ export function parseLook(raw: unknown): AtlasLook {
 	return raw === 'you' || raw === 'light' ? 'you' : 'picture';
 }
 
-export const LIGHT_NAMES: Record<Light, string> = {
-	0: 'Uncharted',
-	1: 'Dim',
-	2: 'Warm',
-	3: 'Lit',
-};
-
 export const LIGHT_HELP: Record<Light, string> = {
 	0: 'Not linked to the graph yet',
 	1: 'Charted, not explored yet',

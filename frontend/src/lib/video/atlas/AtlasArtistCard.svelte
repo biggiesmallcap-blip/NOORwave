@@ -1,16 +1,19 @@
 <script lang="ts">
-	// An artist on the Atlas: where they sit, how lit they are for you, their
-	// best cuts (playable as a queue), radio, a journey that starts here, the
-	// artists they share videos with (drawn on the map too), the neighbours
-	// you can fly to, and for uncharted artists a probe that asks the crawler
-	// to chart them next.
+	// An artist on the Atlas, opened like a Today piece: a still from their
+	// best cut, the name, a few plain sentences (how much there is, where on
+	// the map, what it is tagged, how well you know them), then play and
+	// radio, a journey that starts here, their best cuts, the artists they
+	// share videos with (drawn on the map too), the neighbours you can fly
+	// to, and for uncharted artists a probe that asks the crawler to chart
+	// them next.
 	import type { AtlasArtistCard, ExploreVideo, Light } from '$lib/api/video_explore_types';
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
+	import { KNOWN_LINE, genreWords, hoursWords } from './lede';
 	import { formatRuntime, playAtlasQueue, playAtlasRadio } from './play';
-	import { LIGHT_HELP, LIGHT_NAMES, formatCount, formatHours, lightSwatch } from './style';
+	import { formatCount, lightSwatch } from './style';
 
 	let {
 		id,
@@ -56,6 +59,14 @@
 	let best = $derived(card?.best ?? []);
 	let collabs = $derived(card?.collabs ?? []);
 	let collabQueue = $derived(collabs.flatMap((collab) => (collab.video ? [collab.video] : [])));
+	let hero = $derived(best[0]?.artwork_url ?? null);
+	let videoCount = $derived(card?.videos ?? videos);
+	let amount = $derived(
+		[`${formatCount(videoCount)} ${videoCount === 1 ? 'video' : 'videos'}`, card ? hoursWords(card.hours) : '']
+			.filter(Boolean)
+			.join(', ')
+	);
+	let tagged = $derived(genreWords(card?.genres ?? []));
 
 	function artistMenu(event: MouseEvent, artist: { id: number; name: string }) {
 		openContextMenu(event, buildArtistMenu({ tidal_id: artist.id, name: artist.name }), artist.name);
@@ -74,38 +85,41 @@
 	}
 </script>
 
-<article class="card" style={`--hue: ${hue ?? 222}`} aria-label={`Artist: ${displayName}`}>
-	<header class="head">
-		<p class="kicker">
-			<span class="dot" style={`background: ${lightSwatch(effectiveLight, hue)}`} aria-hidden="true"></span>
-			{#if sceneName && onscene}
-				<button type="button" class="scene-link" onclick={onscene}>{sceneName}</button>
-			{:else if uncharted}
-				Uncharted
+<article class="card artist" aria-label={`Artist: ${displayName}`}>
+	<!-- The picture: the still from their best cut, edge to edge, melting
+	     into the panel; it plays the best cuts. -->
+	{#if hero || (loading && !card)}
+		<div class="hero">
+			{#if hero}
+				<button type="button" class="hero-pic" onclick={() => best[0] && playFrom(best[0])} aria-label={`Play ${displayName}: best cuts`}>
+					<ArtworkImage src={hero} size={640} className="hero-img" fallbackText="" decorative fadeIn />
+					<span class="hero-play" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" /></svg></span>
+				</button>
 			{:else}
-				{sceneName ?? 'Charted'}
+				<span class="hero-pic hero-wait" aria-hidden="true"></span>
 			{/if}
-		</p>
-		<button type="button" class="close" onclick={onclose} aria-label="Close artist card">
-			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
-		</button>
-	</header>
-	<h2 class="title" oncontextmenu={(event) => artistMenu(event, { id, name: displayName })}>
-		<a href={`/tidal/artists/${id}`} class="title-link">{displayName}</a>
-	</h2>
-	<p class="meta-line">
-		<span>{formatCount(card?.videos ?? videos)} videos</span>
-		{#if card}<span>{formatHours(card.hours)}</span><span>{formatCount(card.playable)} playable</span>{/if}
-	</p>
-	<p class="light-line">
-		<span class="light-name" style={`color: ${lightSwatch(effectiveLight, hue)}`}>{LIGHT_NAMES[effectiveLight]}</span>
-		<span>{LIGHT_HELP[effectiveLight]}</span>
-	</p>
-	{#if card && card.genres.length > 0}
-		<ul class="genres">
-			{#each card.genres.slice(0, 6) as genre (genre)}<li>{genre}</li>{/each}
-		</ul>
+			<button type="button" class="close on-pic" onclick={onclose} aria-label="Close artist card">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+			</button>
+		</div>
 	{/if}
+
+	<div class="name-row">
+		<h2 class="title" oncontextmenu={(event) => artistMenu(event, { id, name: displayName })}>
+			<a href={`/tidal/artists/${id}`} class="title-link">{displayName}</a>
+		</h2>
+		{#if !hero && !(loading && !card)}
+			<button type="button" class="close" onclick={onclose} aria-label="Close artist card">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+			</button>
+		{/if}
+	</div>
+
+	<p class="lede">
+		{amount}{#if uncharted}, not linked to the rest of the map yet.{:else if sceneName}, on the {#if onscene}<button type="button" class="scene-link" onclick={onscene} title="Open the scene">{sceneName}</button>{:else}{sceneName}{/if} side of the map.{:else}.{/if}
+		{#if tagged}Tagged {tagged}.{/if}
+		{KNOWN_LINE[effectiveLight]}
+	</p>
 
 	<div class="actions">
 		<button type="button" class="btn btn-primary" disabled={best.length === 0} onclick={() => best[0] && playFrom(best[0])}>
@@ -115,13 +129,10 @@
 		<button type="button" class="btn stage-secondary" disabled={best.length === 0} onclick={() => best[0] && void playAtlasRadio(best[0], displayName)}>Radio</button>
 	</div>
 
-	<button type="button" class="journey" onclick={onjourney} title="Journey somewhere new (J)">
-		<span class="journey-glyph" aria-hidden="true"></span>
-		<span class="journey-text">
-			<span class="journey-name">Journey somewhere new</span>
-			<span class="journey-copy">A playlist into a scene new to you</span>
-		</span>
-	</button>
+	<p class="journey">
+		<button type="button" class="journey-go" onclick={onjourney} title="Journey somewhere new (J)">Journey somewhere new</button>:
+		a playlist from here into a scene you have not watched.
+	</p>
 
 	{#if uncharted}
 		<div class="probe">
@@ -212,15 +223,106 @@
 
 <style>
 	/* Shared card anatomy lives on the panel in AtlasView. */
-	.scene-link {
-		color: hsl(var(--hue), 80%, 80%);
-		font: inherit;
-		letter-spacing: inherit;
-		text-transform: inherit;
+
+	/* The picture runs to the panel's edges and fades into it at the
+	   bottom, so the name sits under it without a hard line. */
+	.hero {
+		position: relative;
+		margin: calc(var(--space-4) * -1) calc(var(--card-pad) * -1) calc(var(--space-1) * -1);
 	}
 
-	.scene-link:hover {
-		text-decoration: underline;
+	.hero-pic {
+		position: relative;
+		display: block;
+		width: 100%;
+		aspect-ratio: 16 / 9;
+		padding: 0;
+		border: 0;
+		overflow: hidden;
+		background: rgba(255, 255, 255, 0.04);
+		cursor: pointer;
+		-webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent);
+		mask-image: linear-gradient(to bottom, #000 62%, transparent);
+	}
+
+	.hero-wait {
+		cursor: default;
+		animation: hero-breathe 1.6s ease-in-out infinite alternate;
+	}
+
+	@keyframes hero-breathe {
+		from { background: rgba(255, 255, 255, 0.03); }
+		to { background: rgba(255, 255, 255, 0.07); }
+	}
+
+	.hero-pic :global(.hero-img) {
+		display: block;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		transition: transform 600ms var(--ease-standard);
+	}
+
+	.hero-pic:hover :global(.hero-img) {
+		transform: scale(1.02);
+	}
+
+	.hero-pic:focus-visible {
+		outline: 2px solid var(--stage-text);
+		outline-offset: -4px;
+	}
+
+	.hero-play {
+		position: absolute;
+		left: var(--card-pad);
+		top: 50%;
+		display: grid;
+		place-items: center;
+		width: 42px;
+		height: 42px;
+		margin-top: -21px;
+		border-radius: 50%;
+		background: rgba(0, 0, 0, 0.55);
+		color: #fff;
+		opacity: 0;
+		transition: opacity var(--motion-base);
+	}
+
+	.hero-play svg {
+		width: 17px;
+		height: 17px;
+		fill: currentColor;
+	}
+
+	.hero-pic:hover .hero-play,
+	.hero-pic:focus-visible .hero-play {
+		opacity: 1;
+	}
+
+	/* Close sits on the picture, on a dark disc so it reads on any still. */
+	.close.on-pic {
+		position: absolute;
+		top: var(--space-3);
+		right: var(--space-3);
+		background: rgba(0, 0, 0, 0.5);
+		color: #fff;
+	}
+
+	.close.on-pic:hover {
+		background: rgba(0, 0, 0, 0.72);
+	}
+
+	.name-row {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--space-2);
+	}
+
+	.artist :global(.title) {
+		font-size: var(--font-size-3xl);
+		font-weight: var(--font-weight-medium);
+		letter-spacing: -0.01em;
 	}
 
 	.title-link {
@@ -231,48 +333,66 @@
 	.title-link:hover {
 		text-decoration: underline;
 		text-decoration-thickness: 1px;
-		text-underline-offset: 4px;
+		text-underline-offset: 5px;
 	}
 
-	.meta-line {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-3);
+	/* A few plain sentences instead of stats, chips and a coloured badge. */
+	.lede {
 		margin: 0;
 		color: var(--stage-text-2);
-		font-size: var(--font-size-xs);
-		font-variant-numeric: tabular-nums;
+		font-size: var(--font-size-sm);
+		line-height: var(--line-height-normal);
+		text-wrap: pretty;
 	}
 
-	.light-line {
-		display: flex;
-		gap: var(--space-2);
-		align-items: baseline;
+	.scene-link {
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--stage-text);
+		font: inherit;
+		text-decoration: underline;
+		text-decoration-color: rgba(255, 255, 255, 0.3);
+		text-decoration-thickness: 1px;
+		text-underline-offset: 3px;
+		cursor: pointer;
+	}
+
+	.scene-link:hover {
+		text-decoration-color: currentColor;
+	}
+
+	/* The journey, said in one line: the action, then what it is. */
+	.journey {
 		margin: 0;
 		color: var(--stage-text-3);
 		font-size: var(--font-size-xs);
+		line-height: var(--line-height-normal);
 	}
 
-	.light-name {
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.genres {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-		margin: 0;
+	.journey-go {
 		padding: 0;
-		list-style: none;
+		border: 0;
+		background: none;
+		color: var(--stage-text);
+		font: inherit;
+		font-weight: var(--font-weight-semibold);
+		text-decoration: underline;
+		text-decoration-color: rgba(255, 255, 255, 0.3);
+		text-decoration-thickness: 1px;
+		text-underline-offset: 3px;
+		cursor: pointer;
 	}
 
-	.genres li {
-		padding: 3px 9px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.07);
-		color: var(--stage-text-2);
-		font-size: var(--font-size-2xs);
-		line-height: 1;
+	.journey-go:hover {
+		text-decoration-color: currentColor;
+	}
+
+	.scene-link:focus-visible,
+	.journey-go:focus-visible {
+		outline: 2px solid var(--stage-text);
+		outline-offset: 2px;
+		border-radius: 2px;
 	}
 
 	.probe {
@@ -300,64 +420,19 @@
 		stroke: none;
 	}
 
-	/* One quiet row: the journey and what it is, no choices. */
-	.journey {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		width: 100%;
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--stage-line);
-		border-radius: var(--radius-md);
-		background: transparent;
-		color: var(--stage-text);
-		text-align: left;
-		cursor: pointer;
-		transition:
-			background var(--motion-fast),
-			border-color var(--motion-fast);
-	}
-
-	.journey:hover {
-		border-color: rgba(255, 230, 168, 0.45);
-		background: rgba(255, 230, 168, 0.06);
-	}
-
-	.journey:focus-visible {
-		outline: 2px solid #ffe6a8;
-		outline-offset: 2px;
-	}
-
-	.journey-glyph {
-		flex: none;
-		width: 14px;
-		height: 2px;
-		border-radius: 2px;
-		background: #ffe6a8;
-		box-shadow: 0 0 8px #ffd27a;
-	}
-
-	.journey-text {
-		display: grid;
-		min-width: 0;
-	}
-
-	.journey-name {
-		font-size: var(--font-size-sm);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	.journey-copy {
-		overflow: hidden;
-		color: var(--stage-text-3);
-		font-size: var(--font-size-xs);
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
 	.count {
 		margin-left: var(--space-2);
 		color: var(--stage-text-3);
 		font-variant-numeric: tabular-nums;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.hero-wait {
+			animation: none;
+		}
+
+		.hero-pic :global(.hero-img) {
+			transition: none;
+		}
 	}
 </style>
