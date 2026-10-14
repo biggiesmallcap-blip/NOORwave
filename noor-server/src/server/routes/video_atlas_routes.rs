@@ -38,7 +38,6 @@ const NEIGHBORS: usize = 12;
 const COLLABS: usize = 12;
 const SCENE_TOP_ARTISTS: usize = 12;
 const SCENE_SAMPLE: usize = 12;
-const ROUTE_MAX_HOPS: usize = 6;
 
 fn error(status: StatusCode, message: &str) -> ApiError {
     (status, Json(json!({ "error": message })))
@@ -173,20 +172,6 @@ pub(super) struct AtlasProbeResponse {
     queued: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
-}
-
-#[derive(Debug, Serialize)]
-struct AtlasRouteStop {
-    artist_id: i64,
-    name: String,
-    via: Option<&'static str>,
-    video: Option<VideoSetItem>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct AtlasRouteResponse {
-    found: bool,
-    stops: Vec<AtlasRouteStop>,
 }
 
 #[derive(Debug, Serialize)]
@@ -707,30 +692,6 @@ pub(super) fn scene_card(
     }))
 }
 
-pub(super) fn route(conn: &Connection, from: i64, to: i64) -> anyhow::Result<AtlasRouteResponse> {
-    let graph = scenes::cached_graph(conn)?;
-    let on_map: HashSet<i64> = conn
-        .prepare("SELECT artist_tidal_id FROM video_artist_facets")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<_, _>>()?;
-    let Some(path) = graph.route(from, to, ROUTE_MAX_HOPS, |id| on_map.contains(&id)) else {
-        return Ok(AtlasRouteResponse {
-            found: false,
-            stops: Vec::new(),
-        });
-    };
-    let mut stops = Vec::with_capacity(path.len());
-    for (artist_id, via) in path {
-        stops.push(AtlasRouteStop {
-            artist_id,
-            name: artist_name(conn, artist_id)?.unwrap_or_default(),
-            via,
-            video: best_videos(conn, artist_id, 1)?.into_iter().next(),
-        });
-    }
-    Ok(AtlasRouteResponse { found: true, stops })
-}
-
 /// An edge provider as the Archive's stage words it (frontend viaLabel).
 fn via_label(source: Option<&str>) -> &'static str {
     match source {
@@ -964,28 +925,6 @@ pub(super) async fn post_video_atlas_probe(
         crawler::request(Urgent::Station(id));
     }
     Ok(Json(decision))
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct RouteQuery {
-    from: i64,
-    to: i64,
-}
-
-/// GET /api/videos/atlas/route?from&to
-pub(super) async fn get_video_atlas_route(
-    State(state): State<SharedState>,
-    Query(query): Query<RouteQuery>,
-) -> Result<Json<AtlasRouteResponse>, ApiError> {
-    if query.from <= 0 || query.to <= 0 {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "from and to must be artist ids",
-        ));
-    }
-    read(&state, move |conn| route(conn, query.from, query.to))
-        .await
-        .map(Json)
 }
 
 /// GET /api/videos/atlas/journey?kind=collab&from&to or ?kind=new&from[&scene]
@@ -1278,43 +1217,6 @@ mod tests {
             Some(json!({ "artist_id": 0 })),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn routes_walk_the_graph_with_one_video_per_stop() {
-        let db = seeded_db();
-        let (status, route) = call(
-            &db,
-            "GET",
-            "/api/videos/atlas/route?from=1002&to=2003",
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(route["found"], true);
-        let stops = route["stops"].as_array().unwrap();
-        let ids: Vec<i64> = stops
-            .iter()
-            .map(|s| s["artist_id"].as_i64().unwrap())
-            .collect();
-        assert_eq!(ids, vec![1002, 1004, 2001, 2003]);
-        assert_eq!(stops[0]["via"], Value::Null);
-        assert_eq!(stops[2]["via"], "featured");
-        assert!(
-            stops
-                .iter()
-                .all(|s| s["video"]["artist_id"] == s["artist_id"])
-        );
-        let (_, lost) = call(
-            &db,
-            "GET",
-            "/api/videos/atlas/route?from=1001&to=3002",
-            None,
-        )
-        .await;
-        assert_eq!(lost, json!({ "found": false, "stops": [] }));
-        let (status, _) = call(&db, "GET", "/api/videos/atlas/route?from=1001", None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
@@ -1900,26 +1802,6 @@ mod tests {
                 started,
                 bytes.len(),
             );
-        }
-        for (from, to) in [(1588i64, 8027279i64), (8812, 4377), (159, 3618971)] {
-            let started = std::time::Instant::now();
-            let (_, bytes) = get(format!("/api/videos/atlas/route?from={from}&to={to}")).await;
-            time(&format!("route {from} -> {to}"), started, bytes.len());
-            let route: Value = serde_json::from_slice(&bytes).unwrap();
-            let names: Vec<String> = route["stops"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|s| {
-                    format!(
-                        "{} [{}] {}",
-                        s["name"].as_str().unwrap_or(""),
-                        s["via"].as_str().unwrap_or("-"),
-                        s["video"]["title"].as_str().unwrap_or("(no video)")
-                    )
-                })
-                .collect();
-            eprintln!("  {}", names.join(" -> "));
         }
     }
 }

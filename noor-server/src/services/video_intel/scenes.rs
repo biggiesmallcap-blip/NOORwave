@@ -41,7 +41,6 @@ const SETTLE_ROUNDS: usize = 8;
 /// artists with videos in the graph; below it the map is re-cut cold (ids
 /// still carry over by overlap).
 const WARM_MIN_COVERAGE: f64 = 0.5;
-const ROUTE_HOP_TOLL: f64 = 0.05;
 
 /// Tuning for `find_scenes`; the defaults are what the real catalog needs
 /// (about 80 scenes from 15k artists).
@@ -268,108 +267,6 @@ impl ArtistGraph {
                 EDGE_SOURCES[self.sources[entry] as usize],
             )
         })
-    }
-
-    /// Cheapest path from `from` to `to` by -ln(weight) plus a small toll per
-    /// hop, at most `max_hops` edges, through nodes `allowed` accepts (the
-    /// endpoints always pass). Dijkstra over (node, hops) states, so the hop
-    /// cap never hides a cheaper longer path that still fits. Each stop
-    /// carries the provider of the edge that reached it.
-    pub fn route(
-        &self,
-        from: i64,
-        to: i64,
-        max_hops: usize,
-        allowed: impl Fn(i64) -> bool,
-    ) -> Option<Vec<(i64, Option<&'static str>)>> {
-        use std::cmp::Ordering;
-        use std::collections::BinaryHeap;
-
-        #[derive(PartialEq)]
-        struct State {
-            cost: f64,
-            hops: usize,
-            node: u32,
-        }
-        impl Eq for State {}
-        impl Ord for State {
-            fn cmp(&self, other: &Self) -> Ordering {
-                other
-                    .cost
-                    .total_cmp(&self.cost)
-                    .then(other.hops.cmp(&self.hops))
-                    .then(other.node.cmp(&self.node))
-            }
-        }
-        impl PartialOrd for State {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-
-        let start = self.index_of(from)?;
-        let goal = self.index_of(to)?;
-        if start == goal {
-            return Some(vec![(from, None)]);
-        }
-        let layers = max_hops + 1;
-        let n = self.ids.len();
-        let mut best = vec![f64::INFINITY; n * layers];
-        // (previous node, CSR entry used to arrive)
-        let mut came: Vec<(u32, usize)> = vec![(u32::MAX, usize::MAX); n * layers];
-        let mut heap = BinaryHeap::new();
-        best[start * layers] = 0.0;
-        heap.push(State {
-            cost: 0.0,
-            hops: 0,
-            node: start as u32,
-        });
-        while let Some(State { cost, hops, node }) = heap.pop() {
-            let node = node as usize;
-            if cost > best[node * layers + hops] {
-                continue;
-            }
-            if node == goal {
-                let mut path = Vec::with_capacity(hops + 1);
-                let (mut at, mut layer) = (node, hops);
-                while layer > 0 {
-                    let (previous, entry) = came[at * layers + layer];
-                    path.push((
-                        self.ids[at],
-                        Some(EDGE_SOURCES[self.sources[entry] as usize]),
-                    ));
-                    at = previous as usize;
-                    layer -= 1;
-                }
-                path.push((self.ids[at], None));
-                path.reverse();
-                return Some(path);
-            }
-            if hops == max_hops {
-                continue;
-            }
-            for entry in self.csr.offsets[node]..self.csr.offsets[node + 1] {
-                let next = self.csr.targets[entry] as usize;
-                if next == node || (next != goal && !allowed(self.ids[next])) {
-                    continue;
-                }
-                let step = -self.csr.weights[entry].clamp(1e-3, 1.0).ln() + ROUTE_HOP_TOLL;
-                let total = cost + step;
-                let layer = hops + 1;
-                // Dominated when an equal-or-fewer-hop arrival is no dearer.
-                if (0..=layer).any(|h| best[next * layers + h] <= total) {
-                    continue;
-                }
-                best[next * layers + layer] = total;
-                came[next * layers + layer] = (node as u32, entry);
-                heap.push(State {
-                    cost: total,
-                    hops: layer,
-                    node: next as u32,
-                });
-            }
-        }
-        None
     }
 }
 
@@ -1810,32 +1707,5 @@ mod tests {
                 eprintln!("{} {}: {}", scene.id, scene.name, top.join(", "));
             }
         }
-    }
-
-    #[test]
-    fn routes_take_the_strongest_path_within_the_hop_cap() {
-        let graph = ArtistGraph::from_rows(&[
-            (1, 2, 0, 0.9),
-            (2, 3, 1, 0.9),
-            (3, 4, 2, 0.9),
-            (1, 4, 3, 0.2),
-            (4, 5, 0, 0.9),
-        ]);
-        let path = graph.route(1, 4, 6, |_| true).unwrap();
-        let ids: Vec<i64> = path.iter().map(|p| p.0).collect();
-        assert_eq!(
-            ids,
-            vec![1, 2, 3, 4],
-            "three strong hops beat one weak edge"
-        );
-        assert_eq!(path[0].1, None);
-        assert_eq!(path[3].1, Some("featured"));
-        let capped = graph.route(1, 4, 2, |_| true).unwrap();
-        assert_eq!(capped.len(), 2, "the cap forces the direct edge");
-        let blocked = graph.route(1, 4, 6, |id| id != 3).unwrap();
-        assert_eq!(blocked.len(), 2);
-        assert!(graph.route(1, 99, 6, |_| true).is_none());
-        assert_eq!(graph.route(5, 5, 6, |_| true).unwrap(), vec![(5, None)]);
-        assert!(graph.route(1, 5, 1, |_| true).is_none());
     }
 }

@@ -136,18 +136,6 @@ export interface AtlasProbeResponse {
 	reason?: string;
 }
 
-export interface AtlasRouteStop {
-	artist_id: number;
-	name: string;
-	via: string | null; // edge source that led here
-	video: ExploreVideo | null;
-}
-
-export interface AtlasRouteResponse {
-	found: boolean;
-	stops: AtlasRouteStop[];
-}
-
 /** Picture: each artist's dominant artwork colour, for the artists whose
  *  thumbnail has been read so far. Parallel arrays, by artist id. */
 export interface AtlasPicturesResponse {

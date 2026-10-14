@@ -801,10 +801,6 @@ pub fn api_routes(state: SharedState) -> Router {
             post(video_atlas_routes::post_video_atlas_probe),
         )
         .route(
-            "/api/videos/atlas/route",
-            get(video_atlas_routes::get_video_atlas_route),
-        )
-        .route(
             "/api/videos/atlas/journey",
             get(video_atlas_routes::get_video_atlas_journey),
         )

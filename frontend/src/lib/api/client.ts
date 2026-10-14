@@ -5,7 +5,6 @@ import type {
 	AtlasResponse,
 	AtlasJourneyResponse,
 	AtlasPicturesResponse,
-	AtlasRouteResponse,
 	AtlasYouResponse,
 	JourneyKind,
 	AtlasSceneCard,
@@ -2505,10 +2504,6 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify({ artist_id: artistId }),
 		});
-	},
-
-	getVideoAtlasRoute(from: number, to: number): Promise<AtlasRouteResponse> {
-		return fetchApi<AtlasRouteResponse>('/api/videos/atlas/route', { from: String(from), to: String(to) });
 	},
 
 	getVideoAtlasPictures(): Promise<AtlasPicturesResponse> {
