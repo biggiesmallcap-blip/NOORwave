@@ -7,6 +7,7 @@ import {
 	type PlaybackRuntimeInfo,
 	type PlaybackSnapshot,
 	type PlaybackState,
+	type QueueContext,
 	type QueueItem,
 	type RadioBlend,
 	type StreamDisplayInfo,
@@ -1281,6 +1282,7 @@ async function loadQueueAndPlay(
 		pendingCandidates?: PendingCandidateInfo[];
 		shuffleMode?: PlaybackState['shuffle_mode'];
 		intentSeq?: number;
+		context?: QueueContext;
 	},
 ) {
 	if (trackIds.length === 0) return;
@@ -1304,6 +1306,7 @@ async function loadQueueAndPlay(
 		const replaced = await api.replacePlaybackQueue(items, {
 			shuffleMode: options?.shuffleMode,
 			startPlayback: true,
+			context: options?.context,
 		});
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		hydratePlaybackIfLatest(replaced, intentSeq);
@@ -1345,16 +1348,17 @@ export function sliceContextTrackIds(trackIds: number[], startTrackId?: number):
 export async function playTracksInContext(
 	trackIds: number[],
 	startTrackId?: number,
-	options?: { shuffle?: boolean },
+	options?: { shuffle?: boolean; context?: QueueContext },
 ) {
 	const ids = trackIds.filter((id) => id > 0);
 	if (ids.length === 0) return;
 	if (options?.shuffle) {
-		await loadQueueAndPlay(ids, { shuffleMode: 'true' });
+		await loadQueueAndPlay(ids, { shuffleMode: 'true', context: options.context });
 		return;
 	}
 	await loadQueueAndPlay(sliceContextTrackIds(ids, startTrackId), {
 		shuffleMode: startTrackId != null ? undefined : get(shuffleMode),
+		context: options?.context,
 	});
 }
 
@@ -1399,7 +1403,7 @@ export async function playLibrary(options?: {
 		await playTracksInContext(
 			tracks.map((t) => t.id),
 			undefined,
-			{ shuffle: options?.shuffle },
+			{ shuffle: options?.shuffle, context: options?.likedOnly ? 'liked' : 'library' },
 		);
 	} catch (error) {
 		setError('play your library', error, () => playLibrary(options));
@@ -1579,6 +1583,7 @@ export async function playArtist(artistId: number, startTrackId?: number) {
 		await loadQueueAndPlay(sliceContextTrackIds(tracks.map((t) => t.id), startTrackId), {
 			shuffleMode: startTrackId ? undefined : get(shuffleMode),
 			intentSeq,
+			context: 'artist',
 		});
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
@@ -1599,7 +1604,11 @@ export async function shuffleArtist(artistId: number) {
 			playerErrorStore.set({ message: 'Artist has no tracks.' });
 			return;
 		}
-		await loadQueueAndPlay(tracks.map((t) => t.id), { shuffleMode: 'true', intentSeq });
+		await loadQueueAndPlay(tracks.map((t) => t.id), {
+			shuffleMode: 'true',
+			intentSeq,
+			context: 'artist',
+		});
 	} catch (error) {
 		if (!isLatestPlaybackIntent(intentSeq)) return;
 		setError('shuffle that artist', error, () => shuffleArtist(artistId));

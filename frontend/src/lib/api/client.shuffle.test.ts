@@ -25,6 +25,20 @@ describe('canonical queue replacement payloads', () => {
 		});
 	});
 
+	test('sends the play context when there is one', async () => {
+		const fetch = vi.fn(async () => new Response(JSON.stringify({ queue: [] })));
+		vi.stubGlobal('fetch', fetch);
+
+		await api.replacePlaybackQueue([{ track_id: 1 }], { context: 'library' });
+		await api.replacePlaybackQueue([{ track_id: 1 }]);
+
+		const bodies = fetch.mock.calls.map((call) =>
+			JSON.parse(String((call as unknown as [string, RequestInit])[1].body))
+		);
+		expect(bodies[0].context).toBe('library');
+		expect('context' in bodies[1]).toBe(false);
+	});
+
 	test('serializes a metadata-rich TIDAL album in order', async () => {
 		const fetch = vi.fn(async () => new Response(JSON.stringify({ queue: [] })));
 		vi.stubGlobal('fetch', fetch);

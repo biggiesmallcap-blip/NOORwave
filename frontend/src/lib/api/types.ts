@@ -794,6 +794,12 @@ export interface MixedQueueItem {
 	reason?: string | null;
 }
 
+/**
+ * Where a replaced queue came from, for sessions that "Include new" may
+ * weave new songs into. Albums, playlists and everything else send none.
+ */
+export type QueueContext = 'library' | 'liked' | 'artist';
+
 /** A last.fm-sourced radio candidate that has no library track yet. */
 export interface PendingCandidateInfo {
 	artist: string;

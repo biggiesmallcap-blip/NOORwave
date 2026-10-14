@@ -2966,8 +2966,11 @@ fn ensure_automix_external_enabled_appends_pending_sidecar_rows() {
 #[test]
 fn ensure_automix_external_overfetches_past_already_queued_candidates() {
     let conn = conn();
-    let current = queue::get_tracks_by_ids(&conn, &[1]).unwrap().remove(0);
-    queue::append_tracks(&conn, std::slice::from_ref(&current), "user").unwrap();
+    // A library session whose best pick already waits further down the queue,
+    // past the four rows the weave looks at.
+    let tracks = queue::get_tracks_by_ids(&conn, &[1, 2, 3, 4, 5]).unwrap();
+    queue::append_tracks(&conn, &tracks, "user").unwrap();
+    crate::playback::automix::set_weave_context(&conn, Some("library")).unwrap();
     queue::append_external_track(
         &conn,
         &queue::ExternalTrackInsert {
@@ -3105,6 +3108,284 @@ fn ensure_automix_external_skips_hidden_ai_candidates_without_failing() {
         .map(|item| item.track.title.as_str())
         .collect();
     assert_eq!(external, vec!["Fresh External"]);
+}
+
+/// An outside song Last.fm linked to each of `seeds`.
+fn outside_song(conn: &Connection, tidal_id: i64, title: &str, seeds: &[i64], similarity: f64) {
+    let candidate = queries::upsert_external_track_candidate(
+        conn,
+        &queries::ExternalTrackCandidateUpsert {
+            tidal_id: Some(tidal_id),
+            mbid: None,
+            dedupe_key: format!("tidal:{tidal_id}"),
+            title: title.to_string(),
+            artist_name: format!("{title} Artist"),
+            genre_tags_json: None,
+            duration_ms: Some(180_000),
+            expires_at: "2099-01-01 00:00:00".to_string(),
+        },
+    )
+    .unwrap();
+    for seed in seeds {
+        queries::upsert_external_candidate_sighting(
+            conn,
+            &queries::ExternalCandidateSightingUpsert {
+                candidate_id: candidate.id,
+                seed_track_id: *seed,
+                source: "lastfm_similar".to_string(),
+                source_payload_json: None,
+                similarity: Some(similarity),
+                expires_at: "2099-01-01 00:00:00".to_string(),
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// Automix with "Include new" on, playing the first of `sources.len()` queued
+/// library songs (tracks 1..=6, repeating).
+fn include_new_queue(conn: &Connection, sources: &[&str]) {
+    for (index, source) in sources.iter().enumerate() {
+        let track = queue::get_track_by_id(conn, (index % 6) as i64 + 1)
+            .unwrap()
+            .unwrap();
+        queue::append_tracks(conn, std::slice::from_ref(&track), source).unwrap();
+    }
+    let first = queue::load_queue(conn).unwrap().remove(0);
+    conn.execute(
+        "UPDATE playback_state
+         SET current_track_id = ?1, current_queue_item_id = ?2, is_playing = 1,
+             automix_enabled = 1, automix_discover_new = 1, automix_use_learning = 0
+         WHERE id = 1",
+        params![first.track.id, first.id],
+    )
+    .unwrap();
+}
+
+/// Sources of the rows after the playing one.
+fn upcoming_sources(conn: &Connection) -> Vec<String> {
+    let current: i64 = conn
+        .query_row(
+            "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let queue = queue::load_queue(conn).unwrap();
+    let index = queue.iter().position(|item| item.id == current).unwrap();
+    queue[index + 1..]
+        .iter()
+        .map(|item| item.source.clone())
+        .collect()
+}
+
+/// Move playback to the next row, resolving a pending pick the way the
+/// resolver would (to track 6) so the session can play on through it.
+fn play_next_row(conn: &Connection) {
+    let current: i64 = conn
+        .query_row(
+            "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let queue = queue::load_queue(conn).unwrap();
+    let index = queue.iter().position(|item| item.id == current).unwrap();
+    let next = &queue[index + 1];
+    let track_id = if next.is_pending { 6 } else { next.track.id };
+    conn.execute(
+        "UPDATE queue SET track_id = ?1 WHERE id = ?2",
+        params![track_id, next.id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE playback_state SET current_track_id = ?1, current_queue_item_id = ?2 WHERE id = 1",
+        params![track_id, next.id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn include_new_weaves_one_new_song_after_every_three_in_a_library_session() {
+    let conn = conn();
+    include_new_queue(&conn, &["user"; 16]);
+    crate::playback::automix::set_weave_context(&conn, Some("library")).unwrap();
+    for n in 0..5 {
+        outside_song(
+            &conn,
+            99_300 + n,
+            &format!("New {n}"),
+            &[1, 2, 3, 4, 5, 6],
+            0.7,
+        );
+    }
+
+    let mut played = Vec::new();
+    for _ in 0..13 {
+        ensure_automix_queue_depth(&conn, 1, false).unwrap();
+        // Looking ahead again (gapless peek) adds nothing more.
+        ensure_automix_queue_depth(&conn, 1, false).unwrap();
+        play_next_row(&conn);
+        let current: i64 = conn
+            .query_row(
+                "SELECT current_queue_item_id FROM playback_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        played.push(
+            queue::load_queue(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == current)
+                .unwrap()
+                .source,
+        );
+    }
+
+    let new = "automix-new".to_string();
+    let user = "user".to_string();
+    assert_eq!(
+        played,
+        vec![
+            user.clone(),
+            user.clone(),
+            user.clone(),
+            new.clone(),
+            user.clone(),
+            user.clone(),
+            user.clone(),
+            new.clone(),
+            user.clone(),
+            user.clone(),
+            user.clone(),
+            new.clone(),
+            user.clone(),
+        ]
+    );
+}
+
+#[test]
+fn include_new_leaves_album_rows_alone_and_weaves_once_automix_takes_over() {
+    let conn = conn();
+    include_new_queue(&conn, &["user"; 12]);
+    outside_song(&conn, 99_400, "New", &[1, 2, 3, 4, 5, 6], 0.7);
+
+    // No library, liked or artist context: an album or playlist plays as is.
+    ensure_automix_queue_depth(&conn, 1, false).unwrap();
+    assert!(!upcoming_sources(&conn).contains(&"automix-new".to_string()));
+
+    // Past the album's end, between automix's own picks, the weave resumes.
+    conn.execute("DELETE FROM queue", []).unwrap();
+    include_new_queue(
+        &conn,
+        &[
+            "user", "user", "user", "automix", "automix", "automix", "automix",
+        ],
+    );
+    ensure_automix_queue_depth(&conn, 1, false).unwrap();
+    assert_eq!(
+        upcoming_sources(&conn),
+        vec![
+            "user",
+            "user",
+            "automix",
+            "automix-new",
+            "automix",
+            "automix",
+            "automix"
+        ]
+    );
+}
+
+#[test]
+fn include_new_picks_the_song_that_bridges_the_slot() {
+    let conn = conn();
+    // Playing 1; the slot sits between 4 and 5.
+    include_new_queue(&conn, &["user"; 6]);
+    crate::playback::automix::set_weave_context(&conn, Some("artist")).unwrap();
+    outside_song(&conn, 99_501, "Bridge", &[4], 0.5);
+    outside_song(&conn, 99_502, "Session", &[1], 0.7);
+
+    let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
+
+    let woven: Vec<&str> = queue
+        .iter()
+        .filter(|item| item.source == "automix-new")
+        .map(|item| item.track.title.as_str())
+        .collect();
+    assert_eq!(woven, vec!["Bridge"]);
+}
+
+#[test]
+fn include_new_skips_songs_already_saved_in_the_library() {
+    let conn = conn();
+    conn.execute_batch(
+        "ALTER TABLE tracks ADD COLUMN is_library INTEGER DEFAULT 0;
+         UPDATE tracks SET is_library = 1 WHERE id = 6;",
+    )
+    .unwrap();
+    // Track 6 (tidal id 6) is saved but not queued.
+    include_new_queue(&conn, &["user"; 5]);
+    crate::playback::automix::set_weave_context(&conn, Some("liked")).unwrap();
+    outside_song(&conn, 6, "Saved Song", &[1, 2, 3, 4, 5], 0.9);
+    outside_song(&conn, 99_601, "Fresh Song", &[1, 2, 3, 4, 5], 0.5);
+
+    let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
+
+    let new: Vec<&str> = queue
+        .iter()
+        .filter(|item| item.source == "automix-new")
+        .map(|item| item.track.title.as_str())
+        .collect();
+    assert_eq!(new, vec!["Fresh Song"]);
+}
+
+#[test]
+fn include_new_tail_refill_leaves_new_songs_to_the_weave() {
+    let conn = conn();
+    include_new_queue(&conn, &["user"]);
+    crate::playback::automix::set_weave_context(&conn, Some("library")).unwrap();
+    for n in 0..4 {
+        outside_song(
+            &conn,
+            99_700 + n,
+            &format!("New {n}"),
+            &[1, 2, 3, 4, 5, 6],
+            0.7,
+        );
+    }
+
+    ensure_automix_queue_depth(&conn, AUTOMIX_MIN_UPCOMING, false).unwrap();
+
+    // One new song placed by the weave, not a clump of them at the end.
+    let sources = upcoming_sources(&conn);
+    assert_eq!(
+        sources
+            .iter()
+            .filter(|source| *source == "automix-new")
+            .count(),
+        1,
+        "{sources:?}"
+    );
+}
+
+#[test]
+fn only_library_liked_and_artist_sessions_weave_until_the_queue_is_replaced() {
+    use crate::playback::automix::{set_weave_context, weave_context_active};
+    let conn = conn();
+    for context in ["library", "liked", "artist"] {
+        set_weave_context(&conn, Some(context)).unwrap();
+        assert!(weave_context_active(&conn), "{context}");
+    }
+    for context in [Some("album"), Some("playlist"), None] {
+        set_weave_context(&conn, context).unwrap();
+        assert!(!weave_context_active(&conn), "{context:?}");
+    }
+
+    set_weave_context(&conn, Some("library")).unwrap();
+    queue::clear_queue(&conn).unwrap();
+    assert!(!weave_context_active(&conn));
 }
 
 #[test]

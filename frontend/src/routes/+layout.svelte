@@ -364,9 +364,9 @@
 	);
 	let discoverNewTitle = $derived(
 		!$automixEnabled
-			? 'Include new music: lets Automix also add songs from outside your library, from TIDAL mixes and Last.fm. Needs Automix on.'
+			? 'Include new music: lets Automix weave in songs from outside your library, from TIDAL mixes and Last.fm. Needs Automix on.'
 			: $automixDiscoverNew
-				? 'Include new music on: Automix also adds songs from outside your library, from TIDAL mixes and Last.fm. Click to stick to your library.'
+				? 'Include new music on: one new song after every three of yours when you play your library, liked songs or an artist. Albums and playlists play as they are and get new songs once they end. Click to stick to your library.'
 				: 'Include new music off: Automix only adds songs from your library. Click to also bring in new music from TIDAL and Last.fm.',
 	);
 	let liveVersionTitle = $derived(

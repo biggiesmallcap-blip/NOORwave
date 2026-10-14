@@ -11,6 +11,10 @@ pub struct QueueReplaceRequest {
     pub(super) shuffle_mode: Option<String>,
     #[serde(default)]
     pub(super) start_playback: bool,
+    /// Where the rows came from (library, liked, artist): sessions "Include
+    /// new" may weave new songs into. Anything else, or none, is left as is.
+    #[serde(default)]
+    pub(super) context: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -607,6 +611,7 @@ pub(super) async fn replace_playback_queue(
         ));
     }
     let queued_count = candidates.len();
+    let context = payload.context.clone();
     let shuffle_mode = payload
         .shuffle_mode
         .as_deref()
@@ -623,6 +628,13 @@ pub(super) async fn replace_playback_queue(
                 conn,
                 &candidates,
             )?;
+            // Optional: a session that cannot remember its context just
+            // plays without new songs woven in.
+            if let Err(error) =
+                crate::playback::automix::set_weave_context(conn, context.as_deref())
+            {
+                tracing::warn!(%error, "replace_playback_queue: weave context not stored");
+            }
             let mut shuffle_debug = None;
             if shuffle_mode != queue::ShuffleMode::Off {
                 let seed = crate::playback::shuffle::generate_shuffle_seed();

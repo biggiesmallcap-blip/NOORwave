@@ -34,7 +34,7 @@
 	import Dropdown from '$lib/components/ui/Dropdown.svelte';
 	import FilterChip from '$lib/components/ui/FilterChip.svelte';
 	import { formatTrackDuration, formatDateShort, savedDateMillis, getQualityClass } from '$lib/utils/format';
-	import { api, type Album, type Artist, type Genre, type LibraryTopArtist, type Playlist, type Track } from '$lib/api/client';
+	import { api, type Album, type Artist, type Genre, type LibraryTopArtist, type Playlist, type QueueContext, type Track } from '$lib/api/client';
 	import { createLibrarySearch } from '$lib/stores/library_search';
 	import { cachedApi, invalidateLibraryCaches } from '$lib/cache/api_queries';
 	import { invalidatePlaylistCaches } from '$lib/cache/ws_events';
@@ -677,7 +677,14 @@
 	// Spotify behavior) instead of playing one orphan track and letting automix
 	// improvise. `visibleTracks` already reflects the active tab, sort, and search.
 	async function playTrack(track: typeof $tracks[0]) {
-		await playTracksInContext(visibleTracks.map((t) => t.id), track.id);
+		await playTracksInContext(visibleTracks.map((t) => t.id), track.id, {
+			context: trackViewContext(),
+		});
+	}
+
+	// Library and Liked sessions let "Include new" weave new songs in.
+	function trackViewContext(): QueueContext {
+		return activeTab === 'tracks' && likedOnly ? 'liked' : 'library';
 	}
 
 	// "Play" / "Shuffle" for the current track view. In search mode the visible
@@ -707,7 +714,10 @@
 						batchError = 'No tracks to play in the current view.';
 						return;
 					}
-					await playTracksInContext(ids, undefined, { shuffle: true });
+					await playTracksInContext(ids, undefined, {
+						shuffle: true,
+						context: trackViewContext(),
+					});
 					return;
 				} catch (error) {
 					batchError = `Shuffle failed: ${error}`;
@@ -719,7 +729,7 @@
 				batchError = 'No tracks to play in the current view.';
 				return;
 			}
-			await playTracksInContext(ids, undefined, { shuffle });
+			await playTracksInContext(ids, undefined, { shuffle, context: trackViewContext() });
 			return;
 		}
 		await playLibrary({

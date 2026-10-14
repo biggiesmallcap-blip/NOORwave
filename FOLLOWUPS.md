@@ -10,6 +10,15 @@ back to the PR or commit that flagged it.
 
 ## Open
 
+### automix: weave fewer new songs after quick skips
+
+"Include new" weaves one new song after every three (`WEAVE_EVERY` in
+playback/automix.rs). If the listener skips woven songs early, widen the gap
+for the rest of the session. The woven row's reason could also name the songs
+it sits between ("between Artist A and Artist B"); today it shows the lane
+only ("TIDAL mix" / "Last.fm similar").
+Spawned by: the Include new weave branch (bsc/new-button-lastfm-behavior-a81f85).
+
 ### tidal: confirm the playlist move toIndex convention live
 
 `move_playlist_item` sends TIDAL's `toIndex` measured after lifting the item

@@ -1,7 +1,8 @@
 //! DJ-style automix engine.
 //!
 //! Owns the four `automix_*` flags on `playback_state`, the queue-depth
-//! orchestrator that keeps the upcoming list refilled, and the scoring +
+//! orchestrator that keeps the upcoming list refilled (and weaves "Include
+//! new" songs between the listener's own), and the scoring +
 //! shuffle logic that decides what to append. The user-facing "Why" string for
 //! each picked track is emitted by the same scoring pass that ranked it, so
 //! the explanation can never drift from the score it justifies.
@@ -16,7 +17,7 @@
 #[cfg(test)]
 use crate::db::models::AudioDjProfileKey;
 use crate::db::{
-    models::{AudioDspFeatures, QueueItem, Track},
+    models::{AudioDspFeatures, PlaybackState, QueueItem, Track},
     queries,
 };
 use crate::playback::candidate_gate::CandidateGate;
@@ -218,6 +219,47 @@ pub fn set_automix_discover_new(conn: &Connection, enabled: bool) -> Result<()> 
     Ok(())
 }
 
+/// Play contexts whose own rows "Include new" weaves new songs between.
+/// Albums and playlists keep their running order; only the automix rows that
+/// continue them once they end are woven.
+const WEAVE_CONTEXTS: [&str; 3] = ["library", "liked", "artist"];
+const WEAVE_CONTEXT_KEY: &str = "automix.weave_context";
+/// One new song in every four: the next four upcoming rows hold at most one,
+/// placed after the third.
+const WEAVE_EVERY: usize = 4;
+const NEW_SOURCE: &str = "automix-new";
+
+/// Remember where the queue that was just loaded came from. Only
+/// `WEAVE_CONTEXTS` are kept; anything else (or `None`) forgets it.
+pub fn set_weave_context(conn: &Connection, context: Option<&str>) -> Result<()> {
+    match context.filter(|context| WEAVE_CONTEXTS.contains(context)) {
+        Some(context) => conn.execute(
+            "INSERT OR REPLACE INTO server_config (key, value) VALUES (?1, ?2)",
+            params![WEAVE_CONTEXT_KEY, context],
+        )?,
+        None => conn.execute(
+            "DELETE FROM server_config WHERE key = ?1",
+            params![WEAVE_CONTEXT_KEY],
+        )?,
+    };
+    Ok(())
+}
+
+/// The queue was replaced: whatever loaded the old one no longer applies.
+pub fn forget_weave_context(conn: &Connection) {
+    // Best effort, like the radio seed it is forgotten with.
+    let _ = set_weave_context(conn, None);
+}
+
+pub fn weave_context_active(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM server_config WHERE key = ?1)",
+        params![WEAVE_CONTEXT_KEY],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
 pub fn set_automix_use_learning(conn: &Connection, enabled: bool) -> Result<()> {
     conn.execute(
         "UPDATE playback_state SET automix_use_learning = ?1 WHERE id = 1",
@@ -270,16 +312,86 @@ pub fn ensure_automix_queue_depth(
         .map(|idx| queue_items.len().saturating_sub(idx + 1))
         .unwrap_or(0);
 
-    if upcoming_count >= target_upcoming {
-        return Ok(queue_items);
-    }
     // A radio's queue tops up from its own seed (server::radio_continuation).
     // Automix only steps in if the radio has run dry, so playback never stops.
-    if upcoming_count > 0 && crate::server::radio_continuation::radio_queue_active(conn) {
+    let radio_active = crate::server::radio_continuation::radio_queue_active(conn);
+    // External picks ("Include new"): tracks Last.fm or TIDAL's track mix
+    // linked to the session (warmed in the background by
+    // server::radio_continuation), gated like every other source. They are
+    // woven between the listener's songs (see `weave_new_song`) unless a
+    // radio owns the queue; a radio brings its own.
+    let external_on = state.automix_allow_external || state.automix_discover_new;
+    let weave_on = external_on && !radio_active;
+    let refill = upcoming_count < target_upcoming && !(upcoming_count > 0 && radio_active);
+    if !refill && !weave_on {
+        return Ok(queue_items);
+    }
+    let model_id = queries::get_selected_discovery_embedding_model(conn)
+        .ok()
+        .flatten()
+        .map(|model| model.id);
+
+    let mut appended = false;
+    if refill {
+        appended |= refill_tail(
+            conn,
+            &state,
+            current_track,
+            &queue_items,
+            target_upcoming - upcoming_count,
+            model_id,
+            weave_on,
+        )?;
+    }
+
+    if weave_on {
+        let woven = if appended {
+            weave_new_song(
+                conn,
+                model_id,
+                current_track,
+                &queue::load_queue(conn)?,
+                &state,
+            )
+        } else {
+            weave_new_song(conn, model_id, current_track, &queue_items, &state)
+        };
+        // Optional like every external pick: never fail the refill that
+        // next_track and peek_next_track depend on.
+        match woven {
+            Ok(woven) => appended |= woven,
+            Err(error) => {
+                tracing::warn!(target: "noor.automix", %error, "weaving a new song failed")
+            }
+        }
+    }
+
+    if !appended {
         return Ok(queue_items);
     }
 
-    let needed = (target_upcoming - upcoming_count).max(AUTOMIX_BATCH_SIZE);
+    queue::load_queue(conn)
+}
+
+/// Append a batch of automix picks after the last queued row. Returns whether
+/// anything was added.
+///
+/// With "Include new" on and the library knowing little about the playing
+/// track, external picks take three quarters of the batch and go first, since
+/// Last.fm and TIDAL know the tracks the library does not. Otherwise the batch
+/// is library picks and the weave places new songs between them; only when
+/// the weave is off (a radio that ran dry) does a quarter of external picks
+/// follow at the end.
+fn refill_tail(
+    conn: &Connection,
+    state: &PlaybackState,
+    current_track: &Track,
+    queue_items: &[QueueItem],
+    missing: usize,
+    model_id: Option<i64>,
+    weave_on: bool,
+) -> Result<bool> {
+    let needed = missing.max(AUTOMIX_BATCH_SIZE);
     let shuffle_mode = ShuffleMode::parse(&state.shuffle_mode);
     let shuffle_seed = if shuffle_mode != ShuffleMode::Off {
         conn.query_row(
@@ -291,18 +403,7 @@ pub fn ensure_automix_queue_depth(
         None
     };
 
-    // External picks ("Include new"): tracks Last.fm or TIDAL's track mix
-    // linked to this seed or its learned neighbors (warmed in the background
-    // by server::radio_continuation), gated like every other source. Their share
-    // follows how much the library knows about the playing track: a quarter of
-    // the batch when its learned neighbors are well supported, three quarters
-    // and first in line when they are not, since Last.fm is what knows the
-    // tracks the library does not.
     let external_on = state.automix_allow_external || state.automix_discover_new;
-    let model_id = queries::get_selected_discovery_embedding_model(conn)
-        .ok()
-        .flatten()
-        .map(|model| model.id);
     let little_evidence = external_on && has_little_evidence(conn, model_id, current_track.id);
     let external_slots = if little_evidence {
         (needed * 3 / 4).max(1)
@@ -316,7 +417,7 @@ pub fn ensure_automix_queue_depth(
             conn,
             model_id,
             current_track.id,
-            &session_seeds(current_track, &queue_items),
+            &session_seeds(current_track, queue_items),
             slots,
         ) {
             Ok(appended) => appended,
@@ -339,7 +440,7 @@ pub fn ensure_automix_queue_depth(
         let extension = build_automix_extension_with_reasons(
             conn,
             current_track,
-            &queue_items,
+            queue_items,
             shuffle_mode,
             shuffle_seed,
             library_needed,
@@ -355,15 +456,123 @@ pub fn ensure_automix_queue_depth(
         }
     }
 
-    if external_on && !little_evidence {
+    if external_on && !little_evidence && !weave_on {
         appended |= append_external(external_slots) > 0;
     }
 
-    if !appended {
-        return Ok(queue_items);
+    Ok(appended)
+}
+
+/// "Include new" through a long session: keep one new song among the next
+/// `WEAVE_EVERY` upcoming rows, placed after the third, so three of the
+/// listener's songs play between new ones. Called on every refill check
+/// (track change and gapless peek); a window that already holds a new song is
+/// left alone, which keeps the spacing steady as playback moves on.
+///
+/// A library, liked or artist session is woven throughout. Any other queue
+/// (an album, a playlist) is only woven where automix's own rows begin, after
+/// it ends. Returns whether a song was woven in.
+fn weave_new_song(
+    conn: &Connection,
+    model_id: Option<i64>,
+    current_track: &Track,
+    queue_items: &[QueueItem],
+    state: &PlaybackState,
+) -> Result<bool> {
+    let Some(current_index) = playback_anchor_index(
+        queue_items,
+        Some(current_track.id),
+        state.current_queue_item_id,
+    ) else {
+        return Ok(false);
+    };
+    let upcoming = &queue_items[current_index + 1..];
+    if upcoming
+        .iter()
+        .take(WEAVE_EVERY)
+        .any(|item| item.source == NEW_SOURCE)
+    {
+        return Ok(false);
+    }
+    // Rows the listener hears before the new song: three, or all that wait.
+    let lead = upcoming.len().min(WEAVE_EVERY - 1);
+    let before = if lead == 0 {
+        &queue_items[current_index]
+    } else {
+        &upcoming[lead - 1]
+    };
+    let after = upcoming.get(lead);
+    if !before.source.starts_with("automix") && !weave_context_active(conn) {
+        return Ok(false);
     }
 
-    queue::load_queue(conn)
+    // Seeds: the songs either side of the slot, so the new song leads out of
+    // one and into the other, then the session anchor and the playing track.
+    let playable =
+        |item: &QueueItem| (!item.is_pending && item.track.id > 0).then_some(item.track.id);
+    let mut seeds = Vec::new();
+    if let Some(id) = playable(before) {
+        push_seed(&mut seeds, id, WEAVE_BEFORE_WEIGHT);
+    }
+    if let Some(id) = after.and_then(playable) {
+        push_seed(&mut seeds, id, WEAVE_AFTER_WEIGHT);
+    }
+    if let Some(anchor) = session_anchor(current_track, queue_items) {
+        push_seed(&mut seeds, anchor, WEAVE_SESSION_WEIGHT);
+    }
+    push_seed(&mut seeds, current_track.id, WEAVE_SESSION_WEIGHT);
+
+    let ranking_seed = playable(before).unwrap_or(current_track.id);
+    for ranked in ranked_external_picks(conn, model_id, ranking_seed, &seeds, 1)? {
+        let reason = external_pick_reason(&ranked);
+        let row = &ranked.row;
+        match queue::insert_external_track_after(
+            conn,
+            &queue::ExternalTrackInsert {
+                artist: &row.artist_name,
+                title: &row.title,
+                source: NEW_SOURCE,
+                reason: Some(&reason),
+                tidal_id_hint: row.tidal_id,
+                ..Default::default()
+            },
+            before.position,
+        ) {
+            Ok(_) => return Ok(true),
+            Err(error) => tracing::warn!(
+                target: "noor.automix",
+                %error,
+                artist = %row.artist_name,
+                title = %row.title,
+                "skipping woven automix pick"
+            ),
+        }
+    }
+    Ok(false)
+}
+
+const WEAVE_BEFORE_WEIGHT: f64 = 1.0;
+const WEAVE_AFTER_WEIGHT: f64 = 0.8;
+const WEAVE_SESSION_WEIGHT: f64 = 0.6;
+
+fn push_seed(seeds: &mut Vec<(i64, f64)>, id: i64, weight: f64) {
+    if id > 0 && !seeds.iter().any(|(seed, _)| *seed == id) {
+        seeds.push((id, weight));
+    }
+}
+
+/// The last track the listener chose at or before the playing one: the
+/// station seed or their own pick, never an automix pick.
+fn session_anchor(current_track: &Track, queue_items: &[QueueItem]) -> Option<i64> {
+    let index = queue_items
+        .iter()
+        .position(|item| item.track.id == current_track.id)?;
+    queue_items[..=index]
+        .iter()
+        .rev()
+        .filter(|item| !item.is_pending && item.track.id > 0)
+        .find(|item| !item.source.starts_with("automix"))
+        .map(|item| item.track.id)
 }
 
 /// Where a refill draws from: the session anchor (the station seed or the
@@ -371,36 +580,19 @@ pub fn ensure_automix_queue_depth(
 /// and the queue tail, weighted in that order. Anchoring keeps a long session
 /// from drifting one noisy hop at a time away from where it started.
 fn session_seeds(current_track: &Track, queue_items: &[QueueItem]) -> Vec<(i64, f64)> {
-    fn push(seeds: &mut Vec<(i64, f64)>, id: i64, weight: f64) {
-        if id > 0 && !seeds.iter().any(|(seed, _)| *seed == id) {
-            seeds.push((id, weight));
-        }
-    }
-    let playable = |item: &&QueueItem| !item.is_pending && item.track.id > 0;
-    let current_index = queue_items
-        .iter()
-        .position(|item| item.track.id == current_track.id);
-    let anchor = current_index.and_then(|index| {
-        queue_items[..=index]
-            .iter()
-            .rev()
-            .filter(playable)
-            .find(|item| !item.source.starts_with("automix"))
-            .map(|item| item.track.id)
-    });
     let tail = queue_items
         .iter()
         .rev()
-        .find(playable)
+        .find(|item| !item.is_pending && item.track.id > 0)
         .map(|item| item.track.id);
 
     let mut seeds = Vec::new();
-    if let Some(anchor) = anchor {
-        push(&mut seeds, anchor, SESSION_ANCHOR_WEIGHT);
+    if let Some(anchor) = session_anchor(current_track, queue_items) {
+        push_seed(&mut seeds, anchor, SESSION_ANCHOR_WEIGHT);
     }
-    push(&mut seeds, current_track.id, SESSION_CURRENT_WEIGHT);
+    push_seed(&mut seeds, current_track.id, SESSION_CURRENT_WEIGHT);
     if let Some(tail) = tail {
-        push(&mut seeds, tail, SESSION_TAIL_WEIGHT);
+        push_seed(&mut seeds, tail, SESSION_TAIL_WEIGHT);
     }
     seeds
 }
@@ -491,10 +683,51 @@ fn append_automix_external_candidates(
     session: &[(i64, f64)],
     limit: usize,
 ) -> Result<usize> {
-    // Seeds: the same session seeds as the library lane (anchor, playing
-    // track, queue tail), each with its strongest learned neighbors at a
-    // discount, so a seed never looked up still reaches its scene. Only
-    // stored picks are read; each track's were warmed when it played.
+    let mut appended = 0usize;
+    for ranked in ranked_external_picks(conn, model_id, seed_track_id, session, limit)? {
+        let reason = external_pick_reason(&ranked);
+        let row = ranked.row;
+        if let Err(error) = queue::append_external_track(
+            conn,
+            &queue::ExternalTrackInsert {
+                artist: &row.artist_name,
+                title: &row.title,
+                source: NEW_SOURCE,
+                reason: Some(&reason),
+                tidal_id_hint: row.tidal_id,
+                ..Default::default()
+            },
+        ) {
+            tracing::warn!(
+                target: "noor.automix",
+                %error,
+                artist = %row.artist_name,
+                title = %row.title,
+                "skipping external automix pick"
+            );
+            continue;
+        }
+        appended += 1;
+        if appended >= limit {
+            break;
+        }
+    }
+    Ok(appended)
+}
+
+/// Stored external picks for weighted seeds, best first and overfetched past
+/// `limit` so the caller can skip inserts that fail.
+///
+/// Each seed also reaches its strongest learned neighbors at a discount, so a
+/// seed never looked up still reaches its scene. Only stored picks are read;
+/// server::radio_continuation warms them as tracks play and come up.
+fn ranked_external_picks(
+    conn: &Connection,
+    model_id: Option<i64>,
+    seed_track_id: i64,
+    session: &[(i64, f64)],
+    limit: usize,
+) -> Result<Vec<RankedExternalCandidate>> {
     let mut weights: HashMap<i64, f64> = HashMap::new();
     let mut add = |id: i64, weight: f64| {
         let entry = weights.entry(id).or_insert(0.0);
@@ -522,13 +755,15 @@ fn append_automix_external_candidates(
         EXTERNAL_MIN_SCORE,
         (limit.max(1) * 4).max(12) as i64,
     )?;
-    // Hidden content, Not for me, recent plays and anything already queued
-    // (any version) stay out; hidden rows never reach the insert, where they
+    // Songs the listener already saved or liked are not new to them. Hidden
+    // content, Not for me, recent plays and anything already queued (any
+    // version) stay out too; hidden rows never reach the insert, where they
     // would bail.
     let queue_items = queue::load_queue(conn)?;
     let mut gate = CandidateGate::load(conn, &queue_items, None);
     let candidates = rows
         .into_iter()
+        .filter(|row| !in_saved_library(conn, row.tidal_id))
         .filter(|row| gate.admit_candidate(None, row.tidal_id, None, &row.artist_name, &row.title))
         .collect::<Vec<_>>();
 
@@ -549,55 +784,49 @@ fn append_automix_external_candidates(
             reasons: Vec::new(),
         })
         .collect::<Vec<_>>();
-    let ranked = rank_generated_candidates(conn, seed_track_id, generated, mixing_active(conn))
-        .map(|ranked| {
-            ranked
-                .into_iter()
-                .map(|ranked| RankedExternalCandidate {
-                    row: ranked.item,
-                    score: ranked.score,
-                    reasons: ranked.reasons,
-                })
-                .collect()
-        })
-        .unwrap_or(fallback);
-    let mut appended = 0usize;
-    for ranked in ranked {
-        let row = ranked.row;
-        let label = if row.source.as_deref()
-            == Some(crate::services::learning::TIDAL_MIX_SIGHTING_SOURCE)
-        {
-            "TIDAL mix"
-        } else {
-            "Last.fm similar"
-        };
-        let reason = append_dj_reason(label, ranked.score, &ranked.reasons);
-        if let Err(error) = queue::append_external_track(
-            conn,
-            &queue::ExternalTrackInsert {
-                artist: &row.artist_name,
-                title: &row.title,
-                source: "automix-new",
-                reason: Some(&reason),
-                tidal_id_hint: row.tidal_id,
-                ..Default::default()
-            },
-        ) {
-            tracing::warn!(
-                target: "noor.automix",
-                %error,
-                artist = %row.artist_name,
-                title = %row.title,
-                "skipping external automix pick"
-            );
-            continue;
-        }
-        appended += 1;
-        if appended >= limit {
-            break;
-        }
-    }
-    Ok(appended)
+    Ok(
+        rank_generated_candidates(conn, seed_track_id, generated, mixing_active(conn))
+            .map(|ranked| {
+                ranked
+                    .into_iter()
+                    .map(|ranked| RankedExternalCandidate {
+                        row: ranked.item,
+                        score: ranked.score,
+                        reasons: ranked.reasons,
+                    })
+                    .collect()
+            })
+            .unwrap_or(fallback),
+    )
+}
+
+/// Saved to the library or liked already. Best effort: an unknown track or a
+/// lookup failure counts as new.
+fn in_saved_library(conn: &Connection, tidal_id: Option<i64>) -> bool {
+    let Some(Ok(Some(track_id))) =
+        tidal_id.map(|tidal_id| crate::db::catalogue::track_id(conn, tidal_id))
+    else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COALESCE(is_library, 0) = 1 OR COALESCE(is_favorite, 0) = 1
+         FROM tracks WHERE id = ?1",
+        params![track_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+/// The queue row's "Why": which lane found the pick, plus its DJ fit.
+fn external_pick_reason(ranked: &RankedExternalCandidate) -> String {
+    let label = if ranked.row.source.as_deref()
+        == Some(crate::services::learning::TIDAL_MIX_SIGHTING_SOURCE)
+    {
+        "TIDAL mix"
+    } else {
+        "Last.fm similar"
+    };
+    append_dj_reason(label, ranked.score, &ranked.reasons)
 }
 
 struct RankedExternalCandidate {

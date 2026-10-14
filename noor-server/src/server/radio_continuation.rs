@@ -4,11 +4,15 @@
 //! from the station the listener picked.
 //!
 //! The same watcher warms automix's "Include new" lane: when a track starts
-//! under automix with it on, the track's Last.fm matches and TIDAL track mix
-//! are fetched live if none are stored yet, so the next top-up can use them.
-//! TIDAL's mix keeps the lane working for listeners without Last.fm.
+//! under automix with it on, the Last.fm matches and TIDAL track mix of that
+//! track and of the songs the weave seeds from next are fetched live if none
+//! are stored yet, so the next woven song can use them. TIDAL's mix keeps the
+//! lane working for listeners without Last.fm. New songs ahead that still
+//! wait on TIDAL are resolved early, before playback reaches them.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -85,8 +89,10 @@ pub fn remember_seed(conn: &Connection, seed: RadioSeed) -> rusqlite::Result<()>
 }
 
 /// Forget the radio seed: another builder replaced the queue, or the radio
-/// ran out of picks and automix takes over.
+/// ran out of picks and automix takes over. Whatever play context the old
+/// queue was loaded with ("Include new" weaving) goes with it.
 pub fn forget_seed(conn: &Connection) {
+    crate::playback::automix::forget_weave_context(conn);
     // Best effort: a database without the columns has nothing to forget.
     let _ = conn.execute(
         "UPDATE playback_state
@@ -268,22 +274,32 @@ fn wants_new_matches(conn: &Connection) -> bool {
     flags == (true, true) && !radio_queue_active(conn)
 }
 
+/// Warm the "Include new" lane for the track that just started and for the
+/// songs the weave seeds its next pick from, one song at a time so a track
+/// change costs a handful of lookups at most.
 async fn warm_new_matches(state: &SharedState, track_id: i64) {
     let db = state.read().await.db.clone();
-    if !db
-        .with_conn(|conn| Ok(wants_new_matches(conn)))
-        .unwrap_or(false)
-    {
+    let Some(ahead) = db
+        .with_conn(|conn| Ok(wants_new_matches(conn).then(|| warm_ahead_track_ids(conn))))
+        .ok()
+        .flatten()
+    else {
         return;
+    };
+    let tracks = std::iter::once(track_id).chain(ahead.into_iter().filter(|id| *id != track_id));
+    for track_id in tracks {
+        // Independent lanes: one failing or missing never blocks the other.
+        tokio::join!(
+            warm_lastfm_matches(state, &db, track_id),
+            warm_tidal_mix(state, &db, track_id)
+        );
     }
-    // Independent lanes: one failing or missing never blocks the other.
-    tokio::join!(
-        warm_lastfm_matches(state, &db, track_id),
-        warm_tidal_mix(state, &db, track_id)
-    );
 }
 
 async fn warm_lastfm_matches(state: &SharedState, db: &crate::db::Database, track_id: i64) {
+    if recently_missed(track_id, Lane::LastFm) {
+        return;
+    }
     let lastfm = {
         let g = state.read().await;
         crate::metadata::lastfm::LastFmClient::load(g.http_client.clone(), &g.db)
@@ -294,7 +310,8 @@ async fn warm_lastfm_matches(state: &SharedState, db: &crate::db::Database, trac
         Ok(stored) if stored > 0 => {
             tracing::info!(target: "noor.automix", track_id, stored, "stored Last.fm matches for automix")
         }
-        Ok(_) => {}
+        // Nothing new (or fresh matches already stored): no need to ask again soon.
+        Ok(_) => note_miss(track_id, Lane::LastFm),
         Err(error) => {
             tracing::debug!(target: "noor.automix", track_id, %error, "Last.fm match lookup failed")
         }
@@ -305,9 +322,10 @@ async fn warm_lastfm_matches(state: &SharedState, db: &crate::db::Database, trac
 /// effort: no TIDAL session, a non-TIDAL track or no mix just stores nothing.
 async fn warm_tidal_mix(state: &SharedState, db: &crate::db::Database, track_id: i64) {
     use crate::services::learning::{has_fresh_tidal_mix_sightings, persist_tidal_mix_sightings};
-    if db
-        .with_conn(|conn| Ok(has_fresh_tidal_mix_sightings(conn, track_id)))
-        .unwrap_or(true)
+    if recently_missed(track_id, Lane::TidalMix)
+        || db
+            .with_conn(|conn| Ok(has_fresh_tidal_mix_sightings(conn, track_id)))
+            .unwrap_or(true)
     {
         return;
     }
@@ -318,6 +336,14 @@ async fn warm_tidal_mix(state: &SharedState, db: &crate::db::Database, track_id:
         Ok(found) => found,
         Err(reason) => {
             tracing::debug!(target: "noor.automix", track_id, reason, "no TIDAL mix for automix");
+            // A missing session or a failed request is worth retrying; a
+            // track that is not on TIDAL or has no mix is not, for a while.
+            if !matches!(
+                reason,
+                "TIDAL is not connected" | "the TIDAL radio request failed"
+            ) {
+                note_miss(track_id, Lane::TidalMix);
+            }
             return;
         }
     };
@@ -328,15 +354,121 @@ async fn warm_tidal_mix(state: &SharedState, db: &crate::db::Database, track_id:
         Ok(stored) if stored > 0 => {
             tracing::info!(target: "noor.automix", track_id, stored, "stored TIDAL mix for automix")
         }
-        Ok(_) => {}
+        Ok(_) => note_miss(track_id, Lane::TidalMix),
         Err(error) => {
             tracing::warn!(target: "noor.automix", track_id, %error, "storing TIDAL mix failed")
         }
     }
 }
 
-/// Watch queue and track changes: top the radio up when it runs low, and warm
-/// automix's "Include new" lane for the track that just started.
+/// Position of the playing row, or -1 when nothing is playing.
+const CURRENT_POSITION_SQL: &str = "COALESCE(
+    (SELECT q.position FROM queue q
+     JOIN playback_state ps ON ps.current_queue_item_id = q.id
+     WHERE ps.id = 1),
+    -1)";
+
+/// The songs the weave seeds its next pick from: the second to fifth after
+/// the playing one, whichever pair borders the slot when it next looks.
+/// Empty unless "Include new" is on outside a radio.
+fn warm_ahead_track_ids(conn: &Connection) -> Vec<i64> {
+    if !wants_new_matches(conn) {
+        return Vec::new();
+    }
+    let sql = format!(
+        "SELECT track_id FROM queue WHERE position > {CURRENT_POSITION_SQL}
+         ORDER BY position LIMIT 4 OFFSET 1"
+    );
+    conn.prepare(&sql)
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, Option<i64>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map(|ids| ids.into_iter().flatten().collect())
+        .unwrap_or_default()
+}
+
+/// New songs ahead still waiting on TIDAL that no resolver holds. Resolving
+/// them early keeps playback (and gapless preloading) from waiting on one.
+fn unresolved_new_picks(conn: &Connection) -> Vec<i64> {
+    let sql = format!(
+        "SELECT id FROM queue
+         WHERE source = 'automix-new' AND track_id IS NULL AND resolving_at IS NULL
+           AND position > {CURRENT_POSITION_SQL}
+         ORDER BY position"
+    );
+    conn.prepare(&sql)
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default()
+}
+
+async fn resolve_new_picks_ahead(state: &SharedState) {
+    let db = state.read().await.db.clone();
+    let pending = db
+        .with_conn(|conn| Ok(unresolved_new_picks(conn)))
+        .unwrap_or_default();
+    crate::server::routes::spawn_pending_resolvers_for_queue_items(
+        state,
+        &db,
+        pending,
+        "automix_new_pending_resolved",
+    )
+    .await;
+}
+
+/// How long a lookup that found nothing is trusted before asking again.
+const MISS_TTL: Duration = Duration::from_secs(12 * 3600);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Lane {
+    LastFm,
+    TidalMix,
+}
+
+/// Lookups that found nothing. Warming ahead visits a song several times as
+/// it moves up the queue, and only stored picks mark it done, so without this
+/// a song with no Last.fm match or TIDAL mix is fetched again on every visit.
+/// Kept in memory: after a restart each song is asked once more.
+#[derive(Default)]
+struct LookupMisses {
+    at: HashMap<(i64, Lane), Instant>,
+}
+
+impl LookupMisses {
+    fn recent(&self, track_id: i64, lane: Lane, now: Instant) -> bool {
+        self.at
+            .get(&(track_id, lane))
+            .is_some_and(|at| now.saturating_duration_since(*at) <= MISS_TTL)
+    }
+
+    fn note(&mut self, track_id: i64, lane: Lane, now: Instant) {
+        self.at
+            .retain(|_, at| now.saturating_duration_since(*at) <= MISS_TTL);
+        self.at.insert((track_id, lane), now);
+    }
+}
+
+static LOOKUP_MISSES: LazyLock<Mutex<LookupMisses>> = LazyLock::new(Default::default);
+
+fn recently_missed(track_id: i64, lane: Lane) -> bool {
+    LOOKUP_MISSES
+        .lock()
+        .map(|misses| misses.recent(track_id, lane, Instant::now()))
+        .unwrap_or(false)
+}
+
+fn note_miss(track_id: i64, lane: Lane) {
+    if let Ok(mut misses) = LOOKUP_MISSES.lock() {
+        misses.note(track_id, lane, Instant::now());
+    }
+}
+
+/// Watch queue and track changes: top the radio up when it runs low, warm
+/// automix's "Include new" lane for the track that just started and the songs
+/// ahead, and resolve new songs before playback reaches them.
 pub fn spawn(state: SharedState) {
     tokio::spawn(async move {
         let mut event_rx = {
@@ -366,6 +498,7 @@ pub fn spawn(state: SharedState) {
                     if let Err(error) = top_up(&state).await {
                         tracing::warn!(target: "noor.radio", %error, "radio continuation failed");
                     }
+                    resolve_new_picks_ahead(&state).await;
                 }
             }
         }
@@ -463,5 +596,68 @@ mod tests {
         )
         .unwrap();
         assert!(ensure_automix_queue_depth(&conn, 8, false).unwrap().len() > 2);
+    }
+
+    /// Seven queued songs (tracks 1..=7), the first playing, automix on.
+    fn seven_song_session(conn: &Connection, include_new: bool) {
+        conn.execute_batch(
+            "INSERT INTO tracks (id, title, artist_id) VALUES
+                (4, 'Four', 1), (5, 'Five', 1), (6, 'Six', 1), (7, 'Seven', 1);
+             INSERT INTO queue (id, track_id, position, source) VALUES
+                (1, 1, 0, 'user'), (2, 2, 1, 'user'), (3, 3, 2, 'user'), (4, 4, 3, 'user'),
+                (5, 5, 4, 'user'), (6, 6, 5, 'user'), (7, 7, 6, 'user');
+             UPDATE playback_state
+             SET current_track_id = 1, current_queue_item_id = 1, automix_enabled = 1
+             WHERE id = 1;",
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE playback_state SET automix_discover_new = ?1 WHERE id = 1",
+            [include_new],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn include_new_warms_the_songs_around_the_next_slot() {
+        let conn = conn();
+        seven_song_session(&conn, true);
+        // The second to fifth songs ahead: whichever pair borders the slot
+        // when the weave next looks.
+        assert_eq!(warm_ahead_track_ids(&conn), vec![3, 4, 5, 6]);
+
+        conn.execute("UPDATE playback_state SET automix_discover_new = 0", [])
+            .unwrap();
+        assert!(warm_ahead_track_ids(&conn).is_empty());
+    }
+
+    #[test]
+    fn new_songs_ahead_are_resolved_before_playback_reaches_them() {
+        let conn = conn();
+        seven_song_session(&conn, true);
+        conn.execute_batch(
+            "INSERT INTO queue (id, track_id, position, source, pending_artist, pending_title,
+                                pending_at, resolving_at) VALUES
+                (8, NULL, 7, 'automix-new', 'X', 'Waiting', datetime('now'), NULL),
+                (9, NULL, 8, 'automix-new', 'X', 'Resolving', datetime('now'), datetime('now')),
+                (10, NULL, 9, 'radio_pending', 'X', 'Album row', datetime('now'), NULL),
+                (11, 3, 10, 'automix-new', NULL, NULL, NULL, NULL);",
+        )
+        .unwrap();
+
+        assert_eq!(unresolved_new_picks(&conn), vec![8]);
+    }
+
+    #[test]
+    fn a_lookup_that_found_nothing_waits_before_asking_again() {
+        let start = Instant::now();
+        let mut misses = LookupMisses::default();
+        assert!(!misses.recent(1, Lane::TidalMix, start));
+
+        misses.note(1, Lane::TidalMix, start);
+        assert!(misses.recent(1, Lane::TidalMix, start + Duration::from_secs(60)));
+        assert!(!misses.recent(1, Lane::LastFm, start), "lanes are separate");
+        assert!(!misses.recent(2, Lane::TidalMix, start));
+        assert!(!misses.recent(1, Lane::TidalMix, start + MISS_TTL + Duration::from_secs(1)));
     }
 }

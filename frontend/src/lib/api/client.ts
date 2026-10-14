@@ -58,6 +58,7 @@ import type {
 	SearchResults,
 	QueueItem,
 	MixedQueueItem,
+	QueueContext,
 	PlaybackState,
 	PlaybackSnapshot,
 	QueueSnapshot,
@@ -1947,13 +1948,18 @@ export const api = {
 
 	replacePlaybackQueue(
 		items: MixedQueueItem[],
-		options?: { shuffleMode?: PlaybackState['shuffle_mode']; startPlayback?: boolean }
+		options?: {
+			shuffleMode?: PlaybackState['shuffle_mode'];
+			startPlayback?: boolean;
+			context?: QueueContext;
+		}
 	) {
 		const body: Record<string, unknown> = { items };
 		if (options?.shuffleMode && options.shuffleMode !== 'off') {
 			body.shuffle_mode = options.shuffleMode;
 		}
 		if (options?.startPlayback) body.start_playback = true;
+		if (options?.context) body.context = options.context;
 		return fetchApi<{
 			queued_count: number;
 			pending_count: number;
