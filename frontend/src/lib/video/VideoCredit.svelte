@@ -10,7 +10,7 @@
 	// for the last ones with what is up next. On a channel it sits in the
 	// stage under the bug, in the channel's colour; with titles on for all
 	// videos the player shows it the same way, in the accent.
-	let { current, upNext, positionS, durationS, startedAtS, hidden = false, fullscreen = false }: {
+	let { current, upNext, positionS, durationS, startedAtS, hidden = false, fullscreen = false, showWhy = true }: {
 		current: VideoSessionItem | null;
 		upNext: VideoSessionItem | null;
 		positionS: number;
@@ -20,6 +20,9 @@
 		/** Something else holds the picture (the guide, a flip, the curtain). */
 		hidden?: boolean;
 		fullscreen?: boolean;
+		/** The why line (why this video is on): a channel's reasons say
+		 *  something; a plain queue's ("More from this artist") do not. */
+		showWhy?: boolean;
 	} = $props();
 
 	let phase = $derived(lowerThirdPhase(positionS, durationS, startedAtS));
@@ -51,7 +54,7 @@
 				{#if credit.tag}<span>{credit.tag}</span>{:else if credit.cut}<span>{credit.cut}</span>{/if}
 				{#if credit.runtime}<span>{credit.runtime}</span>{/if}
 			</span>
-			{#if credit.why && phase === 'intro'}<span class="lt-why">{credit.why}</span>{/if}
+			{#if showWhy && credit.why && phase === 'intro'}<span class="lt-why">{credit.why}</span>{/if}
 		</div>
 	{/key}
 {/if}
@@ -150,16 +153,13 @@
 		margin: 0 10px;
 		color: rgba(255, 255, 255, 0.4);
 	}
+	/* Why it is on: a caption under the credit, not a pill, so it never
+	   reads as a button. */
 	.lt-why {
-		margin-top: 6px;
-		padding: 4px 10px;
-		border: 1px solid color-mix(in oklch, var(--lt-ink) 55%, transparent);
-		border-radius: 999px;
-		background: rgba(0, 0, 0, 0.35);
-		font-size: var(--font-size-2xs);
-		font-weight: var(--font-weight-semibold);
-		color: rgba(255, 255, 255, 0.9);
-		text-shadow: none;
+		margin-top: 4px;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		color: rgba(255, 255, 255, 0.74);
 		animation: lt-in var(--motion-slow) 260ms both;
 	}
 	.lower-third.fullscreen { bottom: clamp(96px, 13%, 168px); }

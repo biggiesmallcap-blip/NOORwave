@@ -48,6 +48,10 @@
 		broadcast?: boolean;
 		/** Fullscreen only: drawn before the heart (On Air's channel pill). */
 		fsLead?: Snippet;
+		/** The curtain covers the picture between videos: the heart and
+		 *  Queue step back with the rest of the chrome; the lead (the
+		 *  channel remote) stays, so channels can be flipped through. */
+		veiled?: boolean;
 	};
 
 	let {
@@ -79,6 +83,7 @@
 		startAt = 0,
 		broadcast = false,
 		fsLead,
+		veiled = false,
 	}: Props = $props();
 
 	let container: HTMLDivElement | null = $state(null);
@@ -547,7 +552,7 @@
 	{/if}
 
 	{#if fullscreen}
-		<div class="fs-actions">
+		<div class="fs-actions" class:veiled>
 			{@render fsLead?.()}
 			{#if onToggleSaved}
 				<button type="button" class="fs-pill heart" class:saved onclick={() => onToggleSaved?.()} disabled={savePending}
@@ -787,6 +792,11 @@
 		pointer-events: none;
 	}
 
+	.fs-actions.veiled .fs-pill {
+		opacity: 0;
+		pointer-events: none;
+	}
+
 	.chrome-hidden .top-meta {
 		transform: translateY(-10px);
 	}
@@ -891,7 +901,7 @@
 		color: rgba(255, 255, 255, 0.84);
 		font-size: var(--font-size-xs);
 		font-weight: 800;
-		transition: background var(--motion-fast), color var(--motion-fast);
+		transition: background var(--motion-fast), color var(--motion-fast), opacity var(--motion-base);
 	}
 
 	.fs-pill:hover:not(:disabled),

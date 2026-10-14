@@ -816,6 +816,7 @@
 				onProgress={handleProgress}
 				startAt={$videoSession.startAtS}
 				broadcast={broadcast || creditsEverywhere}
+				veiled={$videoCurtain !== null}
 				autoplayNext={$videoSession.autoplay}
 				hasNext={hasNext}
 				hasPrevious={hasPrevious}
@@ -864,6 +865,7 @@
 					startedAtS={$videoSession.startAtS}
 					hidden={$videoCurtain !== null}
 					fullscreen={expanded}
+					showWhy={false}
 				/>
 			</div>
 		{/if}
