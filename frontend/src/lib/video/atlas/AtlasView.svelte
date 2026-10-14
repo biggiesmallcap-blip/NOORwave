@@ -35,7 +35,7 @@
 	import { ATLAS_SEARCH_LABEL, atlasUrl } from './links';
 	import { playAtlasQueue, probeMessage } from './play';
 	import { AtlasRenderer } from './renderer';
-	import { buildNameIndex, searchArtists, type AtlasSearchHit } from './search';
+	import { buildNameIndex, searchArtists, searchScenes, type AtlasSceneHit, type AtlasSearchHit } from './search';
 	import { sceneAt } from './spatial';
 	import {
 		ATLAS_LOOKS,
@@ -94,6 +94,12 @@
 	let journeyLoading = $state(false);
 	let journeyError = $state<string | null>(null);
 	let picking = $state<'from' | null>(null);
+	// Scenes come up by name, channel number or genre; not while a journey
+	// start is being picked (that takes an artist).
+	let sceneHits = $derived<AtlasSceneHit[]>(query && !picking ? searchScenes(data.scenes, query, 4) : []);
+	/** Scenes lead when their best match is at least as close as the artists'. */
+	let scenesFirst = $derived(sceneHits.length > 0 && (hits.length === 0 || sceneHits[0].tier <= hits[0].tier));
+	let anyHits = $derived(hits.length + sceneHits.length > 0);
 	/** The journey playing, followed on the map while its label is what
 	 *  the session says is playing. */
 	let following = $state<{ label: string; ids: number[] } | null>(null);
@@ -386,6 +392,17 @@
 		if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 	}
 
+	function pickScene(hit: AtlasSceneHit) {
+		videoSectionQuery.set('');
+		selectScene(hit.index);
+		if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+	}
+
+	function sceneMeta(hit: AtlasSceneHit): string {
+		const on = hit.channelNo != null ? `Channel ${hit.channelNo}` : 'Not on air yet';
+		return hit.tag ? `${hit.tag}, ${on.toLowerCase()}` : on;
+	}
+
 	// ------------------------------------------------------------ pointer
 
 	const pointers = new Map<number, { x: number; y: number }>();
@@ -576,7 +593,7 @@
 	}
 
 	function onWheel(event: WheelEvent) {
-		if (!renderer) return;
+		if (!renderer || pageTakesWheel(event)) return;
 		event.preventDefault();
 		const p = local(event);
 		// A sideways trackpad swipe pans; everything else zooms.
@@ -624,10 +641,10 @@
 		const target = event.target as HTMLElement | null;
 		// The section's search field finds artists here.
 		if (target instanceof HTMLInputElement && target.getAttribute('aria-label') === ATLAS_SEARCH_LABEL) {
-			if (event.key === 'Enter' && hits.length > 0) {
+			if (event.key === 'Enter' && anyHits) {
 				event.preventDefault();
-				pickHit(hits[0]);
-			} else if (event.key === 'ArrowDown' && hits.length > 0) {
+				resultsEl?.querySelector('button')?.click();
+			} else if (event.key === 'ArrowDown' && anyHits) {
 				event.preventDefault();
 				resultsEl?.querySelector('button')?.focus();
 			}
@@ -692,11 +709,42 @@
 
 	// ------------------------------------------------------------ setup
 
+	/** The stage fills the window between what is above it and what is
+	 *  below it (the section's and the workspace's bottom insets), so the
+	 *  page itself never scrolls under the map. */
 	function measureTop() {
 		if (!stageEl) return;
-		const workspace = document.querySelector('main.workspace');
-		const top = stageEl.getBoundingClientRect().top + (workspace?.scrollTop ?? 0);
+		const workspace = scroller();
+		const rect = stageEl.getBoundingClientRect();
+		const top = rect.top + (workspace?.scrollTop ?? 0);
 		stageEl.style.setProperty('--atlas-top', `${Math.max(0, Math.round(top))}px`);
+		if (workspace) {
+			const view = workspace.getBoundingClientRect();
+			const bottomInContent = rect.bottom - view.top + workspace.scrollTop;
+			const below = workspace.scrollHeight - bottomInContent;
+			stageEl.style.setProperty('--atlas-bottom', `${Math.max(0, Math.round(below))}px`);
+		}
+	}
+
+	function scroller(): HTMLElement | null {
+		return stageEl?.closest<HTMLElement>('main.workspace') ?? document.querySelector<HTMLElement>('main.workspace');
+	}
+
+	/** When the window is too short for the map's minimum height, the page
+	 *  does scroll: then a wheel over the map moves the page first (back to
+	 *  the top going up, until the map's foot is in view going down) and
+	 *  only then zooms, so the map can never trap you below the header. */
+	function pageTakesWheel(event: WheelEvent): boolean {
+		const workspace = scroller();
+		if (!workspace || !stageEl || event.ctrlKey) return false;
+		const view = workspace.getBoundingClientRect();
+		const rect = stageEl.getBoundingClientRect();
+		if (event.deltaY < 0) return workspace.scrollTop > 0;
+		if (event.deltaY > 0) {
+			const room = workspace.scrollHeight - workspace.clientHeight - workspace.scrollTop;
+			return room > 1 && rect.bottom > view.bottom + 1;
+		}
+		return false;
 	}
 
 	function onCamera() {
@@ -729,6 +777,9 @@
 	}
 
 	let resizeObserver: ResizeObserver | null = null;
+	/** Watches the page around the map: a player bar arriving changes the
+	 *  bottom inset, and the map is resized to match. */
+	let insetObserver: ResizeObserver | null = null;
 	let overlayObserver: ResizeObserver | null = null;
 	let unsubscribeMotion: (() => void) | null = null;
 
@@ -794,6 +845,11 @@
 		canvasEl.addEventListener('wheel', onWheel, { passive: false });
 		window.addEventListener('keydown', onKeydown, { capture: true });
 		window.addEventListener('resize', measureTop);
+		const workspace = scroller();
+		if (workspace) {
+			insetObserver = new ResizeObserver(() => measureTop());
+			for (const child of workspace.children) insetObserver.observe(child);
+		}
 
 		// Canvas text needs the web fonts loaded before it measures labels.
 		if (document.fonts) {
@@ -811,6 +867,7 @@
 		renderer?.destroy();
 		renderer = null;
 		resizeObserver?.disconnect();
+		insetObserver?.disconnect();
 		overlayObserver?.disconnect();
 		unsubscribeMotion?.();
 		if (dwellTimer) clearTimeout(dwellTimer);
@@ -988,8 +1045,21 @@
 	<!-- Search results from the section's field -->
 	{#if query}
 		<div class="results-wrap">
-			{#if hits.length > 0}
-				<ul class="results" bind:this={resultsEl} aria-label="Artists on the map">
+			{#if anyHits}
+				{#snippet sceneGroup(label: boolean)}
+					{#if label}<li class="r-group" aria-hidden="true">Scenes and channels</li>{/if}
+					{#each sceneHits as hit (`s${hit.id}`)}
+						<li>
+							<button type="button" onclick={() => pickScene(hit)}>
+								<svg class="r-scene" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="6" r="2.4" /><circle cx="11" cy="5" r="1.8" /><circle cx="9" cy="11" r="2.1" /></svg>
+								<span class="r-name">{hit.name}</span>
+								<span class="r-meta">{sceneMeta(hit)}</span>
+							</button>
+						</li>
+					{/each}
+				{/snippet}
+				{#snippet artistGroup(label: boolean)}
+					{#if label}<li class="r-group" aria-hidden="true">Artists</li>{/if}
 					{#each hits as hit (hit.id)}
 						{@const s = data.scene[hit.index]}
 						<li>
@@ -1000,9 +1070,19 @@
 							</button>
 						</li>
 					{/each}
+				{/snippet}
+				<!-- Both kinds, the closer match first; labels only when both show. -->
+				<ul class="results" bind:this={resultsEl} aria-label="Found on the map">
+					{#if scenesFirst}
+						{@render sceneGroup(hits.length > 0)}
+						{#if hits.length > 0}{@render artistGroup(true)}{/if}
+					{:else}
+						{@render artistGroup(sceneHits.length > 0)}
+						{#if sceneHits.length > 0}{@render sceneGroup(true)}{/if}
+					{/if}
 				</ul>
 			{:else}
-				<p class="results empty">No artist called "{query}" on the map yet.</p>
+				<p class="results empty">Nothing called "{query}" on the map yet.</p>
 			{/if}
 		</div>
 	{/if}
@@ -1163,7 +1243,7 @@
 		--stage-text-3: rgba(206, 212, 230, 0.56);
 		--card-pad: var(--space-5);
 		position: relative;
-		height: max(440px, calc(100dvh - var(--atlas-top, 230px) - max(var(--bottom-player-height, 0px), 44px, var(--safe-bottom, 0px)) - 12px));
+		height: max(440px, calc(100dvh - var(--atlas-top, 230px) - var(--atlas-bottom, 104px)));
 		border-radius: var(--radius-lg);
 		overflow: hidden;
 		background: #04050a;
@@ -1387,7 +1467,7 @@
 
 	.results button {
 		display: grid;
-		grid-template-columns: 10px minmax(0, 1fr) auto;
+		grid-template-columns: 12px minmax(0, 1fr) auto;
 		align-items: center;
 		gap: var(--space-3);
 		width: 100%;
@@ -1415,6 +1495,23 @@
 		color: var(--stage-text-3);
 		font-size: var(--font-size-xs);
 		white-space: nowrap;
+	}
+
+	/* Group names, only when scenes and artists both show. */
+	.r-group {
+		padding: var(--space-2) var(--space-3) 2px;
+		color: var(--stage-text-3);
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	/* A scene is a small cluster, an artist a single dot. */
+	.r-scene {
+		width: 12px;
+		height: 12px;
+		fill: var(--stage-text-2);
 	}
 
 	/* ---------------------------------------------------------- legend */
