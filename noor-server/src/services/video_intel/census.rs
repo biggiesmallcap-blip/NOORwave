@@ -2,12 +2,13 @@
 //! one read. Served at GET /api/videos/census.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
 
-use super::archive::Lights;
+use super::archive::{self, Lights};
 use super::cuts::Cut;
 use super::era::TRUSTED_CONF;
 
@@ -65,6 +66,83 @@ pub struct Census {
     pub scene_rows: Vec<SceneRow>,
 }
 
+/// The catalog-wide sums: every video's runtime, every song's cuts and
+/// years. They are most of the census's cost (about 170 ms of aggregates
+/// over the real catalog) and change only when a build stage runs, so they
+/// are kept against the Archive's build signature.
+#[derive(Debug, Clone)]
+struct Sums {
+    seconds: i64,
+    programmable: i64,
+    artists: i64,
+    songs: i64,
+    multi_cut: i64,
+    trusted: i64,
+    cuts: BTreeMap<&'static str, i64>,
+}
+
+static SUMS: LazyLock<Mutex<Option<(String, Sums)>>> = LazyLock::new(|| Mutex::new(None));
+
+fn sums(conn: &Connection) -> Result<Sums> {
+    // Tests open many databases in one process; they always count afresh.
+    if cfg!(test) {
+        return count_sums(conn);
+    }
+    let key = format!(
+        "{}|{}",
+        conn.path().unwrap_or(""),
+        archive::signature(conn)?
+    );
+    if let Some(hit) = SUMS.lock().ok().and_then(|guard| {
+        guard
+            .as_ref()
+            .filter(|(at, _)| *at == key)
+            .map(|(_, sums)| sums.clone())
+    }) {
+        return Ok(hit);
+    }
+    let fresh = count_sums(conn)?;
+    if let Ok(mut guard) = SUMS.lock() {
+        *guard = Some((key, fresh.clone()));
+    }
+    Ok(fresh)
+}
+
+fn count_sums(conn: &Connection) -> Result<Sums> {
+    let (seconds, programmable, artists): (i64, i64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(duration_s), 0), COALESCE(SUM(programmable), 0),
+                COUNT(DISTINCT artist_tidal_id)
+           FROM video_facets",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let (songs, multi_cut, trusted): (i64, i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(cut_count >= 2), 0),
+                COALESCE(SUM(song_year IS NOT NULL AND era_conf >= ?1), 0)
+           FROM video_songs",
+        [TRUSTED_CONF],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let mut cuts: BTreeMap<&'static str, i64> =
+        Cut::ALL.iter().map(|cut| (cut.as_str(), 0)).collect();
+    let mut stmt = conn.prepare("SELECT cut, COUNT(*) FROM video_facets GROUP BY cut")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if let Some(cut) = Cut::parse(&row.get::<_, String>(0)?) {
+            cuts.insert(cut.as_str(), row.get(1)?);
+        }
+    }
+    Ok(Sums {
+        seconds,
+        programmable,
+        artists,
+        songs,
+        multi_cut,
+        trusted,
+        cuts,
+    })
+}
+
 /// The last finished build's timestamp, if any.
 pub fn built_at(conn: &Connection) -> Result<Option<String>> {
     use rusqlite::OptionalExtension;
@@ -91,13 +169,15 @@ pub fn read(conn: &Connection, running: bool) -> Result<Census> {
     let one = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |row| row.get(0))?) };
     let built_at = built_at(conn)?;
     let videos = one("SELECT COUNT(*) FROM video_catalog")?;
-    let (seconds, programmable, artists): (i64, i64, i64) = conn.query_row(
-        "SELECT COALESCE(SUM(duration_s), 0), COALESCE(SUM(programmable), 0),
-                COUNT(DISTINCT artist_tidal_id)
-           FROM video_facets",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+    let Sums {
+        seconds,
+        programmable,
+        artists,
+        songs,
+        multi_cut,
+        trusted,
+        cuts,
+    } = sums(conn)?;
     let (charted, genred): (i64, i64) = conn.query_row(
         "SELECT COUNT(*), COALESCE(SUM(genres_json <> '[]'), 0) FROM video_artist_facets
           WHERE charted = 1 AND (videos > 0 OR playable > 0)",
@@ -109,24 +189,6 @@ pub fn read(conn: &Connection, running: bool) -> Result<Census> {
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let (songs, multi_cut, trusted): (i64, i64, i64) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(cut_count >= 2), 0),
-                COALESCE(SUM(song_year IS NOT NULL AND era_conf >= ?1), 0)
-           FROM video_songs",
-        [TRUSTED_CONF],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    let mut cuts: BTreeMap<&'static str, i64> =
-        Cut::ALL.iter().map(|cut| (cut.as_str(), 0)).collect();
-    {
-        let mut stmt = conn.prepare("SELECT cut, COUNT(*) FROM video_facets GROUP BY cut")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            if let Some(cut) = Cut::parse(&row.get::<_, String>(0)?) {
-                cuts.insert(cut.as_str(), row.get(1)?);
-            }
-        }
-    }
     let stages: Vec<StageRun> = {
         let mut stmt = conn.prepare(
             "SELECT stage, finished_at, rows, error FROM video_intel_runs
