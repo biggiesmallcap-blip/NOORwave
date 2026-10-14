@@ -78,7 +78,28 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_074,
     MIGRATION_075,
     MIGRATION_076,
+    MIGRATION_077,
+    MIGRATION_078,
 ];
+
+// Atlas Picture: one thumbnail per map artist (its best programmable cut)
+// and the dominant colour of that thumbnail, filled slowly in the background
+// by services::video_intel::pictures. `art` is the TIDAL image path without
+// a size. Rows are re-seeded from the map after every intel build.
+// Runs inside the >= 69 migration transaction: no BEGIN/COMMIT here.
+const MIGRATION_078: &str = r#"
+CREATE TABLE IF NOT EXISTS video_artist_pictures (
+    artist_tidal_id INTEGER PRIMARY KEY,
+    video_id INTEGER,
+    art TEXT,
+    rgb INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'failed')),
+    tries INTEGER NOT NULL DEFAULT 0,
+    fetched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_video_artist_pictures_status
+    ON video_artist_pictures(status, tries);
+"#;
 
 // Radio continuation and one queue-source switch.
 // - radio_seed_*: the seed and blend of the radio that built the queue, so
@@ -95,6 +116,120 @@ UPDATE playback_state
 SET automix_discover_new = MAX(automix_discover_new, automix_allow_external),
     automix_allow_external = 0,
     automix_use_learning = 1;
+"#;
+
+// Video catalog intelligence (Atlas and Air). Derived tables rebuilt in the
+// background by services::video_intel; every row is recomputable from
+// video_catalog, the artist graph and the library, so a wrong build is fixed
+// by the next one. video_channel_day caches On Air's daily clock schedules.
+// Runs inside the >= 69 migration transaction: no BEGIN/COMMIT here.
+const MIGRATION_077: &str = r#"
+CREATE TABLE IF NOT EXISTS video_facets (
+    tidal_video_id INTEGER PRIMARY KEY,
+    artist_tidal_id INTEGER,
+    cut TEXT NOT NULL,
+    programmable INTEGER NOT NULL DEFAULT 0,
+    song_key TEXT NOT NULL,
+    concert_id INTEGER,
+    cut_year INTEGER,
+    duration_s INTEGER,
+    popularity INTEGER,
+    quality REAL NOT NULL DEFAULT 0,
+    built_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_video_facets_song ON video_facets(song_key);
+CREATE INDEX IF NOT EXISTS idx_video_facets_artist ON video_facets(artist_tidal_id);
+CREATE INDEX IF NOT EXISTS idx_video_facets_cut ON video_facets(cut, programmable);
+CREATE INDEX IF NOT EXISTS idx_video_facets_concert ON video_facets(concert_id) WHERE concert_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS video_songs (
+    song_key TEXT PRIMARY KEY,
+    artist_tidal_id INTEGER,
+    artist_name TEXT,
+    title TEXT NOT NULL,
+    best_video_id INTEGER NOT NULL,
+    cut_count INTEGER NOT NULL,
+    cuts_mask INTEGER NOT NULL DEFAULT 0,
+    programmable INTEGER NOT NULL DEFAULT 0,
+    song_year INTEGER,
+    era_source TEXT,
+    era_conf REAL,
+    scene_id INTEGER,
+    popularity INTEGER,
+    total_s INTEGER,
+    built_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_video_songs_scene ON video_songs(scene_id, popularity);
+CREATE INDEX IF NOT EXISTS idx_video_songs_year ON video_songs(song_year);
+CREATE INDEX IF NOT EXISTS idx_video_songs_artist ON video_songs(artist_tidal_id);
+
+CREATE TABLE IF NOT EXISTS video_concerts (
+    concert_id INTEGER PRIMARY KEY,
+    artist_tidal_id INTEGER NOT NULL,
+    year INTEGER,
+    label TEXT NOT NULL,
+    video_count INTEGER NOT NULL,
+    total_s INTEGER NOT NULL,
+    first_video_id INTEGER NOT NULL,
+    video_ids_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_video_concerts_artist ON video_concerts(artist_tidal_id);
+
+CREATE TABLE IF NOT EXISTS video_scenes (
+    scene_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    exemplars_json TEXT NOT NULL DEFAULT '[]',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    hue REAL NOT NULL DEFAULT 0,
+    x REAL NOT NULL DEFAULT 0,
+    y REAL NOT NULL DEFAULT 0,
+    r REAL NOT NULL DEFAULT 0,
+    video_count INTEGER NOT NULL DEFAULT 0,
+    artist_count INTEGER NOT NULL DEFAULT 0,
+    hours REAL NOT NULL DEFAULT 0,
+    channel_no INTEGER,
+    members_json TEXT NOT NULL DEFAULT '[]',
+    built_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS video_artist_facets (
+    artist_tidal_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    scene_id INTEGER,
+    scene2_id INTEGER,
+    scene_conf REAL,
+    genres_json TEXT NOT NULL DEFAULT '[]',
+    genre_hops INTEGER,
+    x REAL,
+    y REAL,
+    videos INTEGER NOT NULL DEFAULT 0,
+    playable INTEGER NOT NULL DEFAULT 0,
+    hours REAL NOT NULL DEFAULT 0,
+    charted INTEGER NOT NULL DEFAULT 0,
+    built_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_video_artist_facets_scene ON video_artist_facets(scene_id);
+
+CREATE TABLE IF NOT EXISTS video_channel_day (
+    channel_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    slot INTEGER NOT NULL,
+    start_s INTEGER NOT NULL,
+    duration_s INTEGER NOT NULL,
+    tidal_video_id INTEGER NOT NULL,
+    why TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (channel_id, day, slot)
+);
+
+CREATE TABLE IF NOT EXISTS video_intel_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    rows INTEGER,
+    error TEXT
+);
 "#;
 
 // A playlist saved from Spotify remembers the Spotify playlist it came from,

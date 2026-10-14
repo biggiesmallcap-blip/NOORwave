@@ -95,8 +95,8 @@ describe('watch page related grid contract', () => {
 	test('keeps going from the video radio feed below the close picks', () => {
 		expect(watch).toContain('api.getVideoRadioNext({');
 		expect(watch).toContain('radioExclusions(relatedVideos, item.tidal_id)');
-		expect(watch).toContain('needsMore(relatedVideos.length, columns) || nearEnd');
-		expect(watch).toContain('feedDone ? trimToRows(relatedVideos, columns) : relatedVideos');
+		expect(watch).toContain('needsMore(relatedVideos.length + lead, columns) || nearEnd');
+		expect(watch).toContain('feedDone ? trimToRows(relatedVideos, columns, lead) : relatedVideos');
 	});
 
 	test('focus follows the workspace scroll, not the window', () => {

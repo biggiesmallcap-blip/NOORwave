@@ -1,21 +1,30 @@
 import { writable } from 'svelte/store';
 
-// The video section: five browse tabs plus one watch page, all under
-// routes/videos/+layout.svelte. The tabs are for browsing; picking a video on
-// any of them opens the watch page, which is the only place the big player
-// lives. Leaving it shrinks the player to the corner.
+// The video section: four modes plus one watch page, all under
+// routes/videos/+layout.svelte. On Air leans back (numbered channels), Atlas
+// looks across (the map of every artist), Archive finds one thing (lenses over
+// songs), Logbook is yours (liked, saved, history, census). Picking a video on
+// any of them opens the watch page, the only place the big player lives.
+// Leaving it shrinks the player to the corner.
 
 export const WATCH_PATH = '/videos/watch';
 
-export type VideoTab = 'videos' | 'liked' | 'history' | 'stations' | 'editorial';
+export type VideoTab = 'onair' | 'atlas' | 'archive' | 'logbook';
 
 export const VIDEO_TABS: readonly { id: VideoTab; href: string; label: string }[] = [
-	{ id: 'videos', href: '/videos', label: 'Videos' },
-	{ id: 'liked', href: '/videos/liked', label: 'Liked videos' },
-	{ id: 'history', href: '/videos/history', label: 'History' },
-	{ id: 'stations', href: '/videos/stations', label: 'Stations' },
-	{ id: 'editorial', href: '/videos/editorial', label: 'TIDAL editorial' },
+	{ id: 'onair', href: '/videos', label: 'On Air' },
+	{ id: 'atlas', href: '/videos/atlas', label: 'Atlas' },
+	{ id: 'archive', href: '/videos/archive', label: 'Archive' },
+	{ id: 'logbook', href: '/videos/logbook', label: 'Logbook' },
 ];
+
+/** Pages that live under a tab without being its landing: they light it. */
+const TAB_CHILDREN: Record<string, VideoTab> = {
+	'/videos/stations': 'onair',
+	'/videos/editorial': 'archive',
+	'/videos/liked': 'logbook',
+	'/videos/history': 'logbook',
+};
 
 export function isVideoSectionPath(pathname: string): boolean {
 	return pathname === '/videos' || pathname.startsWith('/videos/');
@@ -23,7 +32,8 @@ export function isVideoSectionPath(pathname: string): boolean {
 
 /** The tab a path belongs to; null for the watch page. */
 export function videoTabFor(pathname: string): VideoTab | null {
-	return VIDEO_TABS.find((tab) => tab.href === pathname)?.id ?? null;
+	const path = pathname.length > 1 ? pathname.replace(/\/$/, '') : pathname;
+	return VIDEO_TABS.find((tab) => tab.href === path)?.id ?? TAB_CHILDREN[path] ?? null;
 }
 
 /** Deep link to the watch page for one video. Optional fields let a cold open

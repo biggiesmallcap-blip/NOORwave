@@ -29,7 +29,7 @@ describe('persistent video dock contract', () => {
 
 	test('both video queues share one row list with the shared video menu', () => {
 		expect(queuePanel).toContain('<VideoQueueList videos={$videoSessionUpcoming.slice(0, 60)} />');
-		expect(fullscreenQueue).toContain('<VideoQueueList videos={$videoSessionUpcoming} actions />');
+		expect(fullscreenQueue).toContain('<VideoQueueList videos={$videoSessionUpcoming} actions inverted />');
 		expect(queueList).toContain('buildVideoMenu(video, { inQueue: true })');
 		expect(queueList).toContain('oncontextmenu={(event) => openVideoQueueMenu(video, event)}');
 		// No backdrop blur over live video: it re-blurs every frame.
@@ -75,7 +75,8 @@ describe('persistent video dock contract', () => {
 		expect(dock).toContain('el.style.transform = start;');
 		expect(dock).toContain('animation: dock-in var(--motion-base) backwards;');
 		expect(dock).toContain('if (dockEl?.isConnected) lastDockRect = dockEl.getBoundingClientRect();');
-		expect(dock).toContain('const started = fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(lastDockRect);');
+		// A tune-in from the dial grows out of the clicked picture instead (launch.ts).
+		expect(dock).toContain('landAfter(fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(launch ?? lastDockRect));');
 		// The FLIP starts when the compositor runs it (a pinned start time
 		// skipped part of the path after a busy page change), and the dock
 		// lands when the glide really finishes.
@@ -129,7 +130,7 @@ describe('persistent video dock contract', () => {
 		// the dark with the dock above the dim, held still, out of the stage.
 		expect(dock).toMatch(/if \(dim\) \{[^}]*moveHome\(\);\s*dimming = true;\s*\}\s*setTimeout\(\(\) => \{\s*void setNativeVideoFullscreen\(true\)/);
 		expect(dock).toContain("const holdStill = (dimming || navigating.to !== null) && mode === 'full' && rect !== null;");
-		expect(dock).toContain("else if (!dimming && (!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
+		expect(dock).toContain("else if (!dimming && (!moving || reducedMotion) && !(launch && !reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
 		expect(dock).toContain('<div class="fullscreen-dim" class:on={dimming} style:transition-duration={`${$videoFullscreenDimMs}ms`} aria-hidden="true"></div>');
 		expect(dock).toMatch(/\.fullscreen-dim \{[^}]*z-index: 999;/);
 		expect(dock).toMatch(/\.video-dock\.dimming \{\s*z-index: 1000;/);
@@ -153,7 +154,7 @@ describe('persistent video dock contract', () => {
 		expect(dock).not.toContain('onwheel=');
 		// Gliding onto the stage stays a fixed layer until it lands: inside the
 		// stage the glide was clipped by its overflow and faded with the page.
-		expect(dock).toContain("else if (!dimming && (!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
+		expect(dock).toContain("else if (!dimming && (!moving || reducedMotion) && !(launch && !reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);");
 		expect(dock).toContain("if (place === 'full' && stage?.isConnected) moveIntoStage(stage);");
 		// The move in lands as the glide ends, so stage-in must not replay there.
 		expect(dock).toMatch(/> \.video-dock-host > \.video-dock \{[^}]*animation: none !important;/);

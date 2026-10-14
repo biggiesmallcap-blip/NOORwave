@@ -45,6 +45,12 @@ describe('related feed filling', () => {
 		expect(trimToRows(items.slice(0, 20), 4)).toHaveLength(20);
 	});
 
+	test('a lead tile (the map) counts toward the whole rows', () => {
+		const items = Array.from({ length: 21 }, (_, i) => v(i));
+		expect(trimToRows(items, 4, 1)).toHaveLength(19);
+		expect(trimToRows(items.slice(0, 7), 4, 1)).toHaveLength(7);
+	});
+
 	test('merging skips the playing video and anything already shown', () => {
 		expect(mergeFeed([v(1), v(2)], [v(2), v(3), v(9), v(3)], 9).map((x) => x.tidal_id)).toEqual([1, 2, 3]);
 	});

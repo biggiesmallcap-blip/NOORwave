@@ -17,7 +17,7 @@ use super::artist_state::{self, CheckResult};
 use super::governor::{self, Governor, Mode};
 use super::harvest::{self, HarvestContext};
 use super::scheduler::{self, Calibration, Job, JobClass, JobKind, MixPolicy, PlanInput};
-use super::setting::{self, Budget};
+use super::setting::{self, Budget, DiscoverySetting};
 use super::source::{DiscoverySource, LiveSource};
 use super::{expand, graph, names, roots};
 use crate::SharedState;
@@ -25,6 +25,7 @@ use crate::db::Database;
 use crate::metadata::lastfm::LastFmClient;
 use crate::services::tidal::client::TidalClient;
 use crate::services::tidal::session::session_unusable;
+use crate::services::video_intel::scenes::VARIOUS_ARTISTS_ID;
 use crate::services::video_sets::VideoCandidate;
 use crate::services::{library_videos, video_radio};
 
@@ -41,6 +42,8 @@ const MIXES_KEY: &str = "video_discovery.mixes_at";
 const EDITORIAL_KEY: &str = "video_discovery.editorial_at";
 const EDITORIAL_FULL_KEY: &str = "video_discovery.editorial_full_at";
 const POPULARITY_BACKFILL_KEY: &str = "video_discovery.popularity_backfill_v1";
+/// When the chart lane last spent an expansion.
+const CHART_KEY: &str = "video_discovery.chart_at";
 
 // --- Urgent requests ------------------------------------------------------
 
@@ -198,7 +201,12 @@ pub async fn execute<S: DiscoverySource>(db: &Database, src: &S, job: &Job) -> J
     let result = match &job.kind {
         JobKind::Probe | JobKind::Recheck => catalog_page(db, src, job, 0).await,
         JobKind::Page { offset } => catalog_page(db, src, job, *offset).await,
-        JobKind::Expand => {
+        JobKind::Expand | JobKind::Chart => {
+            if job.kind == JobKind::Chart
+                && let Err(error) = db.with_conn(|conn| set_marker(conn, CHART_KEY))
+            {
+                tracing::debug!(target: "noor.video_discovery", %error, "chart marker failed");
+            }
             let station = roots::station_active(job.artist_id);
             expand::expand(db, src, job.artist_id, station)
                 .await
@@ -553,7 +561,55 @@ pub fn build_plan(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
         mix_policy(conn)?,
         limit,
     ));
-    Ok(jobs)
+    let chart = chart_lane(conn, setting::load(conn)?)?;
+    Ok(scheduler::with_chart(jobs, chart))
+}
+
+/// Artists with videos but no edge to anyone, best first by the scheduler's
+/// own ranking, whose expansion is not backing off. They have no relevance
+/// path from any root, so only this lane (or a probe) ever charts them.
+pub fn chart_candidates(conn: &Connection) -> Result<Vec<scheduler::ChartCandidate>> {
+    let mut stmt = conn.prepare(
+        "WITH edged AS (
+             SELECT seed_tidal_id AS id FROM video_related_artists
+              WHERE source IN ('tidal', 'lastfm', 'featured', 'colist')
+             UNION
+             SELECT related_tidal_id FROM video_related_artists
+              WHERE source IN ('tidal', 'lastfm', 'featured', 'colist'))
+         SELECT s.artist_tidal_id,
+                (SELECT COUNT(*) FROM video_catalog c WHERE c.artist_tidal_id = s.artist_tidal_id),
+                s.popularity
+           FROM video_artist_state s
+          WHERE (s.seen_main = 1 OR s.fetched_count > 0)
+            AND s.artist_tidal_id > 0 AND s.artist_tidal_id <> ?1
+            AND (s.next_expand_at IS NULL OR s.next_expand_at <= datetime('now'))
+            AND s.artist_tidal_id NOT IN (SELECT id FROM edged)",
+    )?;
+    let rows = stmt
+        .query_map([VARIOUS_ARTISTS_ID], |row| {
+            Ok(scheduler::ChartCandidate {
+                artist_id: row.get(0)?,
+                videos: row.get(1)?,
+                popularity: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The chart lane's job for this plan, if its interval has passed: one slow
+/// expansion at a time so uncharted artists find their place on the map
+/// without competing with roots, stations or the liked-video scanner.
+pub fn chart_lane(conn: &Connection, setting: DiscoverySetting) -> Result<Option<Job>> {
+    let Some(interval) = scheduler::chart_interval(setting) else {
+        return Ok(None);
+    };
+    let due =
+        marker_age_hours(conn, CHART_KEY)?.is_none_or(|age| age * 3600.0 >= interval.as_secs_f64());
+    if !due {
+        return Ok(None);
+    }
+    Ok(scheduler::chart_job(&chart_candidates(conn)?))
 }
 
 pub fn build_station_plan(conn: &Connection, seed: i64) -> Result<Vec<Job>> {
@@ -943,7 +999,9 @@ pub fn status(conn: &Connection) -> Result<DiscoveryStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::video_discovery::source::fake::{FakeSource, artist_video, candidate};
+    use crate::services::video_discovery::source::fake::{
+        self, FakeSource, artist_video, candidate,
+    };
 
     fn db() -> Database {
         let db = Database::open_in_memory().unwrap();
@@ -1051,6 +1109,81 @@ mod tests {
             .map(|j| j.artist_id)
             .collect();
         assert_eq!(probes, vec![200, 300]);
+    }
+
+    /// A liked root with an edge, and artist 900 with videos but no edge.
+    fn uncharted_db() -> Database {
+        let db = db();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO artists (id, tidal_id, name) VALUES (1, 100, 'Liked');
+                 INSERT INTO tracks (id, artist_id, title, is_favorite) VALUES (1, 1, 'Song', 1);
+                 INSERT INTO video_related_artists (seed_tidal_id, related_tidal_id, name, source, rank, weight)
+                     VALUES (100, 200, 'Friend', 'tidal', 0, 0.9);
+                 INSERT INTO video_artist_state (artist_tidal_id, name, seen_main, fetched_count)
+                     VALUES (900, 'Alone', 1, 3), (901, 'Backing off', 1, 9);
+                 UPDATE video_artist_state SET next_expand_at = datetime('now', '+1 day')
+                  WHERE artist_tidal_id = 901;
+                 INSERT INTO video_catalog (tidal_video_id, artist_tidal_id, artist_name, item_json)
+                     VALUES (1, 900, 'Alone', '{\"tidal_id\":1,\"title\":\"a\"}');",
+            )?;
+            artist_state::upsert_identity(conn, 200, "Friend", Some(60), None)?;
+            set_marker(conn, MIXES_KEY)?;
+            set_marker(conn, EDITORIAL_KEY)?;
+            set_marker(conn, EDITORIAL_FULL_KEY)
+        })
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn an_uncharted_artist_with_videos_gets_a_chart_job_after_the_roots() {
+        let db = uncharted_db();
+        let jobs = db.with_conn(|conn| build_plan(conn, 20)).unwrap();
+        let charts: Vec<(usize, i64)> = jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, j)| j.kind == JobKind::Chart)
+            .map(|(i, j)| (i, j.artist_id))
+            .collect();
+        assert_eq!(charts.len(), 1, "one chart job, never the one backing off");
+        assert_eq!(charts[0].1, 900);
+        assert!(charts[0].0 > 0);
+        assert_eq!(jobs[0].class, JobClass::Priority, "the root's work leads");
+        assert!(jobs[..charts[0].0].iter().all(|j| j.kind != JobKind::Chart));
+    }
+
+    #[tokio::test]
+    async fn the_chart_lane_waits_its_interval_and_stays_off_when_discovery_is_off() {
+        let db = uncharted_db();
+        let src = FakeSource {
+            similar: HashMap::from([(900, vec![fake::artist(950, "Found", Some(40))])]),
+            ..Default::default()
+        };
+        execute(&db, &src, &job(900, JobKind::Chart, JobClass::Normal)).await;
+        db.with_conn(|conn| {
+            // Charted now: it has an edge, and the lane waits anyway.
+            assert!(chart_candidates(conn)?.iter().all(|c| c.artist_id != 900));
+            assert!(chart_lane(conn, DiscoverySetting::Full)?.is_none());
+            conn.execute(
+                "UPDATE server_config SET value = datetime('now', '-11 minutes') WHERE key = ?1",
+                [CHART_KEY],
+            )?;
+            conn.execute(
+                "INSERT INTO video_artist_state (artist_tidal_id, name, seen_main) VALUES (902, 'Next', 1)",
+                [],
+            )?;
+            assert_eq!(
+                chart_lane(conn, DiscoverySetting::Full)?.map(|j| j.artist_id),
+                Some(902)
+            );
+            assert!(chart_lane(conn, DiscoverySetting::Limited)?.is_none(), "limited waits longer");
+            assert!(chart_lane(conn, DiscoverySetting::Off)?.is_none());
+            setting::save(conn, DiscoverySetting::Off)?;
+            assert!(build_plan(conn, 20)?.iter().all(|j| j.kind != JobKind::Chart));
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

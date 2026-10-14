@@ -121,6 +121,13 @@ pub struct VideoSetItem {
     /// when no signal fired.
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub why: String,
+    /// The video's cut (`VideoCut` on the frontend) when the catalog
+    /// intelligence knows it; On Air's lower third shows it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cut: Option<String>,
+    /// The song's year when its era is known with confidence.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub song_year: Option<i32>,
 }
 
 /// Anchor candidate: an artist to pull videos from, plus the weight and
@@ -1051,6 +1058,11 @@ pub fn assemble_set_with_context(
             if exclude.contains(&video.tidal_id) {
                 continue;
             }
+            // Shelves play only what any channel may: no clips, interviews,
+            // trailers or compilations (the shared programmable rule).
+            if !crate::services::video_intel::cuts::is_programmable(video) {
+                continue;
+            }
             if let Some(decade) = era_decade {
                 match video.release_year {
                     Some(year) if year >= decade && year < decade + 10 => {}
@@ -1103,6 +1115,8 @@ pub fn assemble_set_with_context(
                     artwork_url: video.artwork_url.clone(),
                     quality: None,
                     explicit: None,
+                    cut: None,
+                    song_year: None,
                     kind: "Music Video".to_string(),
                     why,
                 },
@@ -2044,6 +2058,8 @@ mod tests {
                 artwork_url: None,
                 quality: None,
                 explicit: None,
+                cut: None,
+                song_year: None,
                 kind: "Music Video".into(),
                 why: String::new(),
             }],
@@ -2084,6 +2100,8 @@ mod tests {
                 artwork_url: None,
                 quality: None,
                 explicit: None,
+                cut: None,
+                song_year: None,
                 kind: "Music Video".into(),
                 why: String::new(),
             }],
