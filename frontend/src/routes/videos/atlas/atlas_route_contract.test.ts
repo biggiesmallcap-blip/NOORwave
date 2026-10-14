@@ -20,7 +20,8 @@ describe('atlas route contract', () => {
 	test('loads the map, polls while it is being built, and shows errors plainly', () => {
 		expect(page).toContain('const POLL_MS = 10_000;');
 		expect(page).toContain('await loadAtlas(true)');
-		expect(page).toContain('if (building) timer = setTimeout(() => void load(), POLL_MS);');
+		// Until there is a map to draw, not only while the server says building.
+		expect(page).toContain('if (building || next.data.count === 0) timer = setTimeout(() => void load(), POLL_MS);');
 		expect(page).toContain('The map is being drawn');
 		expect(page).toContain('<ErrorState title="Could not load the Atlas"');
 		expect(page).toContain('parseAtlasParams(page.url.searchParams)');

@@ -414,9 +414,12 @@ pub(super) fn atlas_payload(conn: &Connection) -> anyhow::Result<AtlasResponse> 
             to_scene(row, lit, seen)
         })
         .collect();
+    // A first build writes its scenes before spread and layout place any
+    // artist: until artists have positions there is no map to draw yet.
+    let building = scenes.is_empty() || artists.ids.is_empty();
     Ok(AtlasResponse {
         built_at,
-        building: scenes.is_empty(),
+        building,
         size: MAP_SIZE as u32,
         scenes,
         artists,
@@ -1238,6 +1241,27 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(atlas["building"], true);
         assert_eq!(atlas["built_at"], Value::Null);
+        assert!(column(&atlas, "ids").is_empty());
+    }
+
+    /// A first build writes its scenes before spread and layout place any
+    /// artist; the map is not ready until artists have positions.
+    #[tokio::test]
+    async fn scenes_without_placed_artists_are_still_building() {
+        let db = fresh_migrated_db();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO video_scenes (scene_id, name, video_count, artist_count)
+                     VALUES (1, 'Home', 40, 4);
+                 INSERT INTO video_artist_facets (artist_tidal_id, name, scene_id, videos,
+                         playable, charted)
+                     VALUES (101, 'Artist 101', 1, 10, 10, 1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let (_, atlas) = call(&db, "GET", "/api/videos/atlas", None).await;
+        assert_eq!(atlas["building"], true);
         assert!(column(&atlas, "ids").is_empty());
     }
 

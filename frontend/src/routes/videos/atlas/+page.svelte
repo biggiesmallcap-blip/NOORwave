@@ -34,7 +34,9 @@
 			if (destroyed) return;
 			building = next.data.building;
 			if (next.data.count > 0) loaded = next;
-			if (building) timer = setTimeout(() => void load(), POLL_MS);
+			// Keep looking until there is a map to draw: a build can be
+			// between steps (scenes written, no artist placed yet).
+			if (building || next.data.count === 0) timer = setTimeout(() => void load(), POLL_MS);
 		} catch (err) {
 			if (destroyed) return;
 			if (!loaded) error = err;
