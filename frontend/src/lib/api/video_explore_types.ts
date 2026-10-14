@@ -352,6 +352,8 @@ export interface VideoChannel {
 	unlock: { hours: number; need_hours: number } | null;
 	now: (ChannelProgram & { offset_s: number }) | null;
 	next: ChannelProgram | null;
+	/** What follows `next`. */
+	then: ChannelProgram | null;
 	/** Scene appetite (about 0.05-1.1) for ordering a "for you" strip; null
 	 *  on the fixed channels. Never changes the numbers. */
 	appetite?: number | null;

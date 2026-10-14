@@ -11,7 +11,7 @@
 	import { videoChannelOnAir } from '$lib/stores/video_session';
 	import ChannelCard from '$lib/video/onair/ChannelCard.svelte';
 	import ChannelRow from '$lib/video/onair/ChannelRow.svelte';
-	import { formatClock, liveSlot, secondsSinceMidnight } from '$lib/video/onair/clock';
+	import { forYouLabel, formatClock, liveSlot, secondsSinceMidnight } from '$lib/video/onair/clock';
 	import {
 		airTick,
 		byNumber,
@@ -62,6 +62,7 @@
 	let dial = $derived(byNumber(channels));
 	let firstScene = $derived(dial.find((channel) => channel.no >= SCENE_START)?.id ?? null);
 	let clock = $derived(formatClock(secondsSinceMidnight(new Date($airTick))));
+	let forYou = $derived(forYouLabel(secondsSinceMidnight(new Date($airTick))));
 	let building = $derived(Boolean(lineup?.data.building));
 	let onAirId = $derived($videoChannelOnAir?.id ?? null);
 
@@ -164,7 +165,8 @@
 			<span class="clock">{clock}</span>
 			{#if channels.length > 0}<span class="count">{channels.filter((channel) => !channel.locked).length} channels</span>{/if}
 		</p>
-		<div class="explore" title="How far from your taste the channels roam">
+		<div class="explore">
+			<span class="explore-hint">How far channels stray from your taste</span>
 			<Segmented options={EXPLORE_OPTIONS} value={$exploreMode} label="Explore" onchange={(mode) => void changeExplore(mode)} />
 		</div>
 	</div>
@@ -195,7 +197,7 @@
 	{:else}
 		{#if tonight.length > 0}
 			<section class="tonight" aria-labelledby="tonight-label">
-				<h3 id="tonight-label" class="t-label">For you tonight</h3>
+				<h3 id="tonight-label" class="t-label">{forYou}</h3>
 				<div class="strip" data-count={tonight.length}>
 					{#each tonight as channel, index (channel.id)}
 						{@const slot = slots.get(channel.id)}
@@ -213,7 +215,7 @@
 				{#each dial as channel, index (channel.id)}
 					{@const slot = slots.get(channel.id)}
 					{#if channel.id === firstScene && index > 0}
-						<h4 class="family">Scenes</h4>
+						<h4 class="family t-label">Scenes</h4>
 					{/if}
 					{#if slot}
 						<ChannelRow {channel} {slot} onAir={onAirId === channel.id} busy={tuning === channel.id} rise={index % 12} ontune={(picked) => void tune(picked)} />
@@ -279,6 +281,18 @@
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 	}
+	.explore {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+	}
+	.explore-hint {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+	}
+	@media (max-width: 720px) {
+		.explore-hint { display: none; }
+	}
 
 	.tonight {
 		container-type: inline-size;
@@ -312,12 +326,10 @@
 		grid-template-columns: minmax(0, 1fr);
 		gap: var(--row-gap);
 	}
+	/* The same label as the section headings above it. */
 	.family {
-		margin: var(--space-4) 0 var(--space-1);
+		margin: var(--space-5) 0 var(--space-2);
 		padding: 0 12px;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-medium);
 	}
 
 	.building {

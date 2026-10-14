@@ -739,10 +739,7 @@ fn base_meta(id: &ChannelId, universe: &Universe, taste: &Taste, ctx: &DayContex
     };
     match id {
         ChannelId::Your => fixed("Your Channel", "Your library and one step out".into()),
-        ChannelId::Wild => fixed(
-            "Wild Card",
-            "Anywhere on the map, led by your appetite".into(),
-        ),
+        ChannelId::Wild => fixed("Wild Card", "Anywhere, led by your appetite".into()),
         ChannelId::Premieres => fixed("Premieres", "New videos from the last two weeks".into()),
         ChannelId::Live => fixed("Live Stage", "On stage, from every scene".into()),
         ChannelId::Sessions => fixed("Sessions", "Acoustic, stripped and in session".into()),

@@ -34,6 +34,8 @@ export interface LiveSlot {
 	progress: number;
 	/** What follows `program`, when the lineup still knows. */
 	next: ChannelProgram | null;
+	/** And what follows that. */
+	then: ChannelProgram | null;
 	/** The lineup's `now` has run out: the caller should fetch a fresh one. */
 	stale: boolean;
 }
@@ -41,22 +43,34 @@ export interface LiveSlot {
 /** A channel's program `elapsedS` seconds after its lineup was fetched. The
  *  lineup says what was on and how far in; time moves it along, and when
  *  `now` runs out `next` takes over until a refetch lands. */
-export function liveSlot(channel: Pick<VideoChannel, 'now' | 'next'>, elapsedS: number): LiveSlot {
+export function liveSlot(channel: Pick<VideoChannel, 'now' | 'next'> & Partial<Pick<VideoChannel, 'then'>>, elapsedS: number): LiveSlot {
 	const now = channel.now;
+	const then = channel.then ?? null;
 	const elapsed = Number.isFinite(elapsedS) && elapsedS > 0 ? elapsedS : 0;
-	if (!now) return { program: null, offset: 0, progress: 0, next: channel.next, stale: false };
+	if (!now) return { program: null, offset: 0, progress: 0, next: channel.next, then, stale: false };
 	const offset = now.offset_s + elapsed;
 	if (now.duration_s <= 0 || offset < now.duration_s) {
-		return { program: now, offset, progress: progressOf(offset, now.duration_s), next: channel.next, stale: false };
+		return { program: now, offset, progress: progressOf(offset, now.duration_s), next: channel.next, then, stale: false };
 	}
 	const next = channel.next;
 	const into = offset - now.duration_s;
 	if (next && (next.duration_s <= 0 || into < next.duration_s)) {
-		return { program: next, offset: into, progress: progressOf(into, next.duration_s), next: null, stale: true };
+		return { program: next, offset: into, progress: progressOf(into, next.duration_s), next: then, then: null, stale: true };
 	}
 	// Both ran out: hold the last known picture full until the refetch.
 	const last = next ?? now;
-	return { program: last, offset: last.duration_s, progress: 1, next: null, stale: true };
+	return { program: last, offset: last.duration_s, progress: 1, next: null, then: null, stale: true };
+}
+
+/** Long form (a concert, a film) says when it ends rather than how long is left. */
+export const LONG_FORM_S = 20 * 60;
+
+/** "For you this morning / this afternoon / tonight" by the local hour. */
+export function forYouLabel(secondsSinceMidnight: number): string {
+	const hour = Math.floor((((secondsSinceMidnight % 86_400) + 86_400) % 86_400) / 3600);
+	if (hour >= 5 && hour < 12) return 'For you this morning';
+	if (hour >= 12 && hour < 18) return 'For you this afternoon';
+	return 'For you tonight';
 }
 
 /** Hours of a locked channel's unlock progress, 0..1. */

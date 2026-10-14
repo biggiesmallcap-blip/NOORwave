@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { channelNumber, formatClock, formatRuntime, liveSlot, progressOf, secondsSinceMidnight, tuneStart, unlockProgress } from './clock';
+import { channelNumber, forYouLabel, formatClock, formatRuntime, liveSlot, progressOf, secondsSinceMidnight, tuneStart, unlockProgress } from './clock';
 import { FIXTURE_NOW_S, fixtureChannels } from './fixtures';
 
 const [bay, your, kpop] = fixtureChannels.channels;
@@ -54,7 +54,23 @@ describe('live progress', () => {
 	});
 
 	test('a channel with nothing on is empty, not stale', () => {
-		expect(liveSlot({ now: null, next: null }, 30)).toEqual({ program: null, offset: 0, progress: 0, next: null, stale: false });
+		expect(liveSlot({ now: null, next: null }, 30)).toEqual({ program: null, offset: 0, progress: 0, next: null, then: null, stale: false });
+	});
+
+	test('when now runs out, then moves up to next', () => {
+		const then = your.next ? { ...your.next, slot: 99, start_s: your.next.start_s + your.next.duration_s } : null;
+		const slot = liveSlot({ ...your, then }, 50);
+		expect(slot.next?.slot).toBe(99);
+		expect(slot.then).toBeNull();
+		expect(liveSlot({ ...your, then }, 0).then?.slot).toBe(99);
+	});
+
+	test('the strip is named for the time of day', () => {
+		expect(forYouLabel(8 * 3600)).toBe('For you this morning');
+		expect(forYouLabel(13 * 3600 + 23 * 60)).toBe('For you this afternoon');
+		expect(forYouLabel(21 * 3600)).toBe('For you tonight');
+		expect(forYouLabel(2 * 3600)).toBe('For you tonight');
+		expect(forYouLabel(86_400 + 9 * 3600)).toBe('For you this morning');
 	});
 
 	test('progress clamps and survives a zero runtime', () => {

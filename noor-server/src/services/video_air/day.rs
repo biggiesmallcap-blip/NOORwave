@@ -22,7 +22,7 @@ use crate::services::video_stations::{lineup, to_item};
 
 /// Bump when a release changes what a day holds: a stored day from an older
 /// planner is rebuilt on the next request.
-pub const LINEUP_VERSION: u32 = 2;
+pub const LINEUP_VERSION: u32 = 3;
 const LINEUP_KEY_PREFIX: &str = "video_air.lineup:";
 /// Days older than this many days before the built day are dropped.
 const KEEP_DAYS: i64 = 2;
@@ -459,6 +459,8 @@ pub struct ChannelOut {
     pub meta: ChannelMeta,
     pub now: Option<NowOut>,
     pub next: Option<ProgramOut>,
+    /// What follows `next`.
+    pub then: Option<ProgramOut>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -511,13 +513,18 @@ fn channel_out(
     now_s: i64,
     videos: &HashMap<i64, CatalogVideo>,
 ) -> ChannelOut {
-    let (now, next) = match clock::locate(upcoming, now_s) {
-        Some((index, offset)) => (Some((&upcoming[index], offset)), upcoming.get(index + 1)),
+    let (now, after) = match clock::locate(upcoming, now_s) {
+        Some((index, offset)) => (Some((&upcoming[index], offset)), index + 1),
         None => (
             None,
-            upcoming.iter().find(|program| program.start_s > now_s),
+            upcoming
+                .iter()
+                .position(|program| program.start_s > now_s)
+                .unwrap_or(upcoming.len()),
         ),
     };
+    let next = upcoming.get(after);
+    let then = upcoming.get(after + 1);
     ChannelOut {
         meta: meta.clone(),
         now: now.and_then(|(program, offset_s)| {
@@ -527,6 +534,7 @@ fn channel_out(
             })
         }),
         next: next.and_then(|program| program_out(program, videos)),
+        then: then.and_then(|program| program_out(program, videos)),
     }
 }
 
@@ -543,7 +551,7 @@ pub fn channels_at(
         upcoming_by_channel.push(if meta.locked {
             Vec::new()
         } else {
-            upcoming(conn, &meta.id, day, now_s, 2, explore)?
+            upcoming(conn, &meta.id, day, now_s, 3, explore)?
         });
     }
     let ids: Vec<i64> = upcoming_by_channel
@@ -828,10 +836,13 @@ mod tests {
         assert_eq!(now.offset_s, 30_000 - now.program.start_s);
         let next = wild.next.as_ref().unwrap();
         assert_eq!(next.start_s, now.program.start_s + now.program.duration_s);
+        let then = wild.then.as_ref().unwrap();
+        assert_eq!(then.start_s, next.start_s + next.duration_s);
         let json = serde_json::to_value(&out).unwrap();
         let channel = &json["channels"][1];
         for key in [
             "id", "no", "title", "subtitle", "hue", "scene_id", "locked", "unlock", "now", "next",
+            "then",
         ] {
             assert!(channel.get(key).is_some(), "{key}");
         }

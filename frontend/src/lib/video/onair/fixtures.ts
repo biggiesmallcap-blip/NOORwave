@@ -40,6 +40,7 @@ function channel(partial: Partial<VideoChannel> & Pick<VideoChannel, 'id' | 'no'
 		unlock: null,
 		now: null,
 		next: null,
+		then: null,
 		...partial,
 	};
 }

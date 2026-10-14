@@ -4,13 +4,13 @@
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
-	import { channelNumber, formatClock, formatRuntime, unlockProgress, type LiveSlot } from './clock';
+	import { LONG_FORM_S, channelNumber, formatClock, formatRuntime, unlockProgress, type LiveSlot } from './clock';
 	import { channelHue } from './lineup';
 	import { splitTitle } from './lower_third';
 
 	// One line of the dial: number, name, what is on now (with a live bar) and
-	// what is next. The row is the action: anything on it tunes in. Locked
-	// channels show how close they are to opening instead.
+	// the two that follow. The row is the action: anything on it tunes in.
+	// Locked channels show how close they are to opening instead.
 	let { channel, slot, onAir = false, busy = false, rise = 0, ontune }: {
 		channel: VideoChannel;
 		slot: LiveSlot;
@@ -21,8 +21,10 @@
 	} = $props();
 
 	let video = $derived(slot.program?.video ?? null);
-	let next = $derived(slot.next);
+	let upcoming = $derived([slot.next, slot.then].filter((program) => program != null));
 	let left = $derived(slot.program ? Math.max(0, slot.program.duration_s - slot.offset) : 0);
+	// Long form says when it ends: "until 15:03" reads apart from a song.
+	let longForm = $derived(slot.program != null && slot.program.duration_s >= LONG_FORM_S);
 
 	function tune() {
 		if (!channel.locked) ontune(channel);
@@ -86,7 +88,9 @@
 						{:else if video.artist_name}
 							<span class="artist">{video.artist_name}</span>
 						{/if}
-						{#if left > 0}<span class="left">{formatRuntime(left)} left</span>{/if}
+						{#if longForm && slot.program}
+							<span class="left">until {formatClock(slot.program.start_s + slot.program.duration_s)}</span>
+						{:else if left > 0}<span class="left">{formatRuntime(left)} left</span>{/if}
 					</span>
 				{:else}
 					<span class="quiet">Off air</span>
@@ -94,22 +98,26 @@
 			</div>
 		</div>
 
-		<button
-			type="button"
-			class="next"
-			onclick={tune}
-			oncontextmenu={(event) => videoMenu(event, next?.video ?? null)}
-			tabindex="-1"
-			disabled={!next}
-		>
-			{#if next}
-				<span class="at">{formatClock(next.start_s)}</span>
-				<span class="next-text">
-					<span class="next-song">{splitTitle(next.video.title).song}</span>
-					{#if next.video.artist_name}<span class="next-artist">{next.video.artist_name}</span>{/if}
-				</span>
-			{/if}
-		</button>
+		{#each [0, 1] as n (n)}
+			{@const next = upcoming[n] ?? null}
+			<button
+				type="button"
+				class="next"
+				class:then={n === 1}
+				onclick={tune}
+				oncontextmenu={(event) => videoMenu(event, next?.video ?? null)}
+				tabindex="-1"
+				disabled={!next}
+			>
+				{#if next}
+					<span class="at">{formatClock(next.start_s)}</span>
+					<span class="next-text">
+						<span class="next-song">{splitTitle(next.video.title).song}</span>
+						{#if next.video.artist_name}<span class="next-artist">{next.video.artist_name}</span>{/if}
+					</span>
+				{/if}
+			</button>
+		{/each}
 
 		<button type="button" class="play" aria-label={`Tune in to ${channel.title}`} onclick={tune}>
 			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" /></svg>
@@ -122,7 +130,8 @@
 		--ch-color: oklch(70% 0.15 calc(var(--ch-hue) * 1deg));
 		position: relative;
 		display: grid;
-		grid-template-columns: 48px minmax(150px, 220px) minmax(0, 1.35fr) minmax(0, 1fr) 40px;
+		/* Now, then the two after it, close together: no empty middle. */
+		grid-template-columns: 48px minmax(150px, 220px) minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr) 40px;
 		align-items: center;
 		gap: 18px;
 		padding: 8px 12px;
@@ -384,6 +393,13 @@
 		font-size: var(--font-size-xs);
 		font-variant-numeric: tabular-nums;
 		color: var(--text-tertiary);
+	}
+
+	@media (max-width: 1180px) {
+		.row {
+			grid-template-columns: 48px minmax(150px, 200px) minmax(0, 1.4fr) minmax(0, 1fr) 40px;
+		}
+		.next.then { display: none; }
 	}
 
 	@media (max-width: 860px) {
