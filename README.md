@@ -164,7 +164,7 @@ No Last.fm key ships with the app, so this step is on you. It is worth the minut
 | Linux x64 | [Archive (.tar.gz)](https://releases.noorwave.app/latest/NOORwave-linux-x64.tar.gz) | Portable. |
 | macOS | [v1.1.0 on GitHub](../../releases/tag/v1.1.0) | Mac builds stay on v1.1.0 for now. Gatekeeper may need `xattr -cr NOORwave noor-server`. |
 
-SHA-256 checksums: [sha256sums.txt](https://releases.noorwave.app/v1.1.1/sha256sums.txt). New versions ship from noorwave.app only; the GitHub Releases here hold v1.1.0 and older.
+SHA-256 checksums: [sha256sums.txt](https://releases.noorwave.app/v1.1.1/sha256sums.txt). New versions ship from noorwave.app; their [release pages](../../releases) here carry the notes and the same checksums.
 
 **Already installed, or downloaded v1.1.0 from GitHub?** You do not need to reinstall. On Windows, v1.1.0 checks noorwave.app for updates and takes you on to v1.1.1 by itself. Older installs (v1.0.9 and before) update to v1.1.0 first, then straight on to v1.1.1. Linux and portable copies update by downloading the new build.
 
