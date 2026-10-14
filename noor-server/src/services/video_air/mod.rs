@@ -22,6 +22,7 @@
 pub mod channels;
 pub mod clock;
 pub mod day;
+pub mod families;
 pub mod programmer;
 pub mod session;
 pub mod steer;

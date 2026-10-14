@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import type { ExploreMode, VideoChannel } from '$lib/api/video_explore_types';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
@@ -12,9 +12,9 @@
 	import ChannelCard from '$lib/video/onair/ChannelCard.svelte';
 	import ChannelRow from '$lib/video/onair/ChannelRow.svelte';
 	import { forYouLabel, formatClock, liveSlot, secondsSinceMidnight } from '$lib/video/onair/clock';
+	import { dialFamilies, loadFamilyChoices, saveFamilyChoices, type DialFamily } from '$lib/video/onair/families';
 	import {
 		airTick,
-		byNumber,
 		channelLineup,
 		ensureLineup,
 		exploreMode,
@@ -29,8 +29,9 @@
 
 	// On Air: the dial. Every channel runs on a clock, so this page is a live
 	// guide of what is on right now: a "For you tonight" strip of the channels
-	// you have the most appetite for, then every channel in number order with
-	// a bar moving through the current video and what is next. Nothing plays
+	// you have the most appetite for, then the fixed channels and the scene
+	// channels in families (the ones you watch first, the rest folded), each
+	// with a bar moving through the current video and what is next. Nothing plays
 	// until you pick a channel; picking one tunes in mid-video, where the
 	// schedule is (the layout then opens the watch page).
 
@@ -46,7 +47,6 @@
 	// A channel whose "now" ran out triggers a quiet refetch, at most this often.
 	const STALE_REFETCH_MS = 20_000;
 	const REFRESH_MS = 5 * 60_000;
-	const SCENE_START = 10;
 
 	let error = $state<unknown>(null);
 	let tuning = $state<string | null>(null);
@@ -59,8 +59,8 @@
 	let elapsed = $derived(lineup ? Math.max(0, ($airTick - lineup.fetchedAt) / 1000) : 0);
 	let slots = $derived(new Map(channels.map((channel) => [channel.id, liveSlot(channel, elapsed)])));
 	let tonight = $derived(forYouTonight(channels));
-	let dial = $derived(byNumber(channels));
-	let firstScene = $derived(dial.find((channel) => channel.no >= SCENE_START)?.id ?? null);
+	let familyChoices = $state<Record<string, boolean>>({});
+	let grouped = $derived(dialFamilies(channels, $videoChannelOnAir?.id ?? null, familyChoices));
 	let clock = $derived(formatClock(secondsSinceMidnight(new Date($airTick))));
 	let forYou = $derived(forYouLabel(secondsSinceMidnight(new Date($airTick))));
 	let building = $derived(Boolean(lineup?.data.building));
@@ -100,6 +100,19 @@
 		} finally {
 			tuning = null;
 		}
+	}
+
+	function setFolded(family: DialFamily<VideoChannel>, folded: boolean) {
+		familyChoices = { ...familyChoices, [family.key]: folded };
+		saveFamilyChoices(familyChoices);
+	}
+
+	/** A family chip: open the family if folded, then bring it into view. */
+	async function jump(key: string) {
+		const family = grouped.families.find((entry) => entry.key === key);
+		if (family?.folded) setFolded(family, false);
+		await tick();
+		document.getElementById(`family-${key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	}
 
 	async function changeExplore(mode: ExploreMode) {
@@ -143,6 +156,7 @@
 	}
 
 	onMount(() => {
+		familyChoices = loadFamilyChoices();
 		void loadExploreMode();
 		void load();
 		void handleDeepLink();
@@ -211,17 +225,47 @@
 
 		<section class="channels" aria-labelledby="channels-label">
 			<h3 id="channels-label" class="t-label">All channels</h3>
-			<div class="rows">
-				{#each dial as channel, index (channel.id)}
+			{#if grouped.families.length > 0}
+				<nav class="family-chips" aria-label="Jump to a family">
+					<button type="button" class="chip" onclick={() => void jump('main')}>Main</button>
+					{#each grouped.families as family (family.key)}
+						<button type="button" class="chip" class:folded={family.folded} onclick={() => void jump(family.key)}>
+							{family.label}<span class="chip-count">{family.channels.length}</span>
+						</button>
+					{/each}
+				</nav>
+			{/if}
+			<div class="rows" id="family-main">
+				{#each grouped.main as channel, index (channel.id)}
 					{@const slot = slots.get(channel.id)}
-					{#if channel.id === firstScene && index > 0}
-						<h4 class="family t-label">Scenes</h4>
-					{/if}
 					{#if slot}
 						<ChannelRow {channel} {slot} onAir={onAirId === channel.id} busy={tuning === channel.id} rise={index % 12} ontune={(picked) => void tune(picked)} />
 					{/if}
 				{/each}
 			</div>
+			{#each grouped.families as family (family.key)}
+				<div class="family" id={`family-${family.key}`}>
+					<button type="button" class="family-head" aria-expanded={!family.folded} onclick={() => setFolded(family, !family.folded)}>
+						<span class="t-label">{family.label}</span>
+						<span class="family-count">{family.channels.length} {family.channels.length === 1 ? 'channel' : 'channels'}</span>
+						<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+					</button>
+					{#if family.folded}
+						<button type="button" class="family-preview" onclick={() => setFolded(family, false)}>
+							{family.channels.map((channel) => channel.title).join(', ')}
+						</button>
+					{:else}
+						<div class="rows">
+							{#each family.channels as channel, index (channel.id)}
+								{@const slot = slots.get(channel.id)}
+								{#if slot}
+									<ChannelRow {channel} {slot} onAir={onAirId === channel.id} busy={tuning === channel.id} rise={index % 12} ontune={(picked) => void tune(picked)} />
+								{/if}
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/each}
 			{#if building}
 				<p class="note">Still programming a few channels. They join the dial as they are ready.</p>
 			{/if}
@@ -326,10 +370,113 @@
 		grid-template-columns: minmax(0, 1fr);
 		gap: var(--row-gap);
 	}
-	/* The same label as the section headings above it. */
-	.family {
-		margin: var(--space-5) 0 var(--space-2);
+	/* Family chips: one tap to a family, opening it if it is folded. */
+	.family-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
 		padding: 0 12px;
+	}
+	.chip {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 6px;
+		padding: 5px 12px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: transparent;
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			color var(--motion-fast);
+	}
+	.chip:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+	.chip.folded {
+		color: var(--text-tertiary);
+	}
+	.chip-count {
+		font-family: var(--font-mono);
+		font-size: var(--font-size-2xs);
+		color: var(--text-tertiary);
+	}
+
+	/* A family: its label as a heading that folds it, then its rows (or,
+	   folded, one quiet line of its channel names). */
+	.family {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		gap: var(--space-2);
+		margin-top: var(--space-4);
+		scroll-margin-top: var(--space-6);
+	}
+	#family-main {
+		scroll-margin-top: var(--space-6);
+	}
+	.family-head {
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+		width: 100%;
+		padding: 4px 12px;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+	.family-head .t-label {
+		margin: 0;
+	}
+	.family-count {
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+	}
+	.chevron {
+		align-self: center;
+		width: 14px;
+		height: 14px;
+		fill: none;
+		stroke: var(--text-tertiary);
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		transition: transform var(--motion-fast);
+	}
+	.family-head[aria-expanded='false'] .chevron {
+		transform: rotate(-90deg);
+	}
+	.family-head:hover .chevron {
+		stroke: var(--text-primary);
+	}
+	.family-preview {
+		overflow: hidden;
+		padding: 0 12px 0 calc(12px + 0px);
+		border: 0;
+		background: transparent;
+		color: var(--text-tertiary);
+		font: inherit;
+		font-size: var(--font-size-xs);
+		text-align: left;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.family-preview:hover {
+		color: var(--text-secondary);
+	}
+	.chip:focus-visible,
+	.family-head:focus-visible,
+	.family-preview:focus-visible {
+		outline: 2px solid var(--accent-strong);
+		outline-offset: 2px;
 	}
 
 	.building {

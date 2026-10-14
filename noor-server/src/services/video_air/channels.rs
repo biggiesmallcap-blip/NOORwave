@@ -112,6 +112,22 @@ impl ChannelId {
 pub struct Unlock {
     pub hours: f64,
     pub need_hours: f64,
+    /// Scenes also need enough artists; 0 needed where only hours count.
+    #[serde(default)]
+    pub artists: usize,
+    #[serde(default)]
+    pub need_artists: usize,
+}
+
+impl Unlock {
+    fn hours(hours: f64, need_hours: f64) -> Self {
+        Self {
+            hours,
+            need_hours,
+            artists: 0,
+            need_artists: 0,
+        }
+    }
 }
 
 /// A channel as the dial lists it (VideoChannel without now/next).
@@ -128,6 +144,10 @@ pub struct ChannelMeta {
     /// Scene appetite (0.05..1.1) for ordering the "for you" strip; null on
     /// the fixed channels. Never changes the numbers.
     pub appetite: Option<f64>,
+    /// The scene's family on the dial (hiphop, latin, rock, pop, country,
+    /// soul, world, other); null on the fixed channels.
+    #[serde(default)]
+    pub family: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -705,16 +725,13 @@ pub fn rewind_decade(universe: &Universe, day: &str) -> Option<i32> {
 fn rewind_progress(universe: &Universe) -> Unlock {
     let (dated, songs, dated_s, total_s) = era_stats(universe);
     if songs == 0 || (dated as f64) < ERA_NEED_COVERAGE * songs as f64 {
-        return Unlock {
-            hours: round1(dated_s as f64 / 3600.0),
-            need_hours: round1(ERA_NEED_COVERAGE * total_s as f64 / 3600.0),
-        };
+        return Unlock::hours(
+            round1(dated_s as f64 / 3600.0),
+            round1(ERA_NEED_COVERAGE * total_s as f64 / 3600.0),
+        );
     }
     let best = decade_seconds(universe).into_values().max().unwrap_or(0);
-    Unlock {
-        hours: round1(best as f64 / 3600.0),
-        need_hours: FIXED_NEED_HOURS,
-    }
+    Unlock::hours(round1(best as f64 / 3600.0), FIXED_NEED_HOURS)
 }
 
 fn join_names(names: &[String]) -> String {
@@ -736,6 +753,7 @@ fn base_meta(id: &ChannelId, universe: &Universe, taste: &Taste, ctx: &DayContex
         locked: false,
         unlock: None,
         appetite: None,
+        family: None,
     };
     match id {
         ChannelId::Your => fixed("Your Channel", "Your library and one step out".into()),
@@ -780,6 +798,14 @@ fn base_meta(id: &ChannelId, universe: &Universe, taste: &Taste, ctx: &DayContex
                     .appetite
                     .get(scene)
                     .map(|a| (a * 100.0).round() / 100.0),
+                family: Some(
+                    universe
+                        .families
+                        .get(scene)
+                        .copied()
+                        .unwrap_or(super::families::OTHER)
+                        .to_string(),
+                ),
             }
         }
     }
@@ -794,13 +820,7 @@ fn locked(mut meta: ChannelMeta, unlock: Option<Unlock>) -> Planned {
 pub fn plan_one(id: &ChannelId, universe: &Universe, taste: &Taste, ctx: &DayContext) -> Planned {
     let meta = base_meta(id, universe, taste, ctx);
     if id.needs_facets() && !universe.facets {
-        return locked(
-            meta,
-            Some(Unlock {
-                hours: 0.0,
-                need_hours: FIXED_NEED_HOURS,
-            }),
-        );
+        return locked(meta, Some(Unlock::hours(0.0, FIXED_NEED_HOURS)));
     }
     if *id == ChannelId::Rewind && ctx.rewind_decade.is_none() {
         return locked(meta, Some(rewind_progress(universe)));
@@ -820,6 +840,12 @@ pub fn plan_one(id: &ChannelId, universe: &Universe, taste: &Taste, ctx: &DayCon
         let unlock = (*id != ChannelId::Spotlight).then_some(Unlock {
             hours: round1(built.hours),
             need_hours,
+            artists: built.artists,
+            need_artists: if matches!(id, ChannelId::Scene(_)) {
+                need_artists
+            } else {
+                0
+            },
         });
         return locked(meta, unlock);
     }
@@ -871,7 +897,7 @@ fn scene_progress(universe: &Universe, taste: &Taste, scene: i64) -> (f64, usize
 /// with `no: 0`. Ranked by the further of the two thresholds; never
 /// numbered here (numbers are handed out once, by the intelligence build).
 fn coming_up(universe: &Universe, taste: &Taste, ctx: &DayContext) -> Vec<Planned> {
-    let mut ranked: Vec<(f64, f64, i64)> = universe
+    let mut ranked: Vec<(f64, f64, usize, i64)> = universe
         .scenes
         .iter()
         .filter(|scene| scene.channel_no.is_none())
@@ -879,21 +905,23 @@ fn coming_up(universe: &Universe, taste: &Taste, ctx: &DayContext) -> Vec<Planne
             let (hours, artists) = scene_progress(universe, taste, scene.id);
             let progress =
                 (hours / SCENE_NEED_HOURS).min(artists as f64 / SCENE_NEED_ARTISTS as f64);
-            (progress, hours, scene.id)
+            (progress, hours, artists, scene.id)
         })
-        .filter(|(progress, _, _)| *progress > 0.0)
+        .filter(|(progress, _, _, _)| *progress > 0.0)
         .collect();
-    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.3.cmp(&b.3)));
     ranked
         .into_iter()
         .take(COMING_UP)
-        .map(|(_, hours, scene)| {
+        .map(|(_, hours, artists, scene)| {
             let meta = base_meta(&ChannelId::Scene(scene), universe, taste, ctx);
             locked(
                 meta,
                 Some(Unlock {
                     hours: round1(hours),
                     need_hours: SCENE_NEED_HOURS,
+                    artists,
+                    need_artists: SCENE_NEED_ARTISTS,
                 }),
             )
         })

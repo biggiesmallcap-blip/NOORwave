@@ -4,7 +4,7 @@
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
-	import { LONG_FORM_S, channelNumber, formatClock, formatRuntime, unlockProgress, type LiveSlot } from './clock';
+	import { LONG_FORM_S, channelNumber, formatClock, formatRuntime, unlockLabel, unlockProgress, type LiveSlot } from './clock';
 	import { channelHue } from './lineup';
 	import { splitTitle } from './lower_third';
 
@@ -64,7 +64,7 @@
 			<span class="coming-label">Coming up</span>
 			<span class="unlock" aria-hidden="true"><span class="unlock-fill" style:transform={`scaleX(${unlockProgress(channel.unlock)})`}></span></span>
 			{#if channel.unlock}
-				<span class="unlock-meta">{Math.floor(channel.unlock.hours)} of {Math.round(channel.unlock.need_hours)} hours</span>
+				<span class="unlock-meta">{unlockLabel(channel.unlock)}</span>
 			{/if}
 		</div>
 	{:else}

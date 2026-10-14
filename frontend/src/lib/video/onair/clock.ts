@@ -75,8 +75,28 @@ export function forYouLabel(secondsSinceMidnight: number): string {
 
 /** Hours of a locked channel's unlock progress, 0..1. */
 export function unlockProgress(unlock: VideoChannel['unlock']): number {
-	if (!unlock || !(unlock.need_hours > 0)) return 0;
-	return Math.min(1, Math.max(0, unlock.hours / unlock.need_hours));
+	if (!unlock) return 0;
+	const parts = [unlockShares(unlock).hours, unlockShares(unlock).artists].filter((share) => share != null);
+	if (parts.length === 0) return 0;
+	return Math.min(1, Math.max(0, Math.min(...parts)));
+}
+
+function unlockShares(unlock: NonNullable<VideoChannel['unlock']>): { hours: number | null; artists: number | null } {
+	return {
+		hours: unlock.need_hours > 0 ? unlock.hours / unlock.need_hours : null,
+		artists: unlock.need_artists && unlock.need_artists > 0 ? (unlock.artists ?? 0) / unlock.need_artists : null,
+	};
+}
+
+/** What a locked channel still lacks: "12 of 30 hours", or the artists
+ *  when the hours are there ("28 of 40 artists"). */
+export function unlockLabel(unlock: VideoChannel['unlock']): string {
+	if (!unlock) return '';
+	const shares = unlockShares(unlock);
+	if (shares.artists != null && (shares.hours == null || shares.artists < shares.hours)) {
+		return `${unlock.artists ?? 0} of ${unlock.need_artists} artists`;
+	}
+	return `${Math.floor(unlock.hours)} of ${Math.round(unlock.need_hours)} hours`;
 }
 
 /** Seconds since local midnight. */

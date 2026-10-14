@@ -148,6 +148,8 @@ pub struct Universe {
     pub scene_members: HashMap<i64, Vec<usize>>,
     /// Artists per primary scene with at least one programmable video.
     pub scene_artists: HashMap<i64, usize>,
+    /// Each scene's family on the dial (families::family_of its tags).
+    pub families: HashMap<i64, &'static str>,
     pub this_year: i32,
 }
 
@@ -326,9 +328,11 @@ fn load_facets(conn: &Connection, this_year: i32) -> Result<Universe> {
         }
     }
     let mut scenes = Vec::new();
+    let mut families = HashMap::new();
     {
-        let mut stmt = conn
-            .prepare("SELECT scene_id, name, hue, channel_no, exemplars_json FROM video_scenes")?;
+        let mut stmt = conn.prepare(
+            "SELECT scene_id, name, hue, channel_no, exemplars_json, tags_json FROM video_scenes",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -336,10 +340,13 @@ fn load_facets(conn: &Connection, this_year: i32) -> Result<Universe> {
                 row.get::<_, f64>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })?;
         for row in rows {
-            let (id, name, hue, channel_no, exemplars) = row?;
+            let (id, name, hue, channel_no, exemplars, tags) = row?;
+            let tags: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
+            families.insert(id, super::families::family_of(&tags));
             scenes.push(SceneRow {
                 id,
                 name,
@@ -381,6 +388,7 @@ fn load_facets(conn: &Connection, this_year: i32) -> Result<Universe> {
         songs,
         scenes,
         concerts,
+        families,
         ..Default::default()
     })
 }

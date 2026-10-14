@@ -22,7 +22,7 @@ use crate::services::video_stations::{lineup, to_item};
 
 /// Bump when a release changes what a day holds: a stored day from an older
 /// planner is rebuilt on the next request.
-pub const LINEUP_VERSION: u32 = 3;
+pub const LINEUP_VERSION: u32 = 5;
 const LINEUP_KEY_PREFIX: &str = "video_air.lineup:";
 /// Days older than this many days before the built day are dropped.
 const KEEP_DAYS: i64 = 2;

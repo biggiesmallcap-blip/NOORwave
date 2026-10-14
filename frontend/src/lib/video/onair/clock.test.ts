@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { channelNumber, forYouLabel, formatClock, formatRuntime, liveSlot, progressOf, secondsSinceMidnight, tuneStart, unlockProgress } from './clock';
+import { channelNumber, forYouLabel, formatClock, formatRuntime, liveSlot, progressOf, secondsSinceMidnight, tuneStart, unlockLabel, unlockProgress } from './clock';
 import { FIXTURE_NOW_S, fixtureChannels } from './fixtures';
 
 const [bay, your, kpop] = fixtureChannels.channels;
@@ -63,6 +63,17 @@ describe('live progress', () => {
 		expect(slot.next?.slot).toBe(99);
 		expect(slot.then).toBeNull();
 		expect(liveSlot({ ...your, then }, 0).then?.slot).toBe(99);
+	});
+
+	test('a locked scene says what it still lacks, hours or artists', () => {
+		expect(unlockLabel({ hours: 12.7, need_hours: 30 })).toBe('12 of 30 hours');
+		const artistsShort = { hours: 40, need_hours: 30, artists: 28, need_artists: 40 };
+		expect(unlockLabel(artistsShort)).toBe('28 of 40 artists');
+		expect(unlockProgress(artistsShort)).toBeCloseTo(0.7);
+		const hoursShort = { hours: 6, need_hours: 30, artists: 35, need_artists: 40 };
+		expect(unlockLabel(hoursShort)).toBe('6 of 30 hours');
+		expect(unlockProgress(hoursShort)).toBeCloseTo(0.2);
+		expect(unlockLabel(null)).toBe('');
 	});
 
 	test('the strip is named for the time of day', () => {

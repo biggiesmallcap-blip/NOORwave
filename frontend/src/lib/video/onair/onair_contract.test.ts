@@ -16,10 +16,11 @@ const player = read('../../components/video/VideoPlayer.svelte');
 const store = read('../../stores/video_session.ts');
 
 describe('On Air landing (the dial)', () => {
-	test('"For you tonight" first, then every channel in number order', () => {
+	test('the "for you" strip first, then the fixed channels and the families', () => {
 		expect(landing).toContain('let tonight = $derived(forYouTonight(channels));');
-		expect(landing).toContain('let dial = $derived(byNumber(channels));');
-		expect(landing.indexOf('For you tonight')).toBeLessThan(landing.indexOf('All channels'));
+		expect(landing).toContain('let grouped = $derived(dialFamilies(channels, $videoChannelOnAir?.id ?? null, familyChoices));');
+		expect(landing.indexOf('{forYou}')).toBeLessThan(landing.indexOf('All channels'));
+		expect(landing.indexOf('grouped.main')).toBeLessThan(landing.indexOf('<div class="family" id={`family-${family.key}`}>'));
 		expect(landing).toContain('<ChannelCard {channel} {slot}');
 		expect(landing).toContain('<ChannelRow {channel} {slot}');
 	});
@@ -59,10 +60,10 @@ describe('On Air landing (the dial)', () => {
 		expect(landing).toContain('BUILD_POLL_MAX');
 	});
 
-	test('locked channels show coming up with an hours bar', () => {
+	test('locked channels show coming up with a bar and what they still lack', () => {
 		expect(row).toContain('Coming up');
 		expect(row).toContain('unlockProgress(channel.unlock)');
-		expect(row).toContain('of {Math.round(channel.unlock.need_hours)} hours');
+		expect(row).toContain('{unlockLabel(channel.unlock)}');
 	});
 
 	test('artwork goes through ArtworkImage at allowed sizes; every reference has its menu', () => {

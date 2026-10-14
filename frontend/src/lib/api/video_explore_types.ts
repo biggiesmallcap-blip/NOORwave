@@ -349,7 +349,7 @@ export interface VideoChannel {
 	scene_id: number | null;
 	locked: boolean;
 	/** For locked channels: hours playable now and hours needed. */
-	unlock: { hours: number; need_hours: number } | null;
+	unlock: { hours: number; need_hours: number; artists?: number; need_artists?: number } | null;
 	now: (ChannelProgram & { offset_s: number }) | null;
 	next: ChannelProgram | null;
 	/** What follows `next`. */
@@ -357,6 +357,9 @@ export interface VideoChannel {
 	/** Scene appetite (about 0.05-1.1) for ordering a "for you" strip; null
 	 *  on the fixed channels. Never changes the numbers. */
 	appetite?: number | null;
+	/** The scene's family on the dial: hiphop | latin | rock | pop | country |
+	 *  soul | world | other. Null on the fixed channels. */
+	family?: string | null;
 }
 
 export interface VideoChannelsResponse {
