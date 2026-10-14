@@ -3,6 +3,7 @@ import { api } from '$lib/api/client';
 import type { TidalSearchVideo, TidalVideoMixItem } from '$lib/api/client';
 import type { ExploreMode, VideoChannel } from '$lib/api/video_explore_types';
 import { tuneStart } from '$lib/video/onair/clock';
+import { tuneMode } from '$lib/video/onair/tune_mode';
 
 export type VideoSessionItem = TidalSearchVideo | TidalVideoMixItem;
 export type VideoSessionSource = 'none' | 'direct' | 'search' | 'mix';
@@ -622,13 +623,14 @@ export function channelSourceLabel(channel: Pick<VideoChannel, 'no' | 'title'>):
 
 /** Tune in to an On Air channel. The channel is on a clock, so this joins
  *  the scheduled video where the schedule is now (offset_s) rather than at
- *  0:00; past 80% of it, the next scheduled item starts instead. The rest of
+ *  0:00 (clock.tuneStart has the edges), unless the listener chose to start
+ *  from the top (tune_mode). The rest of
  *  the schedule is queued and refills come from the channel. Zaps and holds
  *  are recorded by the usual watch history. */
 export async function playVideoChannel(id: string, opts: { explore?: ExploreMode } = {}): Promise<boolean> {
 	const tune = await api.tuneVideoChannel(id, opts.explore ? { explore: opts.explore } : {});
 	const scheduled = tune.video;
-	const start = tuneStart(tune.offset_s, scheduledDuration(tune.channel, scheduled));
+	const start = tuneStart(tune.offset_s, scheduledDuration(tune.channel, scheduled), get(tuneMode));
 	const rest = tune.queue.filter((item) => item.tidal_id !== scheduled.tidal_id);
 	const skip = start.skip && rest.length > 0;
 	const queue = skip ? rest : [scheduled, ...rest];

@@ -5,9 +5,18 @@ import { showToast } from '$lib/stores/toast';
 import { playVideoChannel, videoSession } from '$lib/stores/video_session';
 import { exploreMode } from './lineup';
 
+let lastTuneAt = 0;
+
+/** When the last tune-in started: a stage that appears right after one
+ *  covers the picture until the video really plays (OnAirStage). */
+export function tunedRecently(withinMs: number, now = Date.now()): boolean {
+	return now - lastTuneAt < withinMs;
+}
+
 /** Tune in from anywhere (the dial, a flip, the guide, an Atlas deep link).
  *  Says so when it cannot, and resolves whether the channel is now on. */
 export async function tuneChannel(channel: Pick<VideoChannel, 'id' | 'title'>): Promise<boolean> {
+	lastTuneAt = Date.now();
 	if (!assertOnline()) {
 		showToast('Server is reconnecting.', 'error', 3200);
 		return false;

@@ -6,14 +6,25 @@ import type { ChannelProgram, VideoChannel } from '$lib/api/video_explore_types'
 
 /** Joining the tail of a video is not worth it: past this share of its
  *  runtime a tune-in starts the next scheduled item instead. */
-export const SKIP_PAST = 0.8;
+export const SKIP_PAST = 0.75;
+/** Nor is missing only its opening: this close to the start, a tune-in
+ *  starts it from the top. */
+export const SNAP_UNDER_S = 20;
 
 const DAY_S = 86_400;
 
 /** Where a tune-in lands. `offsetS` is how far into the scheduled video the
- *  channel is now. Past 80% of a known runtime: skip to the next item. */
-export function tuneStart(offsetS: number, durationS: number | null | undefined): { skip: boolean; startAt: number } {
-	const offset = Number.isFinite(offsetS) && offsetS > 0 ? offsetS : 0;
+ *  channel is now. Live: within its first 20 s it starts from the top, past
+ *  75% of a known runtime the next item starts instead. From the start: the
+ *  video on now, from 0:00. */
+export function tuneStart(
+	offsetS: number,
+	durationS: number | null | undefined,
+	mode: 'live' | 'start' = 'live',
+): { skip: boolean; startAt: number } {
+	if (mode === 'start') return { skip: false, startAt: 0 };
+	const raw = Number.isFinite(offsetS) && offsetS > 0 ? offsetS : 0;
+	const offset = raw < SNAP_UNDER_S ? 0 : raw;
 	const duration = durationS != null && Number.isFinite(durationS) && durationS > 0 ? durationS : null;
 	if (duration == null) return { skip: false, startAt: offset };
 	if (offset >= duration * SKIP_PAST) return { skip: true, startAt: 0 };

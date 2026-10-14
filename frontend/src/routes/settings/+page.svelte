@@ -69,6 +69,7 @@
 	import { searchSettings, type SettingsSearchEntry } from '$lib/components/settings/settingsSearch';
 	import TidalContentSetting from '$lib/components/settings/TidalContentSetting.svelte';
 	import VideoDiscoverySetting from '$lib/components/settings/VideoDiscoverySetting.svelte';
+	import OnAirTuneSetting from '$lib/components/settings/OnAirTuneSetting.svelte';
 	import ExploreStationsSetting from '$lib/components/settings/ExploreStationsSetting.svelte';
 	import IntegrationsPanel from '$lib/components/settings/IntegrationsPanel.svelte';
 	import PhoneRemotePanel from '$lib/components/settings/PhoneRemotePanel.svelte';
@@ -3257,6 +3258,7 @@
 					</div>
 				{:else}<div class="info-row"><span>Account</span><strong>{$tidalUserId ?? 'Connected'}</strong></div><div class="action-row"><button class="btn btn-glass" onclick={disconnectTidal}>Disconnect</button><a class="btn btn-glass" href={settingsHref('library', 'library-sync')}>Library sync</a></div>{/if}
 <VideoDiscoverySetting />
+<OnAirTuneSetting />
 <ExploreStationsSetting />
 <details><summary>More content settings</summary>
     <TidalContentSetting />

@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import { fade } from 'svelte/transition';
 	import { get } from 'svelte/store';
 	import type { VideoChannel } from '$lib/api/video_explore_types';
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { contextMenu, openContextMenu } from '$lib/stores/context_menu';
 	import { reduceMotion } from '$lib/stores/motion';
-	import { steerChannel, steerMessage, type VideoSessionItem } from '$lib/stores/video_session';
+	import { steerChannel, steerMessage, videoSession, type VideoSessionItem } from '$lib/stores/video_session';
 	import { dispatchVideoControl } from '$lib/video/controls';
 	import { channelNumber, liveSlot, secondsSinceMidnight } from './clock';
 	import { createFlipper, DIGIT_WAIT_MS, digitVerdict } from './flip';
@@ -15,7 +16,7 @@
 	import { airTick, channelHue, channelLineup, ensureLineup } from './lineup';
 	import { creditFor, lowerThirdPhase, splitTitle, type CreditSource } from './lower_third';
 	import { remotePresses } from './remote';
-	import { tuneChannel } from './tune';
+	import { tuneChannel, tunedRecently } from './tune';
 
 	// The broadcast layer over the stage while a channel is on air, on the
 	// watch page and in fullscreen: the channel bug, the lower third credits,
@@ -34,6 +35,10 @@
 	} = $props();
 
 	const FLIP_HOLD_MS = 1400;
+	/** The curtain never stays longer than this, whatever the stream does. */
+	const CURTAIN_MAX_MS = 8000;
+	/** Played this far into the new video: it is really on, lift the curtain. */
+	const CURTAIN_LIFT_S = 0.25;
 	const NOTE_MS = 1800;
 
 	let guideOpen = $state(false);
@@ -46,6 +51,36 @@
 	let flipTimer: ReturnType<typeof setTimeout> | null = null;
 	let noteTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// Changing channel: the picture is covered by the new channel's ident
+	// (its colour, number, name and what is on) from the moment the tune
+	// starts until the new video is really playing, so the black frame and
+	// the loading text in between never show.
+	let curtain = $state<{ channel: VideoChannel; fromId: number | null } | null>(null);
+	let curtainTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function raiseCurtain(target: VideoChannel, fromId: number | null) {
+		if (get(reduceMotion)) return;
+		curtain = { channel: target, fromId };
+		if (curtainTimer) clearTimeout(curtainTimer);
+		curtainTimer = setTimeout(lowerCurtain, CURTAIN_MAX_MS);
+	}
+
+	function lowerCurtain() {
+		if (curtainTimer) clearTimeout(curtainTimer);
+		curtainTimer = null;
+		curtain = null;
+	}
+
+	$effect(() => {
+		if (!curtain) return;
+		const id = current?.tidal_id ?? null;
+		const arrived = id !== null && id !== curtain.fromId;
+		// Only the new video's own failure lifts it early: an error left over
+		// from the one before must not.
+		const moving = arrived && positionS >= startedAtS + CURTAIN_LIFT_S;
+		if (moving || (arrived && $videoSession.error && !$videoSession.loading)) lowerCurtain();
+	});
+
 	let lineup = $derived($channelLineup);
 	let channels = $derived<readonly VideoChannel[]>(lineup?.data.channels.length ? lineup.data.channels : [channel]);
 	let elapsed = $derived(lineup ? Math.max(0, ($airTick - lineup.fetchedAt) / 1000) : 0);
@@ -56,9 +91,10 @@
 	let introCredit = $derived(current ? creditFor(current as CreditSource) : null);
 	let outroCredit = $derived(upNext ? creditFor(upNext as CreditSource) : null);
 	let credit = $derived(phase === 'intro' ? introCredit : phase === 'outro' ? outroCredit : null);
-	let showCredit = $derived(Boolean(credit) && !guideOpen && !flipCard);
+	let showCredit = $derived(Boolean(credit) && !guideOpen && !flipCard && !curtain);
 
 	let flipSlot = $derived(flipCard ? liveSlot(flipCard, elapsed) : null);
+	let curtainSlot = $derived(curtain ? liveSlot(curtain.channel, elapsed) : null);
 	let flipVideo = $derived(flipSlot?.program?.video ?? null);
 
 	const flipper = createFlipper<VideoChannel>({
@@ -90,7 +126,9 @@
 			holdCardThenHide(target);
 			return;
 		}
-		await tuneChannel(target);
+		raiseCurtain(target, current?.tidal_id ?? null);
+		const ok = await tuneChannel(target);
+		if (!ok) lowerCurtain();
 		holdCardThenHide(target);
 	}
 
@@ -218,20 +256,22 @@
 	onMount(() => {
 		void ensureLineup();
 		window.addEventListener('keydown', onKeydown, true);
+		// Just tuned in from the dial: cover the picture until it plays.
+		if (tunedRecently(3000) && !(positionS >= startedAtS + CURTAIN_LIFT_S)) raiseCurtain(channel, null);
 	});
 
 	onDestroy(() => {
 		if (typeof window !== 'undefined') window.removeEventListener('keydown', onKeydown, true);
 		unsubscribePresses();
 		flipper.cancel();
-		for (const timer of [digitTimer, flipTimer, noteTimer]) if (timer) clearTimeout(timer);
+		for (const timer of [digitTimer, flipTimer, noteTimer, curtainTimer]) if (timer) clearTimeout(timer);
 	});
 </script>
 
 <div class="onair-stage" class:fullscreen style:--ch-hue={hue}>
 	<!-- The bug: number and name, top right, quiet like a broadcaster's mark.
 	     While digits are typed it shows them instead. -->
-	<div class="bug" class:typing={digits.length > 0} class:hidden={guideOpen} aria-live="polite">
+	<div class="bug" class:typing={digits.length > 0} class:hidden={guideOpen || curtain !== null} aria-live="polite">
 		{#if digits}
 			<span class="bug-no" aria-label={`Channel ${digits}`}>{digits.padEnd(2, '_')}</span>
 		{:else}
@@ -258,7 +298,18 @@
 		{/key}
 	{/if}
 
-	{#if flipCard}
+	{#if curtain}
+		{@const video = curtainSlot?.program?.video ?? null}
+		<div class="curtain" style:--ch-hue={channelHue(curtain.channel)} out:fade={{ duration: 280 }} aria-hidden="true">
+			<span class="cu-no">{channelNumber(curtain.channel.no)}</span>
+			<span class="cu-name">{curtain.channel.title}</span>
+			{#if video}
+				<span class="cu-now">{splitTitle(video.title).song}{#if video.artist_name}<span class="cu-artist">{video.artist_name}</span>{/if}</span>
+			{/if}
+		</div>
+	{/if}
+
+	{#if flipCard && !curtain}
 		<div class="flip-card" style:--ch-hue={channelHue(flipCard)} aria-live="assertive">
 			<span class="fc-no">{channelNumber(flipCard.no)}</span>
 			<div class="fc-text">
@@ -596,6 +647,55 @@
 	}
 
 	/* ---- The flip's luminance dip: 160 ms down and back up ---- */
+	/* The channel's ident over the picture while the new video loads: its
+	   colour in a soft wash, the number large, the name, what is on. */
+	.curtain {
+		position: absolute;
+		inset: 0;
+		z-index: 2;
+		display: grid;
+		place-content: center;
+		justify-items: center;
+		gap: 6px;
+		background:
+			radial-gradient(70% 70% at 50% 45%, oklch(34% 0.09 calc(var(--ch-hue) * 1deg)), transparent 75%),
+			#050508;
+		animation: curtain-in 140ms ease-out both;
+	}
+	@keyframes curtain-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+	.cu-no {
+		font-family: var(--font-mono);
+		font-size: clamp(2.5rem, 7vw, 5rem);
+		font-weight: var(--font-weight-medium);
+		line-height: 1;
+		color: oklch(82% 0.13 calc(var(--ch-hue) * 1deg));
+	}
+	.cu-name {
+		font-size: clamp(1rem, 1.6vw, 1.5rem);
+		font-weight: var(--font-weight-semibold);
+		color: #fff;
+	}
+	.cu-now {
+		display: grid;
+		justify-items: center;
+		gap: 2px;
+		margin-top: 10px;
+		font-family: var(--font-display);
+		font-size: clamp(0.95rem, 1.2vw, 1.15rem);
+		font-style: italic;
+		color: rgba(255, 255, 255, 0.82);
+		animation: curtain-in 300ms 160ms ease-out both;
+	}
+	.cu-artist {
+		font-family: var(--font-body);
+		font-size: var(--font-size-xs);
+		font-style: normal;
+		color: rgba(255, 255, 255, 0.6);
+	}
+
 	.dip {
 		position: absolute;
 		inset: 0;

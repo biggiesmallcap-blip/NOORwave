@@ -10,11 +10,21 @@ describe('tune-in offset', () => {
 		expect(tuneStart(0, 240)).toEqual({ skip: false, startAt: 0 });
 	});
 
-	test('past 80% of the runtime skips to the next item', () => {
-		expect(tuneStart(192, 240)).toEqual({ skip: true, startAt: 0 });
+	test('within its first 20 s it starts from the top', () => {
+		expect(tuneStart(19.9, 240)).toEqual({ skip: false, startAt: 0 });
+		expect(tuneStart(20, 240)).toEqual({ skip: false, startAt: 20 });
+	});
+
+	test('past 75% of the runtime skips to the next item', () => {
+		expect(tuneStart(180, 240)).toEqual({ skip: true, startAt: 0 });
 		expect(tuneStart(230, 240)).toEqual({ skip: true, startAt: 0 });
 		// Just under the line still joins.
-		expect(tuneStart(191.9, 240).skip).toBe(false);
+		expect(tuneStart(179.9, 240).skip).toBe(false);
+	});
+
+	test('from the start always begins the video on now at 0:00', () => {
+		expect(tuneStart(95.5, 240, 'start')).toEqual({ skip: false, startAt: 0 });
+		expect(tuneStart(230, 240, 'start')).toEqual({ skip: false, startAt: 0 });
 	});
 
 	test('without a runtime it joins wherever the schedule is; junk offsets start at 0', () => {
