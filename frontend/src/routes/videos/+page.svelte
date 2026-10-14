@@ -63,7 +63,7 @@
 	let slots = $derived(new Map(channels.map((channel) => [channel.id, liveSlot(channel, elapsed)])));
 	let tonight = $derived(forYouTonight(channels));
 	let grouped = $derived(dialFamilies(channels));
-	let sceneCount = $derived(grouped.families.reduce((sum, family) => sum + family.channels.length, 0));
+	let sceneCount = $derived(grouped.families.reduce((sum, family) => sum + family.channels.filter((channel) => !channel.locked).length, 0));
 	let clock = $derived(formatClock(secondsSinceMidnight(new Date($airTick))));
 	let forYou = $derived(forYouLabel(secondsSinceMidnight(new Date($airTick))));
 	let building = $derived(Boolean(lineup?.data.building));
@@ -255,8 +255,11 @@
 		</section>
 
 		{#if grouped.families.length > 0}
-			<section class="channels" aria-labelledby="scenes-label">
-				<h3 id="scenes-label" class="t-label">Scenes <span class="scene-count">{sceneCount}</span></h3>
+			<section class="channels scenes" aria-labelledby="scenes-label">
+				<header class="opener">
+					<h3 id="scenes-label">Scenes</h3>
+					<p>{sceneCount} channels, one for every corner of the map.</p>
+				</header>
 				<SceneIndex families={grouped.families} {slots} {onAirId} tuningId={tuning} ontune={(picked) => void tune(picked)} />
 			</section>
 		{/if}
@@ -360,10 +363,29 @@
 		grid-template-columns: minmax(0, 1fr);
 		gap: var(--row-gap);
 	}
-	.scene-count {
-		margin-left: 6px;
+	/* A chapter break, set in the titles' own italic serif: room above, the
+	   word, one quiet line. No colour, no motion. */
+	.scenes {
+		margin-top: var(--space-7);
+	}
+	.opener {
+		display: grid;
+		gap: 6px;
+		padding: 0 12px var(--space-2);
+	}
+	.opener h3 {
+		margin: 0;
+		color: var(--text-primary);
+		font-family: var(--font-display);
+		font-size: var(--font-size-3xl);
+		font-style: italic;
+		font-weight: var(--font-weight-medium);
+		line-height: 1.05;
+		letter-spacing: -0.01em;
+	}
+	.opener p {
+		margin: 0;
 		color: var(--text-tertiary);
-		font-family: var(--font-mono);
-		letter-spacing: 0;
+		font-size: var(--font-size-sm);
 	}
 </style>
