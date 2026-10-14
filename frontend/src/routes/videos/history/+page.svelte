@@ -8,6 +8,7 @@
 	import { playVideo } from '$lib/stores/video_session';
 	import { showToast } from '$lib/stores/toast';
 	import { historyDays, playsLine } from '$lib/video/history_days';
+	import { keepView, lastView } from '$lib/video/view_cache';
 
 	// The History tab: every video you have watched, newest first, in days
 	// (Today, Yesterday, the weekday, then the date), one card per video with
@@ -15,8 +16,12 @@
 	// same history keeps recently watched picks off the shelves and feeds the
 	// discovery crawler, so removing one here also lets it come back.
 	const HISTORY_LIMIT = 200;
-	let entries = $state<VideoHistoryEntry[]>([]);
-	let loading = $state(true);
+	// A revisit opens on the last list at once (no skeleton, no entry
+	// motion) and refreshes it underneath.
+	const seen = lastView<VideoHistoryEntry[]>('history');
+	const rise = !seen;
+	let entries = $state<VideoHistoryEntry[]>(seen ?? []);
+	let loading = $state(!seen);
 	let failed = $state(false);
 	let clearing = $state(false);
 
@@ -31,11 +36,16 @@
 			entries = (await api.getVideoHistory(HISTORY_LIMIT)).items;
 			failed = false;
 		} catch {
-			failed = true;
+			// A failed refresh keeps the list already on screen.
+			if (!seen) failed = true;
 		} finally {
 			loading = false;
 		}
 	}
+
+	$effect(() => {
+		if (!loading && !failed) keepView('history', entries);
+	});
 
 	function progress(entry: VideoHistoryEntry): number | null {
 		if (entry.completed) return 1;
@@ -109,7 +119,7 @@
 				<div class="video-grid">
 					{#each day.entries as entry, index (entry.video.tidal_id)}
 						{@const done = progress(entry)}
-						<div class="history-card rise-in-card" style={`--rise-index: ${index % 24}`}>
+						<div class="history-card" class:rise-in-card={rise} style={`--rise-index: ${index % 24}`}>
 							<VideoCard video={entry.video} onSelect={(item) => !('id' in item) && play(item)} />
 							{#if done !== null}
 								<div class="progress" aria-label={entry.completed ? 'Watched to the end' : `Watched ${Math.round(done * 100)}%`}>

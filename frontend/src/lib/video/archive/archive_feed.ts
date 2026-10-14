@@ -58,6 +58,9 @@ export interface ArchiveFeedOptions {
 	onChange: (state: FeedState) => void;
 	pageSize?: number;
 	debounceMs?: number;
+	/** A first page kept from an earlier visit: shown at once, then asked
+	 *  again quietly (no refreshing state) on the first request for it. */
+	seed?: FeedState | null;
 }
 
 export interface ArchiveFeed {
@@ -101,7 +104,9 @@ export function uniqueSongs(items: readonly ArchiveSong[]): ArchiveSong[] {
 export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 	const pageSize = options.pageSize ?? 60;
 	const debounceMs = options.debounceMs ?? 220;
-	let state: FeedState = { ...EMPTY_FEED };
+	let state: FeedState =
+		options.seed?.phase === 'ready' ? { ...options.seed, loadingMore: false, loadingEarlier: false } : { ...EMPTY_FEED };
+	let seeded = state.phase === 'ready';
 	let lenses: ArchiveLenses | null = null;
 	let seq = 0;
 	let controller: AbortController | null = null;
@@ -120,7 +125,7 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 		controller = null;
 	}
 
-	async function runFirstPage(target: ArchiveLenses, mySeq: number) {
+	async function runFirstPage(target: ArchiveLenses, mySeq: number, quiet = false) {
 		timer = null;
 		const ctrl = new AbortController();
 		controller = ctrl;
@@ -132,6 +137,12 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 			// answer then means "not catalogued", not "no matches".
 			if (response.building && response.total === 0) {
 				set({ phase: 'unavailable', loadingMore: false, error: null });
+				return;
+			}
+			// A quiet check of a kept page that the listener has since scrolled
+			// on from only updates the counts, never the tiles under them.
+			if (quiet && (state.base !== 0 || state.items.length > pageSize)) {
+				set({ total: response.total, facets: response.facets });
 				return;
 			}
 			set({
@@ -175,6 +186,14 @@ export function createArchiveFeed(options: ArchiveFeedOptions): ArchiveFeed {
 		request(target, opts = {}) {
 			if (disposed) return;
 			const key = lensKey(target);
+			if (seeded) {
+				seeded = false;
+				if (key === state.key) {
+					lenses = target;
+					void runFirstPage(target, ++seq, true);
+					return;
+				}
+			}
 			const failed = state.phase === 'error' || state.phase === 'unavailable';
 			if (key === state.key && state.phase !== 'idle' && !failed) return;
 			// The very first ask has nothing on screen to protect: no debounce.

@@ -17,7 +17,9 @@
 		slot: LiveSlot;
 		onAir?: boolean;
 		busy?: boolean;
-		rise?: number;
+		/** Its place in the entry cascade; null when the dial is shown again
+		 *  from the kept lineup, which does not replay the entrance. */
+		rise?: number | null;
 		ontune: (channel: VideoChannel) => void;
 	} = $props();
 
@@ -47,10 +49,11 @@
 </script>
 
 <article
-	class="card rise-in-card"
+	class="card"
+	class:rise-in-card={rise !== null}
 	class:on-air={onAir}
 	style:--ch-hue={channelHue(channel)}
-	style:--rise-index={rise}
+	style:--rise-index={rise ?? 0}
 	aria-busy={busy}
 	aria-label={`Channel ${channel.no}, ${channel.title}`}
 >

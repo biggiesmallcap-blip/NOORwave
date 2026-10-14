@@ -14,6 +14,7 @@
 	import {
 		activeLensCount,
 		clearLenses,
+		lensKey,
 		lensSummary,
 		lensesToSearch,
 		parseLenses,
@@ -21,6 +22,7 @@
 	} from '$lib/video/archive/lenses';
 	import { playFromList } from '$lib/video/archive/play';
 	import { gridColumns } from '$lib/video/related_feed';
+	import { keepView, lastView } from '$lib/video/view_cache';
 
 	// Archive: find one thing. Lenses over every song in the catalog (one
 	// tile per song, its best cut on the face), with live counts on each lens.
@@ -36,13 +38,22 @@
 	const BUILD_POLL_MS = 20_000;
 	const BUILD_POLL_LIMIT = 15;
 
-	let feedState = $state<FeedState>(EMPTY_FEED);
+	// Back on the Archive with the same lenses: the last first page shows at
+	// once, still (no entry motion), and is checked quietly underneath.
+	const kept = lastView<FeedState>('archive');
+	const seed = kept && kept.key === lensKey(parseLenses(page.url.searchParams)) ? kept : null;
+	let feedState = $state<FeedState>(seed ?? EMPTY_FEED);
 	const feed = createArchiveFeed({
 		fetch: (query, signal) => api.getVideoArchive(query, signal),
-		onChange: (next) => (feedState = next),
+		onChange: (next) => {
+			feedState = next;
+			if (next.phase === 'ready' && next.base === 0) keepView('archive', { ...next, items: next.items.slice(0, PAGE_SIZE) });
+		},
 		pageSize: PAGE_SIZE,
 		debounceMs: 220,
+		seed,
 	});
+	let still = $derived(seed !== null && feedState.key === seed.key);
 
 	let lenses = $derived(parseLenses(page.url.searchParams));
 	let items = $derived(feedState.items);
@@ -434,7 +445,7 @@
 	{:else}
 		<div class="results" class:railed={showRail}>
 			<div class="list">
-				<div class="grid" class:dimmed={refreshing} bind:this={gridEl}>
+				<div class="grid" class:dimmed={refreshing} class:still bind:this={gridEl}>
 					{#each Array(above) as _, i (i)}
 						<div class="tile-skeleton placeholder-above" aria-hidden="true">
 							<div class="sk-art"></div>
@@ -640,6 +651,12 @@
 
 	.grid > :global(*) {
 		min-width: 0;
+	}
+
+	/* A kept page shown again does not replay its entrance; pages loaded
+	   after it still rise in. */
+	.grid.still > .rise-in-card:nth-child(-n + 60) {
+		animation: none;
 	}
 
 	/* Refresh: keep the old results at 55 percent under a 2px bar. */

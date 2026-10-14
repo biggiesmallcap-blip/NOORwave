@@ -16,6 +16,7 @@
 		seenLabel,
 		steerAge,
 	} from '$lib/video/archive/logbook';
+	import { keepView, lastView } from '$lib/video/view_cache';
 
 	// Logbook: yours. The three ways back to what you have touched (Liked,
 	// Saved, History), the More and Less like this presses On Air still
@@ -24,14 +25,30 @@
 	// badges, no streaks. Sections open like On Air's, in the titles' serif.
 
 	const SCENES_SHOWN = 24;
+	/** A first visit waits this long for its answers before showing what it
+	 *  has (skeletons where the rest will go). */
+	const REVEAL_MS = 150;
 
-	let census = $state<VideoCensus | null>(null);
-	let censusState = $state<'loading' | 'ready' | 'unavailable'>('loading');
-	let saved = $state<TidalSearchVideo[] | null>(null);
-	let lastWatched = $state<VideoHistoryEntry | null>(null);
-	let historyLoaded = $state(false);
+	type LogbookView = {
+		census: VideoCensus | null;
+		saved: TidalSearchVideo[] | null;
+		steers: VideoSteer[];
+		lastWatched: VideoHistoryEntry | null;
+	};
+	const seen = lastView<LogbookView>('logbook');
+
+	let census = $state<VideoCensus | null>(seen?.census ?? null);
+	let censusState = $state<'loading' | 'ready' | 'unavailable'>(seen ? (seen.census ? 'ready' : 'unavailable') : 'loading');
+	let saved = $state<TidalSearchVideo[] | null>(seen?.saved ?? null);
+	let lastWatched = $state<VideoHistoryEntry | null>(seen?.lastWatched ?? null);
+	let historyLoaded = $state(Boolean(seen));
 	let allScenes = $state(false);
-	let steers = $state<VideoSteer[]>([]);
+	let steers = $state<VideoSteer[]>(seen?.steers ?? []);
+	// A first visit holds the page for its first answers (a few ms with the
+	// census cached on the server), then rises in section by section. A
+	// revisit shows the last answers at once, still, and refreshes them.
+	let shown = $state(Boolean(seen));
+	const rise = !seen;
 
 	let figures = $derived(census ? censusFigures(census) : []);
 	let coverage = $derived(census ? coverageFigures(census) : []);
@@ -49,18 +66,32 @@
 			census = await api.getVideoCensus();
 			censusState = 'ready';
 		} catch {
-			censusState = 'unavailable';
+			// A refresh that fails keeps the census already on screen.
+			if (!census) censusState = 'unavailable';
 		}
 	}
 
 	onMount(() => {
-		void loadCensus();
-		api.getSavedVideos().then((res) => (saved = res.items)).catch(() => {});
-		api.getVideoSteers().then((res) => (steers = res.items)).catch(() => {});
-		api.getVideoHistory(1)
-			.then((res) => (lastWatched = res.items[0] ?? null))
-			.catch(() => {})
-			.finally(() => (historyLoaded = true));
+		const reveal = setTimeout(() => (shown = true), REVEAL_MS);
+		void Promise.allSettled([
+			loadCensus(),
+			api.getSavedVideos().then((res) => (saved = res.items)).catch(() => {}),
+			api.getVideoSteers().then((res) => (steers = res.items)).catch(() => {}),
+			api.getVideoHistory(1)
+				.then((res) => (lastWatched = res.items[0] ?? null))
+				.catch(() => {})
+				.finally(() => (historyLoaded = true)),
+		]).then(() => {
+			clearTimeout(reveal);
+			shown = true;
+		});
+		return () => clearTimeout(reveal);
+	});
+
+	// Whatever is on screen is what the next visit opens with.
+	$effect(() => {
+		if (!historyLoaded || censusState === 'loading') return;
+		keepView<LogbookView>('logbook', { census, saved, steers, lastWatched });
 	});
 
 	/** Undo a remembered press; it comes back if the server says no. */
@@ -97,8 +128,9 @@
 </svelte:head>
 
 <div class="logbook-frame">
+{#if shown}
 <div class="logbook">
-	<section class="entries" aria-label="Your videos">
+	<section class="entries" class:rise-in-shelf={rise} aria-label="Your videos" style="--rise-index: 0">
 		<a class="entry" href="/videos/liked">
 			<span class="entry-art liked" aria-hidden="true">
 				<svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 20.5s-7.5-4.6-7.5-10.1A4.4 4.4 0 0 1 12 7.6a4.4 4.4 0 0 1 7.5 2.8c0 5.5-7.5 10.1-7.5 10.1z" fill="currentColor" /></svg>
@@ -155,7 +187,7 @@
 	</section>
 
 	{#if steers.length > 0}
-		<section class="steers" aria-labelledby="steers-title">
+		<section class="steers" class:rise-in-shelf={rise} aria-labelledby="steers-title" style="--rise-index: 1">
 			<header class="opener">
 				<h2 id="steers-title">Steering</h2>
 				<p>More and Less like this lean On Air a little, then fade within four weeks.</p>
@@ -185,7 +217,7 @@
 		</section>
 	{/if}
 
-	<section class="census" aria-labelledby="census-title">
+	<section class="census" class:rise-in-shelf={rise} aria-labelledby="census-title" style="--rise-index: 2">
 		<header class="opener">
 			<h2 id="census-title">The catalog</h2>
 			<p>Everything video discovery has found, sorted into songs, scenes and concerts.</p>
@@ -253,7 +285,7 @@
 	</section>
 
 	{#if sceneRows.length > 0}
-		<section class="scenes" aria-labelledby="scenes-title">
+		<section class="scenes" class:rise-in-shelf={rise} aria-labelledby="scenes-title" style="--rise-index: 3">
 			<header class="opener">
 				<h2 id="scenes-title">Scenes</h2>
 				<p>{visited} of {sceneRows.length} visited. Each bar compares a scene with the one you have seen most.</p>
@@ -282,6 +314,7 @@
 		</section>
 	{/if}
 </div>
+{/if}
 </div>
 
 <style>

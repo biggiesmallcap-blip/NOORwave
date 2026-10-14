@@ -59,6 +59,9 @@
 	let lastFetch = 0;
 
 	let lineup = $derived($channelLineup);
+	// The dial rises in when its lineup arrives during this visit; shown again
+	// from the kept lineup it is simply there (STYLING.md, entry motion).
+	const rise = !$channelLineup;
 	let channels = $derived(lineup?.data.channels ?? []);
 	let elapsed = $derived(lineup ? Math.max(0, ($airTick - lineup.fetchedAt) / 1000) : 0);
 	let slots = $derived(new Map(channels.map((channel) => [channel.id, liveSlot(channel, elapsed)])));
@@ -239,7 +242,7 @@
 					{#each tonight as channel, index (channel.id)}
 						{@const slot = slots.get(channel.id)}
 						{#if slot}
-							<ChannelCard {channel} {slot} onAir={onAirId === channel.id} busy={tuning === channel.id} rise={index} ontune={(picked) => void tune(picked)} />
+							<ChannelCard {channel} {slot} onAir={onAirId === channel.id} busy={tuning === channel.id} rise={rise ? index : null} ontune={(picked) => void tune(picked)} />
 						{/if}
 					{/each}
 				</div>
@@ -252,7 +255,7 @@
 				{#each grouped.main as channel, index (channel.id)}
 					{@const slot = slots.get(channel.id)}
 					{#if slot}
-						<ChannelRow {channel} {slot} onAir={onAirId === channel.id} busy={tuning === channel.id} rise={index % 12} ontune={(picked) => void tune(picked)} />
+						<ChannelRow {channel} {slot} onAir={onAirId === channel.id} busy={tuning === channel.id} rise={rise ? index % 12 : null} ontune={(picked) => void tune(picked)} />
 					{/if}
 				{/each}
 			</div>
@@ -262,7 +265,7 @@
 		</section>
 
 		{#if grouped.families.length > 0}
-			<section class="channels scenes" aria-labelledby="scenes-label">
+			<section class="channels scenes" class:rise-in-shelf={rise} aria-labelledby="scenes-label" style="--rise-index: 2">
 				<header class="opener">
 					<h3 id="scenes-label">Scenes</h3>
 					<p>{sceneCount} channels, one for every corner of the map.</p>

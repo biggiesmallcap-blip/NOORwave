@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { ArchiveQuery, ArchiveResponse, ArchiveSong } from '$lib/api/video_explore_types';
 import { createArchiveFeed, type FeedState } from './archive_feed';
-import { DEFAULT_LENSES } from './lenses';
+import { DEFAULT_LENSES, lensKey } from './lenses';
 
 function song(n: number): ArchiveSong {
 	return {
@@ -69,6 +69,38 @@ beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }));
 afterEach(() => vi.useRealTimers());
 
 describe('archive feed', () => {
+	test('a kept first page shows at once and is checked quietly', async () => {
+		const calls: Call[] = [];
+		const states: FeedState[] = [];
+		const seed: FeedState = {
+			phase: 'ready',
+			key: lensKey(DEFAULT_LENSES),
+			items: [song(1), song(2)],
+			total: 9,
+			facets: null,
+			loadingMore: false,
+			error: null,
+			base: 0,
+			jumps: [],
+			loadingEarlier: false,
+		};
+		const feed = createArchiveFeed({
+			pageSize: 2,
+			seed,
+			onChange: (state) => states.push(state),
+			fetch: (query, signal) => new Promise<ArchiveResponse>((resolve, reject) => calls.push({ query, signal, resolve, reject })),
+		});
+		expect(feed.state.items.map((item) => item.title)).toEqual(['Song 1', 'Song 2']);
+		feed.request(DEFAULT_LENSES);
+		expect(calls).toHaveLength(1);
+		// No refreshing or loading state while it checks.
+		expect(states.every((state) => state.phase === 'ready')).toBe(true);
+		calls[0].resolve(response([song(3), song(1)], 12));
+		await flush();
+		expect(feed.state.items.map((item) => item.title)).toEqual(['Song 3', 'Song 1']);
+		expect(feed.state.total).toBe(12);
+	});
+
 	test('the first ask goes out at once; later asks are debounced', async () => {
 		const { feed, calls } = harness();
 		feed.request(DEFAULT_LENSES);

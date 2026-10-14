@@ -387,6 +387,10 @@
 	/* Exit is shorter and accelerates away; press is the quick scale-down. */
 	--motion-exit: 140ms cubic-bezier(0.4, 0, 1, 1);
 	--motion-press: 90ms cubic-bezier(0.25, 0.8, 0.25, 1);
+	/* Entry: content arriving. A long, soft ease-out: most of the move is
+	   done in the first 150 ms, the rest settles, so it reads as quick but
+	   never snaps. Only the rise-in classes use it. */
+	--motion-enter: 480ms cubic-bezier(0.16, 1, 0.3, 1);
 	/* Bare curves, only for keyframes and WAAPI where a token cannot be used. */
 	--ease-standard: cubic-bezier(0.25, 0.8, 0.25, 1);
 	--ease-exit: cubic-bezier(0.4, 0, 1, 1);
@@ -1172,7 +1176,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
    Callers keep route-specific layout and hover transitions; this class owns
    only the entrance animation. */
 .rise-in-shelf {
-	animation: rise-in-shelf var(--motion-slow) both;
+	animation: rise-in-shelf var(--motion-enter) both;
 	/* Capped, because the delay is dead time where the element is invisible.
 	   Home stacks sixteen sections; uncapped, the last one would sit blank for
 	   over a second. The cap keeps the cascade legible near the top of the page
@@ -1181,17 +1185,19 @@ input[type='checkbox'] { accent-color: var(--accent); }
 }
 
 .rise-in-card {
-	animation: rise-in-card var(--motion-slow) backwards;
+	animation: rise-in-card var(--motion-enter) backwards;
 	animation-delay: calc(min(var(--rise-index, 0), 11) * 22ms);
 }
 
 @keyframes rise-in-shelf {
-	from { opacity: 0; transform: translateY(10px); }
+	from { opacity: 0; transform: translateY(12px); }
 	to   { opacity: 1; transform: none; }
 }
 
+/* Cards also settle from a hair smaller, so a grid arriving reads as the
+   pictures landing rather than a sheet sliding up. */
 @keyframes rise-in-card {
-	from { opacity: 0; transform: translateY(8px); }
+	from { opacity: 0; transform: translateY(10px) scale(0.985); }
 	to   { opacity: 1; transform: none; }
 }
 

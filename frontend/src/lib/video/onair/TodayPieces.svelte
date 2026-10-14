@@ -24,6 +24,8 @@
 	// is from, and three videos to start with.
 
 	let today = $state<VideoTodayResponse | null>(cached);
+	// Pieces that arrive during this visit rise in; kept ones are just there.
+	const rise = !cached;
 	let failed = $state(false);
 
 	let dateLine = $derived.by(() => {
@@ -71,7 +73,7 @@
 </script>
 
 {#if today && today.pieces.length > 0}
-	<section class="today" aria-labelledby="today-label">
+	<section class="today" class:rise-in-shelf={rise} aria-labelledby="today-label" style="--rise-index: 3">
 		<header class="opener">
 			<h3 id="today-label">Today</h3>
 			<p>{dateLine}{dateLine ? '. ' : ''}Three artists, new each day.</p>
@@ -205,7 +207,7 @@
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
-		transition: transform 600ms var(--ease-standard);
+		transition: transform var(--motion-slow);
 	}
 	.picture:hover :global(img) {
 		transform: scale(1.02);
