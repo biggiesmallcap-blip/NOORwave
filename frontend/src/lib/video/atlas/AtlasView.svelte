@@ -66,7 +66,6 @@
 	let names = $derived(loaded.names);
 	let nameIndex = $derived(buildNameIndex(data, names));
 	let query = $derived($videoSectionQuery.trim());
-	let hits = $derived<AtlasSearchHit[]>(query ? searchArtists(nameIndex, data, query, 8) : []);
 
 	let stageEl = $state<HTMLDivElement>();
 	let canvasEl = $state<HTMLCanvasElement>();
@@ -96,9 +95,12 @@
 	let picking = $state<'from' | null>(null);
 	// Scenes come up by name, channel number or genre; not while a journey
 	// start is being picked (that takes an artist).
-	let sceneHits = $derived<AtlasSceneHit[]>(query && !picking ? searchScenes(data.scenes, query, 4) : []);
-	/** Scenes lead when their best match is at least as close as the artists'. */
-	let scenesFirst = $derived(sceneHits.length > 0 && (hits.length === 0 || sceneHits[0].tier <= hits[0].tier));
+	let sceneHits = $derived<AtlasSceneHit[]>(query && !picking ? searchScenes(data.scenes, query, 6) : []);
+	// Twelve lines in all: the artists fill what the scenes leave.
+	let hits = $derived<AtlasSearchHit[]>(query ? searchArtists(nameIndex, data, query, Math.max(6, 12 - sceneHits.length)) : []);
+	/** Scenes lead unless an artist is named exactly (and no scene is):
+	 *  a word that names or tags scenes is most likely a place on the map. */
+	let scenesFirst = $derived(sceneHits.length > 0 && (hits.length === 0 || hits[0].tier > 0 || sceneHits[0].tier === 0));
 	let anyHits = $derived(hits.length + sceneHits.length > 0);
 	/** The journey playing, followed on the map while its label is what
 	 *  the session says is playing. */

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { decodeAtlas, decodeNames } from './decode';
 import { artistRankQuota, planLabels, sceneLabelAlpha, sceneLift, zoomLevel, type LabelPlanInput } from './labels';
-import { atlasUrl, parseAtlasParams, sceneArchiveUrl, sceneChannelUrl } from './links';
+import { atlasUrl, parseAtlasParams, sceneArchiveUrl } from './links';
 import { SpatialGrid, sceneAt } from './spatial';
 import { ATLAS_SLICE, NAMES_SLICE } from './atlas_fixture.test-data';
 
@@ -168,7 +168,6 @@ describe('atlas links', () => {
 	});
 
 	test('scene hand-offs', () => {
-		expect(sceneChannelUrl(4)).toBe('/videos?channel=scene:4');
 		expect(sceneArchiveUrl(4)).toBe('/videos/archive?scene=4');
 	});
 });

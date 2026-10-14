@@ -60,7 +60,8 @@ describe('atlas route contract', () => {
 	});
 
 	test('scene card hands off to On Air and the Archive and plays its sample', () => {
-		expect(sceneCard).toContain('sceneChannelUrl(scene.id)');
+		// Tune in plays right from the card: no stop on the dial first.
+		expect(sceneCard).toContain('await tuneChannel({ id: `scene:${scene.id}`, title: scene.name });');
 		expect(sceneCard).toContain('{#if scene.channel_no != null}');
 		expect(sceneCard).toContain('sceneArchiveUrl(scene.id)');
 		expect(sceneCard).toContain('playAtlasQueue(video, card?.sample ?? [video], scene.name)');

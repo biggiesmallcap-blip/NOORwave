@@ -44,11 +44,6 @@ export function parseAtlasParams(search: URLSearchParams): { artist: number | nu
 	};
 }
 
-/** Links the scene card hands off to other tabs. */
-export function sceneChannelUrl(sceneId: number): string {
-	return `/videos?channel=scene:${sceneId}`;
-}
-
 export function sceneArchiveUrl(sceneId: number): string {
 	return `/videos/archive?scene=${sceneId}`;
 }

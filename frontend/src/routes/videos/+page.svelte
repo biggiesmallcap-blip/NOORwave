@@ -142,7 +142,7 @@
 		void load();
 	}
 
-	/** Deep links: /videos?channel= (the Atlas's "Tune in") tunes that
+	/** Deep links: /videos?channel= (a shared or saved link) tunes that
 	 *  channel. The old ones still land here: ?videoId= moves to the watch
 	 *  page, ?mixId= / ?playlistId= play the collection. The address is cleaned
 	 *  first so Back from the watch page returns to the dial instead of

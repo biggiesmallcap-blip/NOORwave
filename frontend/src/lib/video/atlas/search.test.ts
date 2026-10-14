@@ -41,11 +41,24 @@ describe('finding scenes on the Atlas', () => {
 		expect(hits[0].tag).toBeNull();
 	});
 
-	test('by genre, saying which genre matched', () => {
+	test('by genre, a scene named with it first, then the ones tagged with it', () => {
 		const hits = searchScenes(scenes, 'house');
-		expect(hits.map((hit) => hit.name)).toEqual(['Dance Hits', 'Deep House']);
-		expect(hits[0].tag).toBe('house');
-		expect(hits[0].channelNo).toBe(12);
+		expect(hits.map((hit) => hit.name)).toEqual(['Deep House', 'Dance Hits']);
+		expect(hits[0].tag).toBeNull();
+		expect(hits[1].tag).toBe('house');
+		expect(hits[1].channelNo).toBe(12);
+	});
+
+	test('"rock" leads with the rock scenes, not the ones with a little rock', () => {
+		const rock = [
+			scene(10, 'Nashville', ['country', 'rock'], 21, 5000),
+			scene(11, 'Classic Rock', ['classic rock', 'rock'], 30, 2000),
+			scene(12, 'Alt Rock and Grunge', ['grunge', 'rock'], 31, 1100),
+			scene(13, 'Shamrock Folk', ['folk'], 40, 900),
+		];
+		const hits = searchScenes(rock, 'rock');
+		expect(hits.map((hit) => hit.name)).toEqual(['Classic Rock', 'Alt Rock and Grunge', 'Nashville', 'Shamrock Folk']);
+		expect(hits[2].tag).toBe('rock');
 	});
 
 	test('nothing for an empty query', () => {

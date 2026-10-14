@@ -28,10 +28,15 @@ export interface AtlasSceneHit {
 
 const CHANNEL_QUERY = /^(?:ch(?:annel)?\.?\s*)?(\d{1,3})$/;
 
-/** Scenes by channel number ("58", "ch 58"), name, or genre ("house"):
- *  exact first, then prefix, word start and anywhere; bigger scenes
- *  break ties. */
-export function searchScenes(scenes: readonly AtlasScene[], query: string, limit = 4): AtlasSceneHit[] {
+/** Scenes by channel number ("58", "ch 58"), name, or genre ("rock").
+ *  A scene named with the word ranks above one only tagged with it, so
+ *  "rock" leads with Classic Rock and Alt Rock and Grunge before the scenes
+ *  that merely include some rock; bigger scenes break ties.
+ *
+ *  Tiers: 0 exact name or channel number, 1 the word in the name, 2 an
+ *  exact genre tag, 3 a genre tag starting with it, 4 inside a name, 5
+ *  inside a tag. */
+export function searchScenes(scenes: readonly AtlasScene[], query: string, limit = 6): AtlasSceneHit[] {
 	const q = foldName(query);
 	if (!q) return [];
 	const channel = CHANNEL_QUERY.exec(q);
@@ -40,14 +45,15 @@ export function searchScenes(scenes: readonly AtlasScene[], query: string, limit
 	scenes.forEach((scene, index) => {
 		let tier = -1;
 		let tag: string | null = null;
+		const better = (next: number) => next >= 0 && (tier < 0 || next < tier);
 		if (wanted !== null && scene.channel_no === wanted) tier = 0;
 		const name = foldName(scene.name);
-		const byName = name === q ? 0 : name.startsWith(q) ? 1 : name.includes(` ${q}`) ? 2 : name.includes(q) ? 3 : -1;
-		if (byName >= 0 && (tier < 0 || byName < tier)) tier = byName;
+		const byName = name === q ? 0 : startsWord(name, q) ? 1 : name.includes(q) ? 4 : -1;
+		if (better(byName)) tier = byName;
 		for (const raw of scene.tags ?? []) {
 			const folded = foldName(raw);
-			const byTag = folded === q ? 1 : folded.startsWith(q) ? 2 : q.length >= 3 && folded.includes(q) ? 3 : -1;
-			if (byTag >= 0 && (tier < 0 || byTag < tier)) {
+			const byTag = folded === q ? 2 : startsWord(folded, q) ? 3 : q.length >= 3 && folded.includes(q) ? 5 : -1;
+			if (better(byTag)) {
 				tier = byTag;
 				tag = raw;
 			}
@@ -57,6 +63,12 @@ export function searchScenes(scenes: readonly AtlasScene[], query: string, limit
 	});
 	scored.sort((a, b) => a.hit.tier - b.hit.tier || b.videos - a.videos);
 	return scored.slice(0, limit).map((s) => s.hit);
+}
+
+/** Whether `q` starts a word of `text` ("rock" in "alt rock and grunge",
+ *  not in "shamrock"). */
+function startsWord(text: string, q: string): boolean {
+	return text.startsWith(q) || text.includes(` ${q}`) || text.includes(`-${q}`);
 }
 
 export function foldName(value: string): string {

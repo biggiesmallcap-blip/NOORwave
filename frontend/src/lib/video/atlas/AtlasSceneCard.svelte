@@ -9,8 +9,10 @@
 	import { buildArtistMenu } from '$lib/player/artist_menu';
 	import { buildVideoMenu } from '$lib/player/video_menu';
 	import { openContextMenu } from '$lib/stores/context_menu';
+	import { noteVideoLaunch } from '$lib/video/launch';
+	import { tuneChannel } from '$lib/video/onair/tune';
 	import { hoursWords, listWords, sceneSeenLine } from './lede';
-	import { sceneArchiveUrl, sceneChannelUrl } from './links';
+	import { sceneArchiveUrl } from './links';
 	import { formatRuntime, playAtlasQueue } from './play';
 	import { formatCount } from './style';
 
@@ -56,6 +58,21 @@
 	function play(video: ExploreVideo) {
 		void playAtlasQueue(video, card?.sample ?? [video], scene.name);
 	}
+
+	// Tune in right here: the channel starts where it is now and the watch
+	// page opens on it, gliding from the card's picture. No stop on the dial.
+	let tuning = $state(false);
+
+	async function tuneIn(button: HTMLElement) {
+		if (tuning || scene.channel_no == null) return;
+		tuning = true;
+		noteVideoLaunch(button.closest('.card')?.querySelector('.hero-pic') ?? button);
+		try {
+			await tuneChannel({ id: `scene:${scene.id}`, title: scene.name });
+		} finally {
+			tuning = false;
+		}
+	}
 </script>
 
 <article class="card" aria-label={`Scene: ${scene.name}`}>
@@ -92,10 +109,10 @@
 
 	<div class="actions">
 		{#if scene.channel_no != null}
-			<a class="btn btn-primary" href={sceneChannelUrl(scene.id)}>
+			<button type="button" class="btn btn-primary" disabled={tuning} onclick={(event) => void tuneIn(event.currentTarget)}>
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h16v11H4zM8 4l4 5 4-5" /></svg>
 				Tune in
-			</a>
+			</button>
 		{/if}
 		<a class="btn stage-secondary" href={sceneArchiveUrl(scene.id)}>Open in Archive</a>
 	</div>
