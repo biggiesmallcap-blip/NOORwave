@@ -102,8 +102,13 @@ const initialState: VideoSessionState = {
 	startAtS: 0,
 };
 
-function findCurrentIndex(queue: VideoSessionItem[], current: VideoSessionItem | null): number {
+/** Where `current` sits in `queue`. A schedule may play a video twice
+ *  ([A, B, C, B, C]: Spotlight cycles an artist's songs), so a known
+ *  position wins: `at` while it still holds `current`, else the first
+ *  occurrence. */
+function findCurrentIndex(queue: VideoSessionItem[], current: VideoSessionItem | null, at = -1): number {
 	if (!current) return -1;
+	if (at >= 0 && queue[at]?.tidal_id === current.tidal_id) return at;
 	return queue.findIndex((item) => item.tidal_id === current.tidal_id);
 }
 
@@ -121,10 +126,16 @@ function radioStartQueue(item: VideoSessionItem): VideoSessionItem[] {
 
 const session = writable<VideoSessionState>(initialState);
 
-function update(patch: Partial<VideoSessionState>) {
+/** Bumped by every tune, pick and Stop: an answer that arrives after a
+ *  newer command is stale. */
+let playCommand = 0;
+
+/** Patch the session. The cursor stays where it was while that still holds
+ *  the current video, or moves to `at` (a step through the queue). */
+function update(patch: Partial<VideoSessionState>, at?: number) {
 	session.update((state) => {
 		const next = { ...state, ...patch };
-		next.currentIndex = findCurrentIndex(next.queue, next.current);
+		next.currentIndex = findCurrentIndex(next.queue, next.current, at ?? state.currentIndex);
 		next.active = next.current !== null;
 		return next;
 	});
@@ -229,7 +240,7 @@ export function playVideoNext(item: VideoSessionItem): boolean {
 	if (state.current?.tidal_id === item.tidal_id) return false;
 	const queued = state.queue.find(video => video.tidal_id === item.tidal_id);
 	const queue = queueWithCurrent(state).filter(video => video.tidal_id !== item.tidal_id);
-	queue.splice(findCurrentIndex(queue, state.current) + 1, 0, queued ?? item);
+	queue.splice(findCurrentIndex(queue, state.current, state.currentIndex) + 1, 0, queued ?? item);
 	update({ queue, ...(state.source === 'none' ? { source: 'direct', sourceLabel: 'Video queue' } : {}) });
 	return true;
 }
@@ -390,7 +401,13 @@ function recordWatch(item: VideoSessionItem, startMs = 0) {
 export async function playVideo(
 	item: VideoSessionItem,
 	ctx: VideoPlayContext,
-	opts: { preloaded?: PreloadedVideoStream | null; step?: boolean; startAtS?: number } = {}
+	opts: {
+		preloaded?: PreloadedVideoStream | null;
+		step?: boolean;
+		startAtS?: number;
+		/** Its position in the queue, for a step: the queue may hold it twice. */
+		index?: number;
+	} = {}
 ): Promise<boolean> {
 	// Re-selecting the video that is already playing (returning to /videos with
 	// its ?videoId= still in the URL, a stale jump request, clicking its own
@@ -442,6 +459,9 @@ export async function playVideo(
 	}
 
 	if (state.current && state.current.tidal_id !== item.tidal_id) finishWatch(false);
+	// A pick (not a step through the queue) is the newest command: a tune
+	// still waiting for its schedule gives way to it.
+	if (!opts.step) playCommand += 1;
 	const seq = ++streamSeq;
 	// Picking something new always means "show it": the video pages scroll
 	// their stage back into view. Queue steps (autoplay, next, previous) keep
@@ -464,7 +484,7 @@ export async function playVideo(
 		streamExpiresAt: opts.preloaded?.expiresAt ?? null,
 		startAtS: opts.startAtS && opts.startAtS > 0 ? opts.startAtS : 0,
 		positionMs: opts.startAtS && opts.startAtS > 0 ? Math.round(opts.startAtS * 1000) : 0,
-	});
+	}, opts.index);
 
 	try {
 		let url = opts.preloaded?.url ?? null;
@@ -628,7 +648,11 @@ export function channelSourceLabel(channel: Pick<VideoChannel, 'no' | 'title'>):
  *  the schedule is queued and refills come from the channel. Zaps and holds
  *  are recorded by the usual watch history. */
 export async function playVideoChannel(id: string, opts: { explore?: ExploreMode } = {}): Promise<boolean> {
+	// The schedule is fetched before playback starts: a later tune, a pick
+	// or Stop while it loads makes this answer stale, and it must not play.
+	const command = ++playCommand;
 	const tune = await api.tuneVideoChannel(id, opts.explore ? { explore: opts.explore } : {});
+	if (command !== playCommand) return false;
 	const scheduled = tune.video;
 	const start = tuneStart(tune.offset_s, scheduledDuration(tune.channel, scheduled), get(tuneMode));
 	const rest = tune.queue.filter((item) => item.tidal_id !== scheduled.tidal_id);
@@ -649,7 +673,7 @@ export async function playVideoChannel(id: string, opts: { explore?: ExploreMode
 		channelId: tune.channel.id || id,
 		channelNonce: Math.random().toString(36).slice(2),
 		channel: tune.channel,
-	}, { startAtS });
+	}, { startAtS, index: 0 });
 }
 
 /** "More / less like this" for an artist while a channel is on air. Both go
@@ -761,7 +785,7 @@ async function refillUntilNext(currentId: number | undefined): Promise<VideoSess
 export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | null } = {}): Promise<boolean> {
 	const state = get(session);
 	if (!state.autoplay) return false;
-	const index = findCurrentIndex(state.queue, state.current);
+	const index = findCurrentIndex(state.queue, state.current, state.currentIndex);
 	if (index < 0) return false;
 	const next = state.queue[index + 1];
 	if (!next) {
@@ -775,7 +799,7 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 			if (replenished) return playVideo(replenished, {
 				queue: refreshed.queue, source: refreshed.source,
 				sourceLabel: refreshed.sourceLabel, autoplay: true, continuous: true,
-			}, { step: true });
+			}, { step: true, index: refreshed.currentIndex + 1 });
 		}
 		update({ playing: false });
 		return false;
@@ -786,7 +810,7 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 		sourceLabel: state.sourceLabel,
 		autoplay: true,
 		continuous: state.continuous,
-	}, { ...opts, step: true });
+	}, { ...opts, step: true, index: index + 1 });
 }
 
 /** Return to a video already played in this session. Keeps the queue context. */
@@ -797,7 +821,7 @@ export async function previousVideo(): Promise<boolean> {
 	return playVideo(previous, {
 		queue: state.queue, source: state.source, sourceLabel: state.sourceLabel,
 		autoplay: state.autoplay, continuous: state.continuous,
-	}, { step: true });
+	}, { step: true, index: state.currentIndex - 1 });
 }
 
 /** Skip to the next queued video regardless of the autoplay preference. */
@@ -814,11 +838,12 @@ export async function nextVideo(): Promise<boolean> {
 	return playVideo(next, {
 		queue: refreshed.queue, source: refreshed.source, sourceLabel: refreshed.sourceLabel,
 		autoplay: refreshed.autoplay, continuous: refreshed.continuous,
-	}, { step: true });
+	}, { step: true, index: refreshed.currentIndex + 1 });
 }
 
 /** Stop the video session entirely and free the dock. */
 export function clearVideoSession() {
+	playCommand += 1;
 	finishWatch(false);
 	watch = null;
 	streamSeq += 1;
