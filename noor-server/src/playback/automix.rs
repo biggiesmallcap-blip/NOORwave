@@ -749,23 +749,37 @@ fn ranked_external_picks(
     }
     let mut weighted_seeds = weights.into_iter().collect::<Vec<_>>();
     weighted_seeds.sort_by_key(|(id, _)| *id);
-    let rows = queries::get_sighted_external_candidates(
-        conn,
-        &weighted_seeds,
-        EXTERNAL_MIN_SCORE,
-        (limit.max(1) * 4).max(12) as i64,
-    )?;
     // Songs the listener already saved or liked are not new to them. Hidden
     // content, Not for me, recent plays and anything already queued (any
     // version) stay out too; hidden rows never reach the insert, where they
-    // would bail.
+    // would bail. These filters can empty a whole page of the best links, so
+    // read on page by page until enough pass or the links run out.
+    let page = (limit.max(1) * 4).max(12);
     let queue_items = queue::load_queue(conn)?;
     let mut gate = CandidateGate::load(conn, &queue_items, None);
-    let candidates = rows
-        .into_iter()
-        .filter(|row| !in_saved_library(conn, row.tidal_id))
-        .filter(|row| gate.admit_candidate(None, row.tidal_id, None, &row.artist_name, &row.title))
-        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let mut offset = 0;
+    loop {
+        let rows = queries::get_sighted_external_candidates_page(
+            conn,
+            &weighted_seeds,
+            EXTERNAL_MIN_SCORE,
+            page as i64,
+            offset as i64,
+        )?;
+        let fetched = rows.len();
+        candidates.extend(
+            rows.into_iter()
+                .filter(|row| !in_saved_library(conn, row.tidal_id))
+                .filter(|row| {
+                    gate.admit_candidate(None, row.tidal_id, None, &row.artist_name, &row.title)
+                }),
+        );
+        if candidates.len() >= page || fetched < page {
+            break;
+        }
+        offset += page;
+    }
 
     let generated = candidates
         .into_iter()

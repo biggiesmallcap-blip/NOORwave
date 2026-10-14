@@ -2180,11 +2180,23 @@ pub fn get_sighted_external_candidates(
     min_score: f64,
     limit: i64,
 ) -> Result<Vec<ExternalCandidateNeighborRow>> {
+    get_sighted_external_candidates_page(conn, weighted_seeds, min_score, limit, 0)
+}
+
+/// One page of `get_sighted_external_candidates`, skipping the best `offset`,
+/// for callers that filter rows afterwards and need to read further down.
+pub fn get_sighted_external_candidates_page(
+    conn: &Connection,
+    weighted_seeds: &[(i64, f64)],
+    min_score: f64,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ExternalCandidateNeighborRow>> {
     if weighted_seeds.is_empty() {
         return Ok(Vec::new());
     }
     let values = (0..weighted_seeds.len())
-        .map(|i| format!("(?{}, ?{})", i * 2 + 3, i * 2 + 4))
+        .map(|i| format!("(?{}, ?{})", i * 2 + 4, i * 2 + 5))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -2202,9 +2214,10 @@ pub fn get_sighted_external_candidates(
          GROUP BY c.id
          HAVING score >= ?1
          ORDER BY score DESC, c.id
-         LIMIT ?2"
+         LIMIT ?2 OFFSET ?3"
     );
-    let mut bound: Vec<rusqlite::types::Value> = vec![min_score.into(), limit.max(1).into()];
+    let mut bound: Vec<rusqlite::types::Value> =
+        vec![min_score.into(), limit.max(1).into(), offset.max(0).into()];
     for (seed_id, weight) in weighted_seeds {
         bound.push((*seed_id).into());
         bound.push((*weight).into());
@@ -2234,7 +2247,7 @@ pub fn get_sighted_external_candidates(
                     title,
                     artist_name,
                     duration_ms,
-                    rank: rank as i32 + 1,
+                    rank: (offset.max(0) as usize + rank) as i32 + 1,
                     score,
                     audio_score: 0.0,
                     metadata_score: 0.0,

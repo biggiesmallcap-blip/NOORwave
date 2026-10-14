@@ -3342,6 +3342,39 @@ fn include_new_skips_songs_already_saved_in_the_library() {
 }
 
 #[test]
+fn include_new_looks_past_a_shortlist_of_saved_songs() {
+    let conn = conn();
+    conn.execute(
+        "ALTER TABLE tracks ADD COLUMN is_library INTEGER DEFAULT 0",
+        [],
+    )
+    .unwrap();
+    include_new_queue(&conn, &["user"; 5]);
+    crate::playback::automix::set_weave_context(&conn, Some("library")).unwrap();
+    // Twelve saved songs outrank the only new one.
+    for n in 0..12 {
+        let id = 100 + n;
+        conn.execute(
+            "INSERT INTO tracks (id, title, artist_id, tidal_id, is_library)
+             VALUES (?1, ?2, 1, ?1, 1)",
+            params![id, format!("Saved {n}")],
+        )
+        .unwrap();
+        outside_song(&conn, id, &format!("Saved {n}"), &[1], 0.9);
+    }
+    outside_song(&conn, 99_800, "Only New", &[1], 0.5);
+
+    let queue = ensure_automix_queue_depth(&conn, 1, false).unwrap();
+
+    let new: Vec<&str> = queue
+        .iter()
+        .filter(|item| item.source == "automix-new")
+        .map(|item| item.track.title.as_str())
+        .collect();
+    assert_eq!(new, vec!["Only New"]);
+}
+
+#[test]
 fn include_new_tail_refill_leaves_new_songs_to_the_weave() {
     let conn = conn();
     include_new_queue(&conn, &["user"]);
