@@ -9,10 +9,26 @@ export type PaletteId = 'clay' | 'iris' | 'sunset' | 'verdant' | 'cosmos' | 'mon
 
 export type Rgb = [number, number, number];
 
+/**
+ * material: hand-made surfaces in app.css (Clay, Pure Black).
+ * dark: black-ground schemes; their dark grounds sit deeper than the rest.
+ * colour: the accent drives a tinted ground in both modes.
+ * light: tuned for light mode; their light grounds take a warmer tint.
+ */
+export type PaletteFamily = 'material' | 'dark' | 'colour' | 'light';
+
+export const PALETTE_FAMILIES: { id: PaletteFamily; label: string }[] = [
+	{ id: 'material', label: 'Material' },
+	{ id: 'dark', label: 'Dark' },
+	{ id: 'colour', label: 'Colour' },
+	{ id: 'light', label: 'Light' },
+];
+
 export interface Palette {
 	id: PaletteId;
 	label: string;
 	sublabel: string;
+	family: PaletteFamily;
 
 	// CSS custom properties written onto <html> when this palette is active.
 	ui: {
@@ -40,6 +56,7 @@ export const PALETTES: Palette[] = [
 		id: 'clay',
 		label: 'Clay',
 		sublabel: 'Parchment / terracotta / ink',
+		family: 'material',
 		ui: {
 			accent: '#d4a57a',
 			accentStrong: '#efc8a4',
@@ -64,7 +81,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'iris',
 		label: 'Iris',
-		sublabel: 'Indigo · magenta · cyan — the original',
+		sublabel: 'Indigo / magenta / cyan, the original',
+		family: 'colour',
 		ui: {
 			accent: '#7c80ff',
 			accentStrong: '#b0b3ff',
@@ -82,7 +100,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'sunset',
 		label: 'Sunset',
-		sublabel: 'Coral · amber · violet',
+		sublabel: 'Coral / amber / violet',
+		family: 'colour',
 		ui: {
 			accent: '#ff7a4d',
 			accentStrong: '#ffb27a',
@@ -100,7 +119,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'verdant',
 		label: 'Verdant',
-		sublabel: 'Mint · teal · jade',
+		sublabel: 'Mint / teal / jade',
+		family: 'colour',
 		ui: {
 			accent: '#5dd7a8',
 			accentStrong: '#8ee6c1',
@@ -118,7 +138,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'cosmos',
 		label: 'Cosmos',
-		sublabel: 'Deep purple · magenta · cyan',
+		sublabel: 'Deep purple / magenta / cyan',
+		family: 'colour',
 		ui: {
 			accent: '#d65cff',
 			accentStrong: '#e89bff',
@@ -136,7 +157,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'mono',
 		label: 'Mono',
-		sublabel: 'Ink · steel · silver',
+		sublabel: 'Ink / steel / silver',
+		family: 'colour',
 		ui: {
 			accent: '#c0c4cc',
 			accentStrong: '#e8eaee',
@@ -154,7 +176,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'ember',
 		label: 'Ember',
-		sublabel: 'Crimson · amber · rose',
+		sublabel: 'Crimson / amber / rose',
+		family: 'colour',
 		ui: {
 			accent: '#ff4d6a',
 			accentStrong: '#ff8a9a',
@@ -172,7 +195,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'arctic',
 		label: 'Arctic',
-		sublabel: 'Ice · cyan · steel',
+		sublabel: 'Ice / cyan / steel',
+		family: 'colour',
 		ui: {
 			accent: '#5de8fa',
 			accentStrong: '#a2f0fb',
@@ -190,7 +214,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'sakura',
 		label: 'Sakura',
-		sublabel: 'Plum · blossom · blush',
+		sublabel: 'Plum / blossom / blush',
+		family: 'colour',
 		ui: {
 			accent: '#ff80b0',
 			accentStrong: '#ffb3cc',
@@ -208,7 +233,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'abyss',
 		label: 'Abyss',
-		sublabel: 'Midnight · teal · cerulean',
+		sublabel: 'Midnight / teal / cerulean',
+		family: 'colour',
 		ui: {
 			accent: '#3ec9dc',
 			accentStrong: '#76dde9',
@@ -226,7 +252,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'citrus',
 		label: 'Citrus',
-		sublabel: 'Lime · lemon · tangerine',
+		sublabel: 'Lime / lemon / tangerine',
+		family: 'colour',
 		ui: {
 			accent: '#e8d800',
 			accentStrong: '#f5ea50',
@@ -245,6 +272,7 @@ export const PALETTES: Palette[] = [
 		id: 'slate',
 		label: 'Slate',
 		sublabel: 'Charcoal / silver / sky',
+		family: 'colour',
 		ui: {
 			accent: '#6bbdf2',
 			accentStrong: '#a5d9ff',
@@ -263,6 +291,7 @@ export const PALETTES: Palette[] = [
 		id: 'paper',
 		label: 'Paper',
 		sublabel: 'Warm white / ink / coral',
+		family: 'light',
 		ui: {
 			accent: '#d9594d',
 			accentStrong: '#ef8f82',
@@ -281,6 +310,7 @@ export const PALETTES: Palette[] = [
 		id: 'moss',
 		label: 'Moss',
 		sublabel: 'Forest / lichen / leaf',
+		family: 'colour',
 		ui: {
 			accent: '#8cd973',
 			accentStrong: '#b6eba5',
@@ -299,6 +329,7 @@ export const PALETTES: Palette[] = [
 		id: 'plum',
 		label: 'Plum',
 		sublabel: 'Aubergine / lilac / orchid',
+		family: 'colour',
 		ui: {
 			accent: '#d980f2',
 			accentStrong: '#edb6fb',
@@ -317,6 +348,7 @@ export const PALETTES: Palette[] = [
 		id: 'acid',
 		label: 'Acid',
 		sublabel: 'Violet / yellow / magenta',
+		family: 'colour',
 		ui: {
 			accent: '#f2ff33',
 			accentStrong: '#fbff9a',
@@ -335,6 +367,7 @@ export const PALETTES: Palette[] = [
 		id: 'neon',
 		label: 'Neon',
 		sublabel: 'Near black / cyan / pink',
+		family: 'dark',
 		ui: {
 			accent: '#33ffd9',
 			accentStrong: '#8dffee',
@@ -353,6 +386,7 @@ export const PALETTES: Palette[] = [
 		id: 'futuro',
 		label: 'Futuro',
 		sublabel: 'Cream / vermilion / black',
+		family: 'colour',
 		ui: {
 			accent: '#cc2e1a',
 			accentStrong: '#eb715f',
@@ -371,6 +405,7 @@ export const PALETTES: Palette[] = [
 		id: 'constr',
 		label: 'Constr',
 		sublabel: 'Constructivist red / cream / black',
+		family: 'colour',
 		ui: {
 			accent: '#c71f1a',
 			accentStrong: '#ed655f',
@@ -389,6 +424,7 @@ export const PALETTES: Palette[] = [
 		id: 'obsidian',
 		label: 'Obsidian',
 		sublabel: 'Black glass / graphite / frost',
+		family: 'dark',
 		ui: {
 			accent: '#9aa4b2',
 			accentStrong: '#d7dce4',
@@ -407,6 +443,7 @@ export const PALETTES: Palette[] = [
 		id: 'carbon',
 		label: 'Carbon',
 		sublabel: 'Pitch black / nickel / signal amber',
+		family: 'dark',
 		ui: {
 			accent: '#f0a83a',
 			accentStrong: '#ffd18a',
@@ -425,6 +462,7 @@ export const PALETTES: Palette[] = [
 		id: 'blackout',
 		label: 'Blackout',
 		sublabel: 'Near black / cyan / ultraviolet',
+		family: 'dark',
 		ui: {
 			accent: '#36d9ff',
 			accentStrong: '#9beeff',
@@ -443,6 +481,7 @@ export const PALETTES: Palette[] = [
 		id: 'nocturne',
 		label: 'Nocturne',
 		sublabel: 'Ink black / wine / blue flame',
+		family: 'dark',
 		ui: {
 			accent: '#8aa8ff',
 			accentStrong: '#c0ceff',
@@ -457,12 +496,14 @@ export const PALETTES: Palette[] = [
 			c4: [0.18, 0.36, 0.95]
 		}
 	},
-	// Pure black: true #000 ground with neutral greys and a white accent. The
-	// surface tokens live in app.css under [data-palette="void"].
+	// Pure black: true #000 ground with neutral greys and a white accent; its
+	// light mode is a soft neutral white with a black accent. The surface tokens
+	// live in app.css under [data-palette="void"].
 	{
 		id: 'void',
 		label: 'Pure Black',
-		sublabel: 'True black / white / grey',
+		sublabel: 'True black / soft white / grey',
+		family: 'material',
 		ui: {
 			accent: '#ffffff',
 			accentStrong: '#ffffff',
@@ -491,7 +532,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'daylight',
 		label: 'Daylight',
-		sublabel: 'Sky · cloud · gold',
+		sublabel: 'Sky / cloud / gold',
+		family: 'light',
 		ui: {
 			accent: '#2f6fed',
 			accentStrong: '#5b90f5',
@@ -509,7 +551,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'linen',
 		label: 'Linen',
-		sublabel: 'Warm paper · sand · terracotta',
+		sublabel: 'Warm paper / sand / terracotta',
+		family: 'light',
 		ui: {
 			accent: '#c25a3a',
 			accentStrong: '#e08a6f',
@@ -527,7 +570,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'meadow',
 		label: 'Meadow',
-		sublabel: 'Pale mint · sage · leaf',
+		sublabel: 'Pale mint / sage / leaf',
+		family: 'light',
 		ui: {
 			accent: '#2e9e6a',
 			accentStrong: '#5fc491',
@@ -545,7 +589,8 @@ export const PALETTES: Palette[] = [
 	{
 		id: 'blush',
 		label: 'Blush',
-		sublabel: 'Pale blush · rose · lilac',
+		sublabel: 'Pale blush / rose / lilac',
+		family: 'light',
 		ui: {
 			accent: '#d6457f',
 			accentStrong: '#ea7ba6',
@@ -562,7 +607,9 @@ export const PALETTES: Palette[] = [
 	}
 ];
 
-export const DEFAULT_PALETTE: PaletteId = 'futuro';
+// Fresh installs start on Pure Black (dark, no wallpaper). Onboarding still
+// shows the Futuro standing-wave brand backdrop; its picker preselects this.
+export const DEFAULT_PALETTE: PaletteId = 'void';
 
 export function paletteById(id: PaletteId): Palette {
 	return PALETTES.find((p) => p.id === id) ?? PALETTES[0];

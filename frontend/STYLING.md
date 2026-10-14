@@ -39,7 +39,7 @@ Everything else uses a token. If you are about to write a raw size, check the ro
 | Type size | `--font-size-2xs` ... `--font-size-4xl`, plus `--font-size-label` (11-12 px) | Only through the typography roles below. |
 | Weight | `--font-weight-medium` (500), `--font-weight-semibold` (600), `--font-weight-bold` (700) | 700 for page and section titles only. 600 for row titles, labels, buttons. 400 for body and meta. |
 | Line height | `--line-height-tight` (1.1), `--line-height-snug` (1.3), `--line-height-normal` (1.5), `--line-height-loose` (1.6) | Raw `1` for single-line controls and chips. |
-| Motion | `--motion-fast` (130 ms), `--motion-base` (210 ms), `--motion-slow` (340 ms), `--motion-exit` (140 ms, exit curve), `--motion-press` (90 ms) | See "Motion". Each token bundles its easing. |
+| Motion | `--motion-fast` (130 ms), `--motion-base` (210 ms), `--motion-slow` (340 ms), `--motion-exit` (140 ms, exit curve), `--motion-press` (90 ms), `--motion-enter` (480 ms, soft ease-out) | See "Motion". Each token bundles its easing. `--motion-enter` belongs to the two entry classes only. |
 | Easing | `--ease-standard` (the bundled curve, for keyframes), `--ease-exit` | Only where a token cannot be used (keyframes, WAAPI). |
 | Blur | `--blur-base`, `--blur-overlay`, `--blur-modal` | Overlays and the app chrome only. Never on in-flow content. |
 | Artwork filters | `--art-wall-filter`, `--art-collage-filter`, `--art-backdrop-filter` | The only filters allowed on artwork. Dark values dim walls of stills and blurred backdrops; light values do not. Never write a raw `brightness()` or `saturate()` on art. |
@@ -166,8 +166,20 @@ Contrast:
 - Body and meta text meet 4.5:1 against the ground including the wallpaper scrim. `--text-tertiary` is the floor for readable text.
 - Accent text uses `--accent-strong`. `--accent` on dark grounds is for fills and large display text only.
 - Focus rings and essential icons meet 3:1.
-- Check new palettes in dark, light and Clay before shipping.
-- `--accent-strong` comes from the palette in dark themes. In light themes, palettes without their own light accents get a darkened accent (`readableOnLight` in `paletteTheme.ts`) so accent text and focus rings clear 4.5:1 there too.
+- Check new palettes in dark, light and Clay before shipping, with the wallpaper on and off. `paletteTheme.test.ts` asserts text, accent and button-text contrast for every palette in both modes.
+- `--accent-strong` comes from the palette in dark themes. In light themes, palettes without their own light accents get an accent deepened in OKLCH (hue and chroma held, lightness lowered) until `--accent` clears 4.5:1 as a fill and `--accent-strong` clears 6.5:1 as text (`readableAgainst` in `paletteTheme.ts`).
+
+### Palette families and grounds
+
+Every palette has a `family` (`palettes.ts`), which also groups the Settings picker:
+
+- `material`: Clay and Pure Black. Hand-made surface tokens in `app.css` for both modes. Pure is true black in dark mode and a soft neutral white (not paper-bright `#fff`) in light mode; it is a flat ground with no wallpaper in either.
+- `dark`: black-ground schemes (Obsidian, Carbon, Blackout, Nocturne, Neon). Their generated dark ground sits deeper than the rest.
+- `colour` and `light`: generated grounds.
+
+For every non-material palette `paletteGround()` tints the surface ladder (`--bg-base`, `--bg-elevated`, `--bg-raised`, `--bg-surface-strong`, player surfaces, `--atlas-bg` and the body gradient `--ground-*`) in OKLCH. Dark grounds take the accent hue; light grounds take the palette's light wallpaper base when it has one (Futuro's cream) and otherwise a whisper of the accent hue. Tint scales with the accent's chroma, so grey accents stay neutral. `applyPaletteTheme` writes these inline and removes them for material palettes. Never hardcode a ground colour in a component; scrims over the wallpaper use `color-mix()` on `--bg-base` / `--bg-elevated`.
+
+A surface that stays dark in every theme (the Genres sky, the Sound Space stage) scopes the dark token set onto its element: `data-theme="dark"` plus `applyPaletteTheme(el, palette, 'dark')`. Children then use the normal tokens.
 
 ### Material surfaces
 
@@ -175,7 +187,7 @@ The `clay` colour scheme coordinates parchment, ink, and terracotta across the e
 
 `--material-grain` is a background image, separate from the colour tokens because they cannot express texture. It is `none` for other schemes and a small, static, repeating local SVG for Clay. Use it as the first background layer on shared surfaces. Keep it behind content so artwork, text, pointer input, and focus rings remain clear. Do not add an animated grain overlay.
 
-`--text-on-accent` supplies text and icons on solid accent fills. Normal text tokens describe text on page surfaces and cannot also guarantee contrast on an accent. Other schemes keep white; Clay uses parchment on terracotta in light mode and dark ink on amber in dark mode.
+`--text-on-accent` supplies text and icons on solid accent fills. Normal text tokens describe text on page surfaces and cannot also guarantee contrast on an accent. Other schemes get `--accent-ink` from `paletteTheme`: white when it clears 4.5:1 on the accent, otherwise a deep ink in the accent's hue (bright accents such as Citrus, Verdant, Arctic). Clay uses parchment on terracotta in light mode and dark ink on amber in dark mode.
 
 ## Controls
 
@@ -296,15 +308,31 @@ Rules:
 - Use CSS transitions for state changes so they are interruptible. Never chain animations in script that block input.
 - Never disable a control while it animates. Repeated actions (next, like, skip) respond on the first frame; the animation catches up.
 - Hover feedback has no delay. Tooltips and hover cards wait 300ms.
-- Do not replay entry motion when a cached view is shown again.
+- Do not replay entry motion when a cached view is shown again. Toggle the class (`class:rise-in-card={rise}`) rather than writing a second keyframe.
 
 ### Entry motion
 
-`.rise-in-shelf` (sections, 340 ms, 70 ms step, capped at 8) and `.rise-in-card` (cards, 300 ms, 22 ms step, capped at 11) own content that arrives after mount. The parent writes `--rise-index`; cap it with a modulo of about a screenful; `.rise-in-card` uses `backwards` fill so it does not trap popouts in a stacking context. Do not add a third variant. Copies in `videos/liked`, `VideoSetShelf` and the library mural predate these classes and are tracked in `FOLLOWUPS.md`.
+`.rise-in-shelf` (sections, rise 12 px, 70 ms step, capped at 8) and `.rise-in-card` (cards, rise 10 px and settle from 98.5 percent scale, 22 ms step, capped at 11) own content that arrives after mount. Both run on `--motion-enter`: 480 ms on `cubic-bezier(0.16, 1, 0.3, 1)`, a long ease-out that does most of the move in the first 150 ms and then settles, so arrival reads as quick but never snaps. Opacity and transform only, so it stays on the compositor. The parent writes `--rise-index`; cap it with a modulo of about a screenful; `.rise-in-card` uses `backwards` fill so it does not trap popouts in a stacking context. Do not add a third variant. Copies in `videos/liked`, `VideoSetShelf` and the library mural predate these classes and are tracked in `FOLLOWUPS.md`.
 
 ### Reduced motion
 
 `prefers-reduced-motion` is the operating system's accessibility setting (Windows: Settings, Accessibility, Visual effects, Animation effects off). The WebView reports it to CSS; Settings > Appearance > Reduce motion (Follow system, Always) sets `data-motion="reduce"` on the root, which app.css treats like the OS setting. Under `prefers-reduced-motion: reduce`: transforms are removed, durations drop to 80ms opacity changes, entry motion and skeleton shimmer stop, the playing glyph is static, and scroll behaviour is `auto`. Colour and focus changes stay.
+
+## Videos (trial style)
+
+The Videos section (On Air, Atlas, Archive, Logbook, History) is where a calmer, more editorial style is being tried. These rules hold there; nothing here applies to other routes until it is adopted into the sections above.
+
+- **Openers, not headers.** A page or section opens with its word in the display serif, italic, medium weight (`--font-size-2xl`, `--font-size-3xl` for a card's name), and one quiet `--text-tertiary` sentence under it. No eyebrow, no uppercase kicker above a title.
+- **Pictures lead.** Cards about one thing (a Today piece, an Atlas artist or scene) open on a still from that thing, edge to edge, fading into its surface at the bottom; the picture is the play button.
+- **Sentences instead of stat rows.** Say "29 videos, 1.8 hours, on the Dance Hits side of the map" rather than a row of numbers, tag chips and a badge. Facts only, from data the app holds; no generated copy.
+- **Never colour alone.** A state (watched, frontier, uncharted) is said in a word or shown by shape, size or brightness as well as colour. Keys explain looks in those terms and stay shut until asked (remember the choice).
+- **Ask in place.** A destructive action asks with `InlineConfirm` (the button turns into the question and its two answers, Cancel focused, reverts on its own) instead of a native dialog.
+- **Last answers first.** Video pages keep their last answer for the session in `$lib/video/view_cache` (the Archive keeps its first page per lens state). A revisit shows it at once, still, and asks again underneath, swapping the answer in without a refresh state.
+- **One arrival.** A first visit waits up to 150 ms for its answers, then shows the page in one `.rise-in-shelf` cascade (sections) or `.rise-in-card` cascade (cards); slower answers fall back to skeletons in place.
+- **A curtain between videos.** Every change of video (next track, a pick, a channel flip) goes behind the incoming video's own still, softened and darkened under film grain, until the new video is playing; then it dissolves in (`VideoCurtain`, raised through `$lib/video/curtain`). No black frame or loading text between videos.
+- **Viewing, under the player.** One small menu beside Save and Close holds how videos behave as they change: sync channels with the guide (the TV way, or each video from the start), the curtain, and song titles; the last two are Off, On Air or All videos (`$lib/video/viewing`). It opens where it fits and closes when the pointer leaves it.
+- **Stages stay dark.** The On Air stage and the Atlas are night skies in every theme and keep stage-local colours (`--stage-*`); the chrome around them still follows the theme.
+- **Wide screens.** From about 1560 px of content width a long single column becomes two (Logbook: your shelves and steering beside the catalog, scenes across both).
 
 ## Responsive and dense content
 

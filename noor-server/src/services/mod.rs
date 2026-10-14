@@ -1,3 +1,4 @@
+pub mod artist_genres;
 pub mod artwork_cache;
 pub mod audio_analysis;
 pub mod auto_enrich;
@@ -31,7 +32,9 @@ pub mod spotify;
 #[cfg(feature = "spotify-public")]
 pub mod spotify_public;
 pub mod tidal;
+pub mod video_air;
 pub mod video_discovery;
+pub mod video_intel;
 pub mod video_radio;
 pub mod video_sets;
 pub mod video_stations;

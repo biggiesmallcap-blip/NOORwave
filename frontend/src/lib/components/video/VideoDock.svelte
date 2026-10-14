@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { prefersReducedMotion } from '$lib/stores/motion';
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { get } from 'svelte/store';
 	import { goto } from '$app/navigation';
 	import { navigating, page } from '$app/state';
@@ -10,6 +10,7 @@
 	import { isPlaying } from '$lib/stores/player';
 	import {
 		advanceVideo,
+		extendVideoQueue,
 		nextVideo,
 		noteVideoProgress,
 		previousVideo,
@@ -17,6 +18,7 @@
 		refreshVideoStream,
 		refillVideoRadio,
 		reportVideoEnded,
+		videoChannelOnAir,
 		videoPanelAnchor,
 		videoSession,
 		videoSessionUpcoming,
@@ -33,10 +35,17 @@
 		type Bounds,
 		type Corner,
 	} from './mini_dock';
+	import { launchPending, takeVideoLaunch, type LaunchRect } from '$lib/video/launch';
 	import { WATCH_PATH } from '$lib/video/section';
 	import { hasNativeVideoFullscreen, setNativeVideoFullscreen } from '$lib/tauri/video_fullscreen';
 	import { videoFullscreenDimMs, videoFullscreenGrowMs, videoFullscreenStyle } from '$lib/stores/video_fullscreen_style';
 	import { loadSavedVideos, savedVideoIds, savingVideo, toggleSavedVideo } from '$lib/stores/saved_videos';
+	import ChannelPill from '$lib/video/onair/ChannelPill.svelte';
+	import OnAirStage from '$lib/video/onair/OnAirStage.svelte';
+	import VideoCurtain from '$lib/components/video/VideoCurtain.svelte';
+	import { raiseVideoCurtain, videoCurtain } from '$lib/video/curtain';
+	import { videoCredits } from '$lib/video/viewing';
+	import VideoCredit from '$lib/video/VideoCredit.svelte';
 
 	// The dock renders a single VideoPlayer that never unmounts while a session
 	// is active, so audio keeps playing across route changes. Where it sits:
@@ -535,7 +544,7 @@
 
 	/** Invert the jump: draw the dock at its old box via a transform, then let
 	 *  that transform run out. Runs after the DOM took the new box. */
-	function flipFrom(from: DOMRect | null): Animation | null {
+	function flipFrom(from: Pick<DOMRect, 'top' | 'left' | 'width' | 'height'> | null): Animation | null {
 		if (!dockEl || !from || from.width <= 0 || from.height <= 0) return null;
 		const to = measureLanding();
 		if (!to) return null;
@@ -570,6 +579,39 @@
 		return glide;
 	}
 
+	/** Land when a glide really ends (it may start a frame late); the timer
+	 *  only covers a glide that never started or never reports back. */
+	function landAfter(started: Animation | null) {
+		if (morphTimer) clearTimeout(morphTimer);
+		morphTimer = setTimeout(endGlide, started ? Math.max(MORPH_MS, get(videoFullscreenGrowMs)) * 2 : MORPH_MS);
+		started?.finished.then(() => {
+			if (glide !== started) return;
+			if (morphTimer) clearTimeout(morphTimer);
+			morphTimer = null;
+			endGlide();
+		}, () => {});
+	}
+
+	// A tune-in from the dial: the player grows out of the picture that was
+	// clicked (launch.ts) instead of fading in where it lands. When the dock
+	// arrives fresh it waits for its first box on the stage, as a fixed layer
+	// so the stage frame does not clip it, then glides; when it was already
+	// in the corner, the glide starts from the picture instead of the corner.
+	let launchFrom = $state<LaunchRect | null>(null);
+	/** A tune-in starts playing a beat before the watch page opens; a dock
+	 *  that just appeared stays out of sight for that beat instead of
+	 *  showing in the corner first. */
+	let awaitingLaunch = $state(false);
+	let awaitTimer: ReturnType<typeof setTimeout> | null = null;
+
+	$effect(() => {
+		const from = launchFrom;
+		if (!from || place !== 'full' || box === null || !dockEl) return;
+		launchFrom = null;
+		morphing = true;
+		landAfter(flipFrom(from));
+	});
+
 	$effect(() => {
 		const next = place;
 		if (!active) {
@@ -582,31 +624,69 @@
 		// (endGlide moves it in): inside the stage it was clipped by the
 		// stage's overflow and faded with the arriving page, so the video
 		// grew out from behind the frame.
+		const fresh = previousPlace === null;
+		if (fresh && next !== 'full' && next !== 'expanded' && launchPending()) {
+			awaitingLaunch = true;
+			if (awaitTimer) clearTimeout(awaitTimer);
+			awaitTimer = setTimeout(() => (awaitingLaunch = false), 1500);
+		}
 		const moving = previousPlace !== null && previousPlace !== next;
-		const reducedMotion = moving && prefersReducedMotion();
+		const arriving = next === 'full' && previousPlace !== 'full' && previousPlace !== 'expanded';
+		// Only a dock nobody saw yet grows out of the picture; one already
+		// playing in the corner glides from the corner, where you saw it.
+		const fromLaunch = arriving && (fresh || untrack(() => awaitingLaunch));
+		const launch = fromLaunch ? untrack(() => takeVideoLaunch()) : null;
+		if (next === 'full' || next === 'expanded') {
+			awaitingLaunch = false;
+			if (awaitTimer) clearTimeout(awaitTimer);
+			awaitTimer = null;
+		}
+		const reducedMotion = (moving || launch !== null) && prefersReducedMotion();
+		if (launch && !moving && !reducedMotion) launchFrom = launch;
+		else if (next !== 'full') launchFrom = null;
 		if (next !== 'full') moveHome();
-		else if (!dimming && (!moving || reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);
+		else if (!dimming && (!moving || reducedMotion) && !(launch && !reducedMotion) && $videoStageAnchor) moveIntoStage($videoStageAnchor);
 		if (reducedMotion && next === 'expanded') dimming = false;
 		if (moving) {
 			const fullscreenMove = previousPlace === 'expanded' || next === 'expanded';
 			if (!reducedMotion) {
 				morphing = true;
-				const started = fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(lastDockRect);
-				// Land when the glide really ends (it may start a frame late);
-				// the timer only covers a glide that never started or never
-				// reports back.
-				if (morphTimer) clearTimeout(morphTimer);
-				morphTimer = setTimeout(endGlide, started ? Math.max(MORPH_MS, get(videoFullscreenGrowMs)) * 2 : MORPH_MS);
-				started?.finished.then(() => {
-					if (glide !== started) return;
-					if (morphTimer) clearTimeout(morphTimer);
-					morphTimer = null;
-					endGlide();
-				}, () => {});
+				landAfter(fullscreenMove ? sizeGlideFrom(lastDockRect) : flipFrom(launch ?? lastDockRect));
 			}
 		}
 		previousPlace = next;
 	});
+
+	// --- On Air: the broadcast layer on the stage ---
+	// While a channel is on air the stage (watch page or fullscreen) draws the
+	// channel bug and lower thirds and takes the remote's keys. The corner and
+	// panel players stay plain. The player reports position at 4 Hz; only the
+	// broadcast layer reads it.
+	let broadcast = $derived($videoChannelOnAir !== null && (place === 'full' || place === 'expanded'));
+	/** Song titles on every video: the credit tells the title and what is up
+	 *  next, so the player's own title strip and up-next pill step aside. */
+	let creditsEverywhere = $derived(!broadcast && $videoCredits === 'all' && (place === 'full' || place === 'expanded'));
+	let stagePositionS = $state(0);
+	let stageDurationS = $state(0);
+	let stageVideoId: number | null = null;
+
+	$effect(() => {
+		const id = $videoSession.current?.tidal_id ?? null;
+		if (id === stageVideoId) return;
+		// Every change of video goes behind the curtain until it plays: the
+		// next track, a pick, a channel flip (which raised it already).
+		if (id !== null) raiseVideoCurtain($videoSession.current?.artwork_url ?? null, stageVideoId, $videoChannelOnAir !== null);
+		stageVideoId = id;
+		stagePositionS = $videoSession.startAtS;
+		const ms = $videoSession.current?.duration_ms;
+		stageDurationS = ms != null && ms > 0 ? ms / 1000 : 0;
+	});
+
+	function handleProgress(positionMs: number, durationMs: number) {
+		noteVideoProgress(positionMs, durationMs);
+		stagePositionS = positionMs / 1000;
+		if (Number.isFinite(durationMs) && durationMs > 0) stageDurationS = durationMs / 1000;
+	}
 
 	// --- Prefetch the next stream for gapless autoplay ---
 	let prefetched = $state<PreloadedVideoStream & { videoId: number } | null>(null);
@@ -615,8 +695,10 @@
 	$effect(() => {
 		const next = upNext;
 		const autoplay = $videoSession.autoplay;
-		if ($videoSession.continuous && autoplay && $videoSession.queue.length - $videoSession.currentIndex <= 5) {
-			void refillVideoRadio();
+		if (autoplay && $videoSession.queue.length - $videoSession.currentIndex <= 5) {
+			// Radio refills; a plain queue asks its own source (the liked wall).
+			if ($videoSession.continuous) void refillVideoRadio();
+			else void extendVideoQueue();
 		}
 		if (!autoplay || !next) {
 			prefetchSeq += 1;
@@ -649,11 +731,13 @@
 	async function handleEnded() {
 		reportVideoEnded();
 		const endedVideoId = $videoSession.current?.tidal_id;
-		const wasRadio = $videoSession.continuous && $videoSession.autoplay;
+		const autoplay = $videoSession.autoplay;
 		const preloaded = prefetched?.videoId === upNext?.tidal_id ? prefetched : null;
+		// With autoplay on, a plain queue that ends carries on as radio; only
+		// when even radio finds nothing does it stop, with a note. Autoplay
+		// itself is never switched off here, so the next queue plays through.
 		const advanced = await advanceVideo({ preloaded });
-		if (!advanced && wasRadio && endedVideoId != null) videoSession.radioExhausted(endedVideoId);
-		else if (!advanced && $videoSession.current?.tidal_id === endedVideoId) videoSession.setAutoplay(false);
+		if (!advanced && autoplay && endedVideoId != null) videoSession.radioExhausted(endedVideoId);
 	}
 
 	function handlePlay() {
@@ -680,6 +764,7 @@
 		if (rafId) cancelAnimationFrame(rafId);
 		if (morphTimer) clearTimeout(morphTimer);
 		if (unfoldTimer) clearTimeout(unfoldTimer);
+		if (awaitTimer) clearTimeout(awaitTimer);
 		glide?.cancel();
 		void leaveNativeFullscreen();
 		unsubscribeStage();
@@ -691,6 +776,10 @@
 		homeMarker = null;
 	});
 </script>
+
+{#snippet channelPill()}
+	{#if $videoChannelOnAir}<ChannelPill channel={$videoChannelOnAir} />{/if}
+{/snippet}
 
 <div class="video-dock-host" bind:this={host}>
 {#if active}
@@ -708,6 +797,7 @@
 		class:morphing
 		class:unfolding
 		class:dimming
+		class:awaiting={awaitingLaunch}
 		class:positioned={place !== 'mini' && box !== null}
 		data-corner={corner}
 		style:--window-w={`${windowSize.width}px`}
@@ -728,7 +818,10 @@
 				variant={place === 'full' || expanded ? 'full' : 'mini'}
 				fullscreenActive={expanded}
 				onFullscreenToggle={toggleExpanded}
-				onProgress={noteVideoProgress}
+				onProgress={handleProgress}
+				startAt={$videoSession.startAtS}
+				broadcast={broadcast || creditsEverywhere}
+				veiled={$videoCurtain !== null}
 				autoplayNext={$videoSession.autoplay}
 				hasNext={hasNext}
 				hasPrevious={hasPrevious}
@@ -743,8 +836,44 @@
 				saved={$videoSession.current ? $savedVideoIds.has($videoSession.current.tidal_id) : false}
 				savePending={$savingVideo}
 				onToggleSaved={() => void toggleSavedVideo($videoSession.current)}
+				fsLead={broadcast && $videoChannelOnAir ? channelPill : undefined}
+			/>
+			<!-- Over the picture (in its own box, at every size), under the
+			     stage's bug and credits. -->
+			<VideoCurtain
+				currentId={$videoSession.current?.tidal_id ?? null}
+				positionS={stagePositionS}
+				startedAtS={$videoSession.startAtS}
+				failed={Boolean($videoSession.error) && !$videoSession.loading}
 			/>
 		</div>
+
+		{#if broadcast && $videoChannelOnAir}
+			<OnAirStage
+				channel={$videoChannelOnAir}
+				current={$videoSession.current}
+				upNext={upNext}
+				positionS={stagePositionS}
+				durationS={stageDurationS}
+				startedAtS={$videoSession.startAtS}
+				fullscreen={expanded}
+			/>
+		{:else if creditsEverywhere}
+			<!-- Song titles on every video (Viewing menu): the same credit as on
+			     air, in the accent instead of a channel's colour. -->
+			<div class="credit-layer">
+				<VideoCredit
+					current={$videoSession.current}
+					{upNext}
+					positionS={stagePositionS}
+					durationS={stageDurationS}
+					startedAtS={$videoSession.startAtS}
+					hidden={$videoCurtain !== null}
+					fullscreen={expanded}
+					showWhy={false}
+				/>
+			</div>
+		{/if}
 
 		{#if expanded}
 			<!-- Fullscreen: the player's own controls only. -->
@@ -818,9 +947,25 @@
 		z-index: 60;
 	}
 
+	/* Playing already, but the watch page it grows into is a beat away. */
+	.video-dock.awaiting {
+		visibility: hidden;
+		pointer-events: none;
+	}
+
 	.player-surface {
+		position: relative;
 		width: 100%;
 		height: 100%;
+	}
+
+	.credit-layer {
+		position: absolute;
+		inset: 0;
+		z-index: 5;
+		overflow: hidden;
+		border-radius: inherit;
+		pointer-events: none;
 	}
 
 	/* Full and panel modes: a fixed box copied each frame onto an anchor's rect,
@@ -1081,7 +1226,7 @@
 	/* Controls sit out the glide, so the transform's scale never shows
 	   stretched buttons or text, and the pill morph, so they never pile up
 	   in a half-open window. */
-	.video-dock:is(.morphing, .unfolding) :global(:is(.controls, .top-meta, .up-next-pill)),
+	.video-dock:is(.morphing, .unfolding) :global(:is(.controls, .top-meta, .up-next-pill, .onair-stage)),
 	.video-dock:is(.morphing, .unfolding) .mini-chrome {
 		/* Beats the hover reveal: the pointer is usually on the dock. */
 		opacity: 0 !important;

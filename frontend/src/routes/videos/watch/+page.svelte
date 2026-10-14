@@ -1,5 +1,12 @@
+<script lang="ts" module>
+	// The artists this listening session has passed through, oldest first,
+	// for the Atlas mini map's trail. Module scope, so it survives leaving
+	// and reopening the watch page.
+	let sessionTrail: number[] = [];
+</script>
+
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api, type TidalSearchVideo } from '$lib/api/client';
@@ -31,12 +38,35 @@
 		radioExclusions,
 		trimToRows,
 	} from '$lib/video/related_feed';
+	import type { ExploreVideo } from '$lib/api/video_explore_types';
+	import StageRow from '$lib/video/archive/StageRow.svelte';
+	import AtlasMiniMap from '$lib/video/atlas/AtlasMiniMap.svelte';
+	import ViewingMenu from '$lib/video/ViewingMenu.svelte';
+	import { cachedAtlas, loadAtlas, type LoadedAtlas } from '$lib/video/atlas/atlas_data';
+	import VersionsDrawer from '$lib/video/archive/VersionsDrawer.svelte';
+	import { CUT_LABELS, hueColor } from '$lib/video/archive/lenses';
+	import { concertLength, cutChipLabel, distinctCuts } from '$lib/video/archive/versions';
+	import { playConcert, playFromList, playVersion } from '$lib/video/archive/play';
+	import {
+		EMPTY_STAGE,
+		loadStage,
+		explorePicks,
+		type StageItem,
+		type StageRows,
+	} from '$lib/video/archive/stage';
 
 	// The watch page: the one place the big player lives. The persistent dock
 	// positions the live <video> over this page's stage; everything else here
 	// is about what is playing - who it is and where to go from it. What comes
 	// next is the app's video queue panel, not a second list here. Back
 	// returns to the tab the video was picked on.
+	//
+	// Under the player: the other cuts of this song as a quiet line by the
+	// title, the concert as a rail when the video is part of one, then one
+	// endless related grid. The grid opens with where this sits on the Atlas
+	// (a map tile) and the exploring picks - same scene, one step out
+	// (lib/video/archive/stage.ts) - then the related picks, then the video
+	// radio feed for as long as it is scrolled.
 
 	let stageAnchor = $state<HTMLDivElement | null>(null);
 	let relatedVideos = $state<(TidalSearchVideo & { why?: string })[]>([]);
@@ -57,10 +87,41 @@
 	let rowLevels = $state<number[]>([]);
 	let nearEnd = $state(false);
 
-	let shownRelated = $derived(feedDone ? trimToRows(relatedVideos, columns) : relatedVideos);
-	let placeholders = $derived(placeholderCount(shownRelated.length, columns, feedLoading || feedWaiting));
+
+	let stageRows = $state<StageRows>(EMPTY_STAGE);
+	let stageSettled = $state(false);
+	let stageRequest = 0;
+	let versionsOpen = $state(false);
 
 	let current = $derived($videoSession.current);
+
+	// The mini map only mounts once the Atlas is loaded and the artist on
+	// stage is on it, so an uncharted artist (or a cold map) leaves the slot
+	// empty and the rows keep the full width.
+	// Raw: replaced whole, read in the mini map's tight loops.
+	let atlas = $state.raw<LoadedAtlas | null>(cachedAtlas());
+	let trail = $state<number[]>(sessionTrail);
+	// A cold link may carry only the video id; the song lookup knows the artist.
+	let stageArtistId = $derived(current?.artist_id ?? stageRows.versions?.song.artist_id ?? null);
+	let onMap = $derived(stageArtistId != null && (atlas?.data.indexById.has(stageArtistId) ?? false));
+	// The map tile sits first in the grid, so row math counts it.
+	let lead = $derived(onMap ? 1 : 0);
+	let gridBusy = $derived(!stageSettled || relatedLoading || feedLoading || feedWaiting);
+	let shownRelated = $derived(feedDone ? trimToRows(relatedVideos, columns, lead) : relatedVideos);
+	let placeholders = $derived(
+		relatedVideos.length === 0 && gridBusy
+			? Math.max(0, FOCUS_ROWS * columns - lead)
+			: placeholderCount(shownRelated.length + lead, columns, gridBusy)
+	);
+	let showRelated = $derived(Boolean(current) && (gridBusy || lead > 0 || relatedVideos.length > 0));
+	$effect(() => {
+		const id = stageArtistId;
+		if (id == null) return;
+		if (!atlas) void loadAtlas().then((loaded) => (atlas = loaded)).catch(() => {});
+		if (sessionTrail[sessionTrail.length - 1] === id) return;
+		sessionTrail = [...sessionTrail.filter((seen) => seen !== id), id].slice(-10);
+		trail = sessionTrail;
+	});
 	let streamUrl = $derived($videoSession.streamUrl);
 	let loadingStream = $derived($videoSession.loading);
 	let hasSession = $derived(Boolean(current || streamUrl || loadingStream));
@@ -85,7 +146,7 @@
 	/** Unmeasured rows below the sharp ones start out of focus, so a new
 	 *  batch never flashes sharp before the first measurement. */
 	function tileFocus(index: number): number {
-		const row = Math.floor(index / columns);
+		const row = Math.floor((index + lead) / columns);
 		return rowLevels[row] ?? (row < FOCUS_ROWS ? 0 : MAX_FOCUS_LEVEL);
 	}
 
@@ -147,6 +208,24 @@
 		clearVideoSession();
 	}
 
+	function stagePlay(video: ExploreVideo, list: ExploreVideo[], label: string) {
+		if (!assertOnline()) {
+			showToast('Server is reconnecting.', 'error', 3200);
+			return;
+		}
+		void playFromList(video, list, label);
+	}
+
+	let concertItems = $derived<StageItem[]>(
+		stageRows.concert?.videos.map((video, index) => ({
+			video,
+			index: index + 1,
+			current: video.tidal_id === current?.tidal_id,
+		})) ?? []
+	);
+	/** Kinds of cut named by the title (one each); the drawer has every one. */
+	const CUTS_INLINE = 4;
+
 	/** Cold open (reload, copied link, a link from outside the section): play
 	 *  the video in the URL unless it is already the one playing. */
 	function openFromUrl() {
@@ -200,15 +279,40 @@
 		return () => videoStageAnchor.set(null);
 	});
 
-	// Related row: waits for a real selection, and a response for a previous
+	// Stage rows: rebuilt per video, filled in as each endpoint answers; a
+	// late answer for a previous video is dropped.
+	$effect(() => {
+		const item = current;
+		const seq = ++stageRequest;
+		stageRows = EMPTY_STAGE;
+		stageSettled = false;
+		versionsOpen = false;
+		if (!item) return;
+		const timer = setTimeout(() => {
+			void loadStage(
+				api,
+				item,
+				(patch) => (stageRows = { ...stageRows, ...patch }),
+				() => seq === stageRequest
+			).then(() => {
+				if (seq === stageRequest) stageSettled = true;
+			});
+		}, 250);
+		return () => clearTimeout(timer);
+	});
+
+	// The related grid: once the Stage has answered, its exploring picks open
+	// the grid and the related picks follow them; a response for a previous
 	// video never overwrites the new one.
 	$effect(() => {
 		const item = current;
+		const settled = stageSettled;
 		const seq = ++relatedRequest;
-		relatedVideos = [];
 		resetFeed();
-		relatedLoading = Boolean(item?.artist_id || item?.artist_name);
-		if (!item || (!item.artist_id && !item.artist_name)) return;
+		const picks = item && settled ? untrack(() => explorePicks(stageRows, item.tidal_id)) : [];
+		relatedVideos = picks;
+		relatedLoading = settled && Boolean(item?.artist_id || item?.artist_name);
+		if (!settled || !item || (!item.artist_id && !item.artist_name)) return;
 		const controller = new AbortController();
 		let attempts = 0;
 		let timer: ReturnType<typeof setTimeout>;
@@ -220,7 +324,7 @@
 					exclude_video_ids: [item.tidal_id],
 				}, controller.signal);
 				if (seq !== relatedRequest) return;
-				relatedVideos = items.filter((video) => video.tidal_id !== item.tidal_id);
+				relatedVideos = mergeFeed(picks, items, item.tidal_id);
 				if (building && ++attempts < 10) {
 					timer = setTimeout(() => void fetchRelated(), 3000);
 				} else {
@@ -285,8 +389,8 @@
 
 	// Fill the sharp rows first, then keep going while the end is near.
 	$effect(() => {
-		if (!current || relatedLoading || feedLoading || feedDone || feedWaiting) return;
-		if (needsMore(relatedVideos.length, columns) || nearEnd) void loadMoreRelated();
+		if (!stageSettled || !current || relatedLoading || feedLoading || feedDone || feedWaiting) return;
+		if (needsMore(relatedVideos.length + lead, columns) || nearEnd) void loadMoreRelated();
 	});
 </script>
 
@@ -342,8 +446,29 @@
 								<span class="meta-source">from {$videoSession.sourceLabel}</span>
 							{/if}
 						</div>
+						{#if stageRows.versions}
+							{@const song = stageRows.versions.song}
+							{@const others = stageRows.versions.others}
+							{@const playingCut = song.versions.find((version) => version.video.tidal_id === current.tidal_id)?.cut ?? null}
+							{@const named = distinctCuts(others, playingCut).slice(0, CUTS_INLINE)}
+							<div class="cuts" role="group" aria-label="Other cuts of this song">
+								{#if named.length > 0}<span class="cuts-label">Also as</span>{/if}
+								{#each named as version (version.video.tidal_id)}
+									<button
+										type="button"
+										class="cut-chip"
+										title={version.video.title}
+										onclick={() => void playVersion(version, others, song.title)}
+									>{cutChipLabel(version, CUT_LABELS[version.cut])}</button>
+								{/each}
+								<button type="button" class="cut-all" onclick={() => (versionsOpen = true)}>
+									{named.length > 0 ? `All ${song.versions.length} cuts` : `${song.versions.length} cuts of this song`}
+								</button>
+							</div>
+						{/if}
 					</div>
 					<div class="np-actions">
+						<ViewingMenu />
 						<button
 							type="button"
 							class="pill-btn"
@@ -360,39 +485,89 @@
 		</div>
 	</div>
 
-	{#if current && (relatedLoading || feedLoading || relatedVideos.length > 0)}
+	{#if current && stageRows.concert}
+		{@const concert = stageRows.concert}
+		<div class="concert">
+			<StageRow
+				title="This concert"
+				meta={`${concert.label}, ${concert.video_count} songs${concert.total_s > 0 ? `, ${concertLength(concert.total_s)}` : ''}`}
+				items={concertItems}
+				onplay={(video) => void playConcert(concert, video.tidal_id)}
+			>
+				{#snippet actions()}
+					<button type="button" class="pill-btn" onclick={() => void playConcert(concert)}>Play concert</button>
+				{/snippet}
+			</StageRow>
+		</div>
+	{/if}
+
+	{#if current && showRelated}
+		{@const scene = stageRows.scene?.scene ?? null}
 		<section class="related" aria-label="Related videos">
 			<div class="section-heading">
-				<h2>Related to {current.artist_name ?? 'this video'}</h2>
+				<h2>Related to {current.artist_name ?? stageRows.versions?.song.artist_name ?? 'this video'}</h2>
 			</div>
-			{#if relatedVideos.length > 0 || feedLoading}
-				<!-- Two full rows in focus, then the extension softens row by row;
-				     hover or focus brings a tile back into focus. -->
-				<div class="video-grid" bind:this={gridEl}>
-					{#each shownRelated as video, index (video.tidal_id)}
-						<div class="related-card" data-focus={tileFocus(index)}>
-							<VideoCard {video} onSelect={(item) => !('id' in item) && void playRelated(item)} />
-							{#if video.why}<span class="related-why">{video.why}</span>{/if}
+			<!-- Two full rows in focus, then the extension softens row by row;
+			     hover or focus brings a tile back into focus. The map tile
+			     opens the grid when the artist is on the Atlas. -->
+			<div class="video-grid" bind:this={gridEl}>
+				{#if onMap}
+					<div class="related-card map-tile">
+						<AtlasMiniMap artistId={stageArtistId} {trail} caption={false} />
+						<div class="map-meta">
+							<span class="map-title">
+								{#if scene}<span class="hue" style:background={hueColor(scene.hue)}></span>{/if}
+								{scene?.name ?? 'On the Atlas'}
+							</span>
+							<span class="map-sub">
+								{#if scene?.channel_no != null}<span>Channel {scene.channel_no}</span>{/if}
+								{#if scene}
+									<a href={`/videos/archive?scene=${scene.id}`}>Open in Archive</a>
+								{:else}
+									<span>Open the map</span>
+								{/if}
+							</span>
 						</div>
-					{/each}
-					{#each Array(placeholders) as _, offset (offset)}
-						<div class="related-card placeholder" data-focus={tileFocus(shownRelated.length + offset)} aria-hidden="true">
-							<div class="placeholder-frame"></div>
-						</div>
-					{/each}
-				</div>
-				{#if feedDone && shownRelated.length > FOCUS_ROWS * columns}
-					<p class="related-end">End of the line</p>
+					</div>
 				{/if}
-			{:else}
-				<p class="related-loading">Finding a few connected videos...</p>
+				{#each shownRelated as video, index (video.tidal_id)}
+					<div class="related-card" data-focus={tileFocus(index)}>
+						<VideoCard {video} onSelect={(item) => !('id' in item) && void playRelated(item)} />
+						{#if video.why}<span class="related-why">{video.why}</span>{/if}
+					</div>
+				{/each}
+				{#each Array(placeholders) as _, offset (offset)}
+					<div class="related-card placeholder" data-focus={tileFocus(shownRelated.length + offset)} aria-hidden="true">
+						<div class="placeholder-frame"></div>
+						<div class="placeholder-line"></div>
+						<div class="placeholder-line short"></div>
+					</div>
+				{/each}
+			</div>
+			{#if feedDone && shownRelated.length + lead > FOCUS_ROWS * columns}
+				<p class="related-end">End of the line</p>
 			{/if}
 		</section>
+	{/if}
+
+	{#if versionsOpen && stageRows.versions}
+		{@const song = stageRows.versions.song}
+		<VersionsDrawer
+			song={{
+				song_key: song.song_key,
+				title: song.title,
+				artist_id: song.artist_id,
+				artist_name: song.artist_name,
+				artwork_url: song.versions[0]?.video.artwork_url ?? null,
+				cut_count: song.versions.length,
+			}}
+			onclose={() => (versionsOpen = false)}
+		/>
 	{/if}
 {/if}
 
 <style>
-	/* One column: the player, what is playing, then the related row.
+	/* One column: the player, what is playing, then the related grid.
 	   Borderless, like the rest of the video section. The width cap keeps a
 	   16:9 player short enough that its title and actions stay on screen,
 	   including above the bottom player bar when that layout is on. */
@@ -509,6 +684,66 @@
 		opacity: 0.6;
 	}
 
+	/* Other cuts of this song: a quiet line under the title. Each chip plays
+	   that cut; the last opens the drawer with every one. */
+	.cuts {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+		margin-top: 4px;
+		min-width: 0;
+	}
+
+	.cuts-label {
+		margin-right: 2px;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+	}
+
+	.cut-chip,
+	.cut-all {
+		max-width: 28ch;
+		height: 26px;
+		padding: 0 10px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: var(--font-size-xs);
+		font-weight: var(--font-weight-medium);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		cursor: pointer;
+		transition:
+			background var(--motion-fast),
+			color var(--motion-fast),
+			border-color var(--motion-fast);
+	}
+
+	.cut-chip:hover,
+	.cut-chip:focus-visible {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.cut-all {
+		border-color: transparent;
+		color: var(--accent-strong);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.cut-all:hover,
+	.cut-all:focus-visible {
+		background: var(--bg-hover);
+	}
+
+	.concert {
+		margin-top: 28px;
+		min-width: 0;
+	}
+
 	.related {
 		display: grid;
 		gap: 14px;
@@ -543,6 +778,52 @@
 		gap: 5px;
 	}
 
+	/* The map tile: the same footprint as a video card, the Atlas crop in
+	   the frame and where it is in the card's title lines. */
+	.map-meta {
+		display: grid;
+		gap: 2px;
+		min-width: 0;
+		padding-top: 3px;
+	}
+
+	.map-title {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		min-width: 0;
+		color: var(--text-primary);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.hue {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex: 0 0 auto;
+	}
+
+	.map-sub {
+		display: flex;
+		gap: 10px;
+		color: var(--text-tertiary);
+		font-size: var(--font-size-xs);
+	}
+
+	.map-sub a {
+		color: var(--accent-strong);
+		font-weight: var(--font-weight-semibold);
+		text-decoration: none;
+	}
+
+	.map-sub a:hover {
+		text-decoration: underline;
+	}
+
 	/* Out of focus below the fold: a soft blur and dim that deepen for
 	   three rows, then hold, and clear as the row scrolls into view. */
 	.related-card {
@@ -557,11 +838,24 @@
 		opacity: 1;
 	}
 
-	.placeholder-frame {
-		aspect-ratio: 16 / 9;
+	.placeholder-frame,
+	.placeholder-line {
 		border-radius: 8px;
 		background: var(--bg-raised);
 		animation: placeholder-pulse 1.4s ease-in-out infinite;
+	}
+	.placeholder-frame {
+		aspect-ratio: 16 / 9;
+	}
+	.placeholder-line {
+		width: 72%;
+		height: 11px;
+		margin-top: 4px;
+		border-radius: 6px;
+	}
+	.placeholder-line.short {
+		width: 44%;
+		margin-top: 0;
 	}
 	@keyframes placeholder-pulse {
 		50% { opacity: 0.55; }
@@ -574,14 +868,9 @@
 		font-size: var(--font-size-xs);
 	}
 
-	.related-why,
-	.related-loading {
+	.related-why {
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
-	}
-
-	.related-loading {
-		margin: 0;
 	}
 
 	@media (max-width: 620px) {

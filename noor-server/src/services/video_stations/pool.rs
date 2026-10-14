@@ -10,15 +10,12 @@ use super::pick::Candidate;
 use super::{Scene, StationId, Vibe};
 use crate::services::video_discovery::names::name_key;
 use crate::services::video_discovery::{graph, roots};
+use crate::services::video_intel::cuts::{self, Cut};
 use crate::services::video_radio::video_song_key;
 use crate::services::video_sets::VideoCandidate;
 
-pub const VARIOUS_ARTISTS_ID: i64 = 2935;
-const MIN_DURATION_S: i64 = 90;
+pub const VARIOUS_ARTISTS_ID: i64 = cuts::VARIOUS_ARTISTS_ID;
 const MIN_TRACKS_PER_ARTIST: i64 = 2;
-const EXCLUDED_TYPES: [&str; 2] = ["Interview", "Promotional"];
-const EXCLUDED_TITLE_WORDS: [&str; 4] = ["trailer", "teaser", "interview", "behind the scenes"];
-const LIVE_TITLE_WORDS: [&str; 5] = ["live", "unplugged", "acoustic", "session", "in concert"];
 const FEAT_MARKERS: [&str; 3] = ["feat.", "ft.", " with "];
 
 /// Genre names and context tags that define each vibe. Tune here.
@@ -90,30 +87,10 @@ pub fn scene_genres(scene: Scene) -> &'static [&'static str] {
     }
 }
 
-fn has_word(haystack: &str, word: &str) -> bool {
-    haystack.match_indices(word).any(|(index, _)| {
-        let before = haystack[..index].chars().next_back();
-        let after = haystack[index + word.len()..].chars().next();
-        before.is_none_or(|c| !c.is_alphanumeric()) && after.is_none_or(|c| !c.is_alphanumeric())
-    })
-}
-
-/// Never part of any station: compilations, clips, interviews and promos.
+/// Never part of any station: compilations, clips, interviews, trailers and
+/// promos. The one shared programmable rule (video_intel::cuts).
 pub fn is_excluded(video: &VideoCandidate) -> bool {
-    let title = video.title.to_lowercase();
-    video.artist_id == Some(VARIOUS_ARTISTS_ID)
-        || video
-            .artist_name
-            .as_deref()
-            .is_some_and(|name| name_key(name) == "various artists")
-        || video.duration_s.is_some_and(|d| d < MIN_DURATION_S)
-        || video
-            .video_type
-            .as_deref()
-            .is_some_and(|kind| EXCLUDED_TYPES.contains(&kind))
-        || EXCLUDED_TITLE_WORDS
-            .iter()
-            .any(|word| has_word(&title, word))
+    !cuts::is_programmable(video)
 }
 
 fn is_duet(video: &VideoCandidate) -> bool {
@@ -121,10 +98,10 @@ fn is_duet(video: &VideoCandidate) -> bool {
     !video.featured_artist_ids.is_empty() || FEAT_MARKERS.iter().any(|m| title.contains(m))
 }
 
+/// Live and session cuts, in any of the classifier's languages ("en vivo",
+/// "ao vivo", "unplugged", "acoustic").
 fn is_live(video: &VideoCandidate) -> bool {
-    let title = video.title.to_lowercase();
-    video.video_type.as_deref() == Some("Live")
-        || LIVE_TITLE_WORDS.iter().any(|word| has_word(&title, word))
+    matches!(cuts::candidate_cut(video), Cut::Live | Cut::Session)
 }
 
 /// What the listener has watched, skipped, likes and plays.
@@ -214,17 +191,23 @@ fn catalog(
     let ids_json = artists
         .map(|ids| serde_json::to_string(&ids.iter().collect::<Vec<_>>()))
         .transpose()?;
+    // The catalog build stores the classifier's verdict per video; rows it
+    // has not seen yet are classified here, with the same rule.
     let sql = format!(
-        "SELECT item_json FROM video_catalog
-          WHERE (?1 IS NULL OR artist_tidal_id IN (SELECT value FROM json_each(?1)))
+        "SELECT c.item_json, f.programmable FROM video_catalog c
+           LEFT JOIN video_facets f ON f.tidal_video_id = c.tidal_video_id
+          WHERE (?1 IS NULL OR c.artist_tidal_id IN (SELECT value FROM json_each(?1)))
           {extra_where}"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([ids_json], |row| row.get::<_, String>(0))?;
+    let rows = stmt.query_map([ids_json], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<bool>>(1)?))
+    })?;
     let mut out = Vec::new();
-    for json in rows {
-        if let Ok(video) = serde_json::from_str::<VideoCandidate>(&json?)
-            && !is_excluded(&video)
+    for row in rows {
+        let (json, programmable) = row?;
+        if let Ok(video) = serde_json::from_str::<VideoCandidate>(&json)
+            && programmable.unwrap_or_else(|| !is_excluded(&video))
         {
             out.push(video);
         }
@@ -390,10 +373,16 @@ pub fn candidates(
             .into_iter()
             .filter(is_duet)
             .collect(),
-        StationId::Live => catalog(conn, None, "")?
-            .into_iter()
-            .filter(is_live)
-            .collect(),
+        // Built facets narrow the scan to live and session cuts; rows the
+        // build has not seen yet are classified by is_live.
+        StationId::Live => catalog(
+            conn,
+            None,
+            "AND (f.cut IS NULL OR f.cut IN ('live', 'session'))",
+        )?
+        .into_iter()
+        .filter(is_live)
+        .collect(),
         StationId::Spotlight(artist) => catalog(conn, Some(&HashSet::from([*artist])), "")?,
         StationId::Charts => {
             let ranks = chart_ranks(conn)?;
@@ -596,6 +585,31 @@ pub(crate) mod tests {
         }
         assert_eq!(pool_ids(&conn, StationId::Duets), vec![1, 2]);
         assert_eq!(pool_ids(&conn, StationId::Live), vec![3]);
+    }
+
+    #[test]
+    fn built_facets_decide_and_new_rows_fall_back_to_the_classifier() {
+        let conn = conn();
+        let mut live = video(1, 10);
+        live.title = "Song (En Vivo)".into();
+        add_video(&conn, &live);
+        add_video(&conn, &video(2, 20));
+        crate::services::video_intel::cuts::build(&conn).unwrap();
+        // The build's verdict wins over a fine-looking title.
+        conn.execute(
+            "UPDATE video_facets SET programmable = 0 WHERE tidal_video_id = 2",
+            [],
+        )
+        .unwrap();
+        // Ingested after the build: classified on the spot, Portuguese live.
+        let mut late = video(3, 30);
+        late.title = "Saudade (Ao Vivo)".into();
+        add_video(&conn, &late);
+        let mut late_clip = video(4, 40);
+        late_clip.duration_s = Some(30);
+        add_video(&conn, &late_clip);
+        assert_eq!(pool_ids(&conn, StationId::Shuffle), vec![1, 3]);
+        assert_eq!(pool_ids(&conn, StationId::Live), vec![1, 3]);
     }
 
     #[test]

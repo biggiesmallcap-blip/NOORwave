@@ -3,45 +3,55 @@
 	import { api, type TidalSearchVideo, type VideoHistoryEntry } from '$lib/api/client';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import InlineConfirm from '$lib/components/ui/InlineConfirm.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { playVideo } from '$lib/stores/video_session';
 	import { showToast } from '$lib/stores/toast';
-	import { formatDateShort } from '$lib/utils/format';
+	import { historyDays, playsLine } from '$lib/video/history_days';
+	import { keepView, lastView } from '$lib/video/view_cache';
 
-	// The History tab: every video you have watched, newest first, one card
-	// per video with how far you got. Watches are recorded by the player; the
+	// The History tab: every video you have watched, newest first, in days
+	// (Today, Yesterday, the weekday, then the date), one card per video with
+	// how far you got. Watches are recorded by the player; the
 	// same history keeps recently watched picks off the shelves and feeds the
 	// discovery crawler, so removing one here also lets it come back.
 	const HISTORY_LIMIT = 200;
-	let entries = $state<VideoHistoryEntry[]>([]);
-	let loading = $state(true);
+	// A revisit opens on the last list at once (no skeleton, no entry
+	// motion) and refreshes it underneath.
+	const seen = lastView<VideoHistoryEntry[]>('history');
+	const rise = !seen;
+	let entries = $state<VideoHistoryEntry[]>(seen ?? []);
+	let loading = $state(!seen);
 	let failed = $state(false);
 	let clearing = $state(false);
 
 	let queue = $derived(entries.map((entry) => entry.video));
+	let days = $derived(historyDays(entries));
+	let countLine = $derived(
+		entries.length >= HISTORY_LIMIT ? `Your latest ${HISTORY_LIMIT} videos` : `${entries.length} ${entries.length === 1 ? 'video' : 'videos'}`
+	);
 
 	async function load() {
 		try {
 			entries = (await api.getVideoHistory(HISTORY_LIMIT)).items;
 			failed = false;
 		} catch {
-			failed = true;
+			// A failed refresh keeps the list already on screen.
+			if (!seen) failed = true;
 		} finally {
 			loading = false;
 		}
 	}
+
+	$effect(() => {
+		if (!loading && !failed) keepView('history', entries);
+	});
 
 	function progress(entry: VideoHistoryEntry): number | null {
 		if (entry.completed) return 1;
 		const duration = entry.duration_ms ?? entry.video.duration_ms;
 		if (!duration || !entry.watched_ms) return null;
 		return Math.min(1, entry.watched_ms / duration);
-	}
-
-	function watchedLine(entry: VideoHistoryEntry): string {
-		const when = formatDateShort(entry.watched_at);
-		const times = entry.plays > 1 ? ` - watched ${entry.plays} times` : '';
-		return `${when}${times}`;
 	}
 
 	function play(video: TidalSearchVideo) {
@@ -62,7 +72,6 @@
 
 	async function clearAll() {
 		if (clearing || entries.length === 0) return;
-		if (!confirm('Clear your whole watch history? Recently watched picks can then come back on the shelves.')) return;
 		clearing = true;
 		try {
 			const result = await api.clearVideoHistory();
@@ -91,36 +100,47 @@
 	{:else if entries.length === 0}
 		<EmptyState title="Nothing watched yet" copy="Videos you play show up here, newest first, with how far you got." />
 	{:else}
-		<div class="history-head">
-			<h2>Watch history</h2>
-			<span class="count">{entries.length >= HISTORY_LIMIT ? `Latest ${HISTORY_LIMIT}` : `${entries.length} ${entries.length === 1 ? 'video' : 'videos'}`}</span>
-			<button type="button" class="btn btn-ghost clear" disabled={clearing} onclick={() => void clearAll()}>Clear history</button>
-		</div>
-		<div class="video-grid">
-			{#each entries as entry, index (entry.video.tidal_id)}
-				{@const done = progress(entry)}
-				<div class="history-card rise-in-card" style={`--rise-index: ${index % 24}`}>
-					<VideoCard video={entry.video} onSelect={(item) => !('id' in item) && play(item)} />
-					{#if done !== null}
-						<div class="progress" aria-label={entry.completed ? 'Watched to the end' : `Watched ${Math.round(done * 100)}%`}>
-							<span style={`width: ${Math.max(4, done * 100)}%`}></span>
+		<header class="opener">
+			<div class="opener-text">
+				<h2>History</h2>
+				<p>{countLine}, newest first, with how far you got.</p>
+			</div>
+			<InlineConfirm
+				label="Clear history"
+				question={entries.length >= HISTORY_LIMIT ? 'Clear your whole watch history?' : `Clear all ${entries.length} ${entries.length === 1 ? 'video' : 'videos'}?`}
+				confirmLabel="Clear"
+				busy={clearing}
+				onconfirm={() => void clearAll()}
+			/>
+		</header>
+		{#each days as day (day.key)}
+			<section class="day" aria-label={day.label}>
+				<h3 class="day-label">{day.label}<span class="day-count">{day.entries.length}</span></h3>
+				<div class="video-grid">
+					{#each day.entries as entry, index (entry.video.tidal_id)}
+						{@const done = progress(entry)}
+						<div class="history-card" class:rise-in-card={rise} style={`--rise-index: ${index % 24}`}>
+							<VideoCard video={entry.video} onSelect={(item) => !('id' in item) && play(item)} />
+							{#if done !== null}
+								<div class="progress" aria-label={entry.completed ? 'Watched to the end' : `Watched ${Math.round(done * 100)}%`}>
+									<span style={`width: ${Math.max(4, done * 100)}%`}></span>
+								</div>
+							{/if}
+							{#if entry.plays > 1}<p class="watched">{playsLine(entry.plays)}</p>{/if}
+							<button
+								type="button"
+								class="remove"
+								aria-label={`Remove ${entry.video.title} from watch history`}
+								title="Remove from history"
+								onclick={() => void remove(entry)}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+							</button>
 						</div>
-					{/if}
-					<div class="watched">
-						<span>{watchedLine(entry)}</span>
-						<button
-							type="button"
-							class="remove"
-							aria-label={`Remove ${entry.video.title} from watch history`}
-							title="Remove from history"
-							onclick={() => void remove(entry)}
-						>
-							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
-						</button>
-					</div>
+					{/each}
 				</div>
-			{/each}
-		</div>
+			</section>
+		{/each}
 	{/if}
 </div>
 
@@ -128,34 +148,71 @@
 	.history-page {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
+		gap: var(--space-6);
+	}
+
+	/* The opener, as the Logbook's: the word in the titles' italic serif,
+	   one quiet line, and clearing kept quiet beside it. */
+	.opener {
+		display: flex;
+		align-items: flex-end;
+		justify-content: space-between;
 		gap: var(--space-4);
 	}
 
-	.history-head {
-		display: flex;
-		align-items: baseline;
-		gap: var(--space-3);
+	.opener-text {
+		display: grid;
+		gap: 6px;
 	}
 
-	.history-head h2 {
+	.opener h2 {
 		margin: 0;
-		font-size: var(--font-size-xl);
-		font-weight: var(--font-weight-bold);
+		color: var(--text-primary);
+		font-family: var(--font-display);
+		font-size: var(--font-size-2xl);
+		font-style: italic;
+		font-weight: var(--font-weight-medium);
+		line-height: var(--line-height-tight);
+		letter-spacing: -0.01em;
 	}
 
-	.count {
+	.opener p {
+		margin: 0;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-sm);
 	}
 
-	.clear {
-		margin-left: auto;
+	/* A day: its name over a hairline, then its cards. */
+	.day {
+		display: grid;
+		gap: var(--space-4);
+	}
+
+	.day-label {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		margin: 0;
+		padding-bottom: var(--space-2);
+		border-bottom: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		font-size: var(--font-size-label);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+	}
+
+	.day-count {
+		color: var(--text-tertiary);
+		font-family: var(--font-mono);
+		font-weight: var(--font-weight-medium);
+		letter-spacing: 0;
 	}
 
 	.video-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-		gap: 14px;
+		gap: 18px 14px;
 	}
 
 	.history-card {
@@ -165,7 +222,7 @@
 
 	/* How far you got, as a thin bar under the card. */
 	.progress {
-		height: 3px;
+		height: 2px;
 		margin-top: var(--space-2);
 		border-radius: 999px;
 		background: var(--border-subtle);
@@ -179,25 +236,26 @@
 	}
 
 	.watched {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		margin-top: var(--space-1);
+		margin: var(--space-1) 0 0;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 	}
 
+	/* Removing sits on the picture's corner, only for the card you are on. */
 	.remove {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		z-index: 1;
 		display: grid;
 		place-items: center;
-		width: 22px;
-		height: 22px;
-		margin-left: auto;
+		width: 26px;
+		height: 26px;
 		padding: 0;
 		border: 0;
 		border-radius: 50%;
-		background: transparent;
-		color: var(--text-tertiary);
+		background: rgba(0, 0, 0, 0.6);
+		color: rgba(255, 255, 255, 0.86);
 		cursor: pointer;
 		opacity: 0;
 		transition: opacity var(--motion-fast), background var(--motion-fast), color var(--motion-fast);
@@ -209,8 +267,8 @@
 	}
 
 	.remove:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
+		background: rgba(0, 0, 0, 0.82);
+		color: #fff;
 	}
 
 	.remove:focus-visible {

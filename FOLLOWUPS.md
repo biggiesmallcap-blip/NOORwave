@@ -18,6 +18,44 @@ for the rest of the session. The woven row's reason could also name the songs
 it sits between ("between Artist A and Artist B"); today it shows the lane
 only ("TIDAL mix" / "Last.fm similar").
 Spawned by: the Include new weave branch (bsc/new-button-lastfm-behavior-a81f85).
+### videos: Atlas and Air follow-ups
+
+Left after the Atlas and Air build (On Air, Atlas, Archive, Logbook). None
+blocks it; each is small on its own.
+- Light rule: the Archive's Best first order uses a local rule (watched or
+  saved = lit, library = warm); the Atlas uses `services/video_intel/light.rs`,
+  which also counts liked tracks and albums and one-hop warmth. Move the
+  Archive onto light.rs so its order agrees with the map.
+- Scene names: five scenes still show exemplar names ("Nicki Minaj & Charli
+  xcx", "Maroon 5 & Khalid", "Dido & The Cranberries", "Meghan Trainor & Becky
+  G", "Chris Webby & Avril Lavigne"); pin names in the curated table in
+  `video_intel/scenes.rs`. The graph has no separate Underground Electronic
+  scene (those artists sit in Indie, Trip-Hop and Dance Hits).
+- On Air: the guide window does not scroll in time while open; Live Stage
+  does not interleave concerts; +/- shapes the next 12-item refill rather
+  than "the next 10 slots"; taste changes reach tomorrow's day build only.
+- Pinch zoom on the Atlas is untested on a touch screen.
+- Archive: hide zero-count lens chips ("Clips 0" under the programmable
+  default); lens choices are remembered only in the URL, not across tab hops.
+- Logbook: there is no cheap liked-videos count for its Liked row.
+- Spawned by: branch `bsc/video-exploration-redesign-56c487` (Atlas and Air).
+
+### videos: Journal tab
+
+A fifth video tab growing the Today pieces into a small magazine: Today,
+Artist of the week, The Wall (a colour-sorted mosaic of every artist's
+picture in triangles, diamonds and hexagons) and back issues. Plan sketch:
+`docs/plans/2026-10-14-journal.md`. Not started; open: the name, and what
+stays below Scenes on On Air.
+- Spawned by: branch `bsc/video-exploration-redesign-56c487` (Atlas and Air).
+
+### videos: Journal, after the core
+
+Once the Journal's first version ships: the other collages (One song,
+every cut; A year in pictures; On stage) and short stories (New on the map
+this week; The most collaborative artist in a scene; Songs filmed 10
+times; Your month in videos). See the plan's "Later" section.
+- Spawned by: branch `bsc/video-exploration-redesign-56c487` (Atlas and Air).
 
 ### tidal: confirm the playlist move toIndex convention live
 

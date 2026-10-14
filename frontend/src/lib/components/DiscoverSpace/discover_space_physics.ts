@@ -1,21 +1,146 @@
-// Force simulation for the DiscoverSpace visualization.
-// Pure functions on plain arrays — no Svelte reactivity inside.
+// Layout and motion for the DiscoverSpace visualization.
+// Pure functions on plain arrays - no Svelte reactivity inside.
+//
+// Position is data, not decoration:
+//   - distance from the seed is rank (closer = ranked higher), the same order
+//     as the results list;
+//   - the angle groups tracks by genre family, one sector per family, sized by
+//     how many tracks it holds (tracks with no genre share a last sector).
+// The simulation only eases each node toward that target and keeps nodes from
+// overlapping. Edges do not pull, so a dense cluster of links cannot drag a
+// weak match inward.
 
 import type { DiscoverTrackNode, DiscoverEdge } from './discover_space_types';
+import { nodeFamily } from './discover_space_genre';
 
-// Force constants — tuned for calm, underwater feel
-const REPULSION              = 1600;  // node-node push
-const ATTRACTION             = 0.002; // edge spring pull
-const ANCHOR_GRAVITY         = 0.0002; // pull toward seed — low so nodes orbit at 200–400px, not 76px
-const GENRE_CENTROID_STRENGTH = 0.005;
+// Rank 0 (best) sits on the inner radius, the last rank on the outer one.
+export const R_NEAR = 150;
+export const R_FAR = 520;
 
-const DAMPING   = 0.82;   // heavy damping — damps 86% velocity in 10 ticks
-const MAX_SPEED = 1.2;    // world-units/tick cap — prevents layout-update lurches
+/** Rings drawn at the rank quartiles, so the map can be read like the list. */
+export const RANK_RINGS = [0.25, 0.5, 0.75].map((q) => ({
+	q,
+	r: R_NEAR + q * (R_FAR - R_NEAR),
+	label: `Top ${Math.round(q * 100)}%`,
+}));
 
-// Switch between pairwise direct repulsion and grid-bucketed repulsion.
-const DIRECT_REPULSION_THRESHOLD = 80;
+const SPRING = 0.06;        // pull toward the target point, per tick
+const DAMPING = 0.78;
+const MAX_SPEED = 6;        // world units per tick
+const COLLIDE_PAD = 6;      // world units kept clear between node edges
+const SECTOR_GAP = 0.06;    // radians between family sectors
+const GOLDEN = 0.6180339887;
+// Reduced motion lays out in one call; this many overlap passes settle it.
+const REDUCED_MOTION_PASSES = 40;
 
-// ─── Spatial grid ─────────────────────────────────────────────────────────────
+// Below this many nodes collisions are checked pairwise; above, via a grid.
+const DIRECT_COLLISION_THRESHOLD = 160;
+
+/** The score the list sorts by: session rerank, then shaped, then normalized. */
+export function displayScore(node: DiscoverTrackNode): number {
+	return node.rerankScore ?? node.shapedScore ?? node.score;
+}
+
+/**
+ * Give every non-seed node its rank, target radius and target angle. With
+ * `place`, nodes that have never been placed jump straight to their target
+ * (a new space appears laid out, instead of flying in from server hints).
+ */
+export function assignLayoutTargets(nodes: DiscoverTrackNode[], place: boolean): void {
+	pinSeeds(nodes);
+	const stars = nodes.filter((n) => !n.isSeed);
+	if (stars.length === 0) return;
+
+	const ranked = stars.toSorted((a, b) => displayScore(b) - displayScore(a) || a.trackId - b.trackId);
+	const last = Math.max(1, ranked.length - 1);
+	ranked.forEach((node, i) => {
+		node.rank = ranked.length > 1 ? i / last : 0;
+		node.targetR = R_NEAR + node.rank * (R_FAR - R_NEAR);
+	});
+
+	// One sector per genre family, largest first; untagged tracks go last.
+	const groups = new Map<string, DiscoverTrackNode[]>();
+	for (const node of ranked) {
+		const key = nodeFamily(node)?.key ?? '';
+		const group = groups.get(key);
+		if (group) group.push(node);
+		else groups.set(key, [node]);
+	}
+	const order = [...groups.entries()].sort(([ka, a], [kb, b]) => {
+		if (ka === '' || kb === '') return ka === '' ? 1 : -1;
+		return b.length - a.length || ka.localeCompare(kb);
+	});
+	const gaps = order.length > 1 ? order.length * SECTOR_GAP : 0;
+	const usable = Math.PI * 2 - gaps;
+	let cursor = -Math.PI / 2;
+	for (const [, members] of order) {
+		const width = (usable * members.length) / ranked.length;
+		members.forEach((node, j) => {
+			// Golden-ratio spread inside the sector, so neighbours in rank are
+			// not also neighbours in angle (fewer collisions on one ring).
+			const f = ((j + 0.5) * GOLDEN) % 1;
+			node.targetAngle = cursor + width * f;
+		});
+		cursor += width + (order.length > 1 ? SECTOR_GAP : 0);
+	}
+
+	if (place) {
+		for (const node of stars) {
+			if (node.placed) continue;
+			const [tx, ty] = targetPoint(node);
+			// Tiny deterministic offset so coincident targets can separate.
+			node.x = tx + ((node.trackId % 7) - 3) * 0.5;
+			node.y = ty + ((node.trackId % 5) - 2) * 0.5;
+			node.vx = 0;
+			node.vy = 0;
+			node.placed = true;
+		}
+	}
+}
+
+/**
+ * Seeds sit on the shared origin that the rank targets and rings use. The
+ * server's layout hint puts a lone seed at (80, 0), which made "closer ranks
+ * higher" false; a lone seed now pins to (0, 0). Blend seeds keep their
+ * relative spread, recentered so their centroid is the origin.
+ */
+function pinSeeds(nodes: DiscoverTrackNode[]): void {
+	const seeds = nodes.filter((n) => n.isSeed);
+	if (seeds.length === 0) return;
+	const hint = (n: DiscoverTrackNode): [number, number] =>
+		seeds.length > 1 ? [n.layoutHint?.x ?? 0, n.layoutHint?.y ?? 0] : [0, 0];
+	const cx = seeds.reduce((sum, n) => sum + hint(n)[0], 0) / seeds.length;
+	const cy = seeds.reduce((sum, n) => sum + hint(n)[1], 0) / seeds.length;
+	for (const seed of seeds) {
+		const [hx, hy] = hint(seed);
+		const x = hx - cx;
+		const y = hy - cy;
+		seed.targetR = Math.hypot(x, y);
+		seed.targetAngle = Math.atan2(y, x);
+		seed.x = x;
+		seed.y = y;
+		seed.vx = 0;
+		seed.vy = 0;
+		seed.placed = true;
+	}
+}
+
+/** Put a node exactly on its target (seeds: their pinned origin point). */
+function pinOrSnap(node: DiscoverTrackNode): void {
+	const [tx, ty] = targetPoint(node);
+	node.x = tx;
+	node.y = ty;
+	node.vx = 0;
+	node.vy = 0;
+}
+
+function targetPoint(node: DiscoverTrackNode): [number, number] {
+	const r = node.targetR ?? (node.isSeed ? 0 : R_FAR);
+	const a = node.targetAngle ?? 0;
+	return [Math.cos(a) * r, Math.sin(a) * r];
+}
+
+// --- Spatial grid -------------------------------------------------------------
 
 interface SpatialCell { nodes: DiscoverTrackNode[]; }
 
@@ -53,63 +178,53 @@ function invalidateGridCache(): void {
 	_cachedGridNodes = null;
 }
 
-function applyGridRepulsion(nodes: DiscoverTrackNode[], grid: Map<string, SpatialCell>, cellSize: number): void {
+// --- Collision ----------------------------------------------------------------
+
+function separate(a: DiscoverTrackNode, b: DiscoverTrackNode): void {
+	const dx = b.x - a.x;
+	const dy = b.y - a.y;
+	const min = a.radius + b.radius + COLLIDE_PAD;
+	const d2 = dx * dx + dy * dy;
+	if (d2 >= min * min) return;
+	const dist = Math.sqrt(d2) || 0.01;
+	const push = (min - dist) * 0.5;
+	const ux = dx / dist;
+	const uy = dy / dist;
+	// The seed is pinned; the other node takes the whole correction.
+	const wa = a.isSeed ? 0 : b.isSeed ? 1 : 0.5;
+	const wb = b.isSeed ? 0 : a.isSeed ? 1 : 0.5;
+	a.vx -= ux * push * wa;
+	a.vy -= uy * push * wa;
+	b.vx += ux * push * wb;
+	b.vy += uy * push * wb;
+}
+
+function resolveCollisions(nodes: DiscoverTrackNode[]): void {
+	if (nodes.length <= DIRECT_COLLISION_THRESHOLD) {
+		for (let i = 0; i < nodes.length; i++) {
+			for (let j = i + 1; j < nodes.length; j++) separate(nodes[i]!, nodes[j]!);
+		}
+		return;
+	}
+	const cell = 64;
+	const grid = buildSpatialGrid(nodes, cell);
 	for (const node of nodes) {
-		const cx = Math.floor(node.x / cellSize);
-		const cy = Math.floor(node.y / cellSize);
+		const cx = Math.floor(node.x / cell);
+		const cy = Math.floor(node.y / cell);
 		for (let dx = -1; dx <= 1; dx++) {
 			for (let dy = -1; dy <= 1; dy++) {
-				const cell = grid.get(`${cx + dx},${cy + dy}`);
-				if (!cell) continue;
-				for (const other of cell.nodes) {
-					if (other === node) continue;
-					const ddx = other.x - node.x;
-					const ddy = other.y - node.y;
-					const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 1;
-					const force = REPULSION / (dist * dist);
-					// Asymmetric per-pair (visited twice — once from each end), so
-					// the net force matches the symmetric direct path below.
-					node.vx -= (ddx / dist) * force;
-					node.vy -= (ddy / dist) * force;
+				const bucket = grid.get(`${cx + dx},${cy + dy}`);
+				if (!bucket) continue;
+				for (const other of bucket.nodes) {
+					// Each pair once: order by track id.
+					if (other.trackId > node.trackId) separate(node, other);
 				}
 			}
 		}
 	}
 }
 
-function applyDirectRepulsion(nodes: DiscoverTrackNode[]): void {
-	for (let i = 0; i < nodes.length; i++) {
-		for (let j = i + 1; j < nodes.length; j++) {
-			const dx = nodes[j]!.x - nodes[i]!.x;
-			const dy = nodes[j]!.y - nodes[i]!.y;
-			const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-			const force = REPULSION / (dist * dist);
-			const fx = (dx / dist) * force;
-			const fy = (dy / dist) * force;
-			nodes[i]!.vx -= fx;
-			nodes[i]!.vy -= fy;
-			nodes[j]!.vx += fx;
-			nodes[j]!.vy += fy;
-		}
-	}
-}
-
-// ─── Genre centroids ──────────────────────────────────────────────────────────
-
-function computeGenreCentroids(nodes: DiscoverTrackNode[]): Map<string, { x: number; y: number }> {
-	const sums = new Map<string, { x: number; y: number; count: number }>();
-	for (const node of nodes) {
-		const key = node.genres[0] ?? node.topGenre ?? 'unknown';
-		const entry = sums.get(key) ?? { x: 0, y: 0, count: 0 };
-		entry.x += node.x; entry.y += node.y; entry.count += 1;
-		sums.set(key, entry);
-	}
-	const out = new Map<string, { x: number; y: number }>();
-	for (const [key, { x, y, count }] of sums) out.set(key, { x: x / count, y: y / count });
-	return out;
-}
-
-// ─── Kinetic energy (for settling) ───────────────────────────────────────────
+// --- Kinetic energy (for settling) -------------------------------------------
 
 export function kineticEnergy(nodes: DiscoverTrackNode[]): number {
 	let e = 0, count = 0;
@@ -121,7 +236,7 @@ export function kineticEnergy(nodes: DiscoverTrackNode[]): number {
 	return e / Math.max(1, count);
 }
 
-// ─── Main force function ──────────────────────────────────────────────────────
+// --- Main force function ------------------------------------------------------
 
 interface PhysicsConfig {
 	genreLensActive: boolean;
@@ -130,86 +245,64 @@ interface PhysicsConfig {
 
 export function applyForces(
 	nodes: DiscoverTrackNode[],
-	edges: DiscoverEdge[],
+	_edges: DiscoverEdge[],
 	config: PhysicsConfig
 ): void {
 	if (nodes.length === 0) return;
 
-	// ── Repulsion ──────────────────────────────────────────────────────────────
-	if (nodes.length > DIRECT_REPULSION_THRESHOLD) {
-		const grid = getOrBuildGrid(nodes, 120);
-		applyGridRepulsion(nodes, grid, 120);
-	} else {
-		applyDirectRepulsion(nodes);
-	}
-
-	// ── Edge attraction ────────────────────────────────────────────────────────
-	const nodeById = new Map(nodes.map((n) => [n.trackId, n]));
-	for (const edge of edges) {
-		const from = nodeById.get(edge.fromTrackId);
-		const to   = nodeById.get(edge.toTrackId);
-		if (!from || !to) continue;
-		const dx = to.x - from.x;
-		const dy = to.y - from.y;
-		const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-		const force = dist * ATTRACTION * edge.weight;
-		const fx = (dx / dist) * force;
-		const fy = (dy / dist) * force;
-		from.vx += fx; from.vy += fy;
-		to.vx   -= fx; to.vy   -= fy;
-	}
-
-	// ── Anchor gravity: pull all nodes toward seed at (0,0) ───────────────────
-	for (const node of nodes) {
-		if (node.isSeed) continue;
-		// Cold-start / external nodes sit further out (weaker pull → orbit at edge)
-		const strength = ANCHOR_GRAVITY * (node.isColdStart ? 0.35 : 0.9);
-		node.vx -= node.x * strength;  // pull toward (0,0) where seed is pinned
-		node.vy -= node.y * strength;
-	}
-
-	// ── Genre centroid pull (stronger in Genre lens) ──────────────────────────
-	const genreStrength = config.genreLensActive ? GENRE_CENTROID_STRENGTH * 2.5 : GENRE_CENTROID_STRENGTH;
-	const centroids = computeGenreCentroids(nodes);
-	for (const node of nodes) {
-		if (node.isSeed) continue;
-		const centroid = centroids.get(node.genres[0] ?? node.topGenre ?? 'unknown');
-		if (centroid) {
-			node.vx += (centroid.x - node.x) * genreStrength;
-			node.vy += (centroid.y - node.y) * genreStrength;
+	if (config.prefersReducedMotion) {
+		// The caller settles after this one call, so finish the layout here:
+		// snap to the targets, then a bounded relaxation for overlaps.
+		for (const node of nodes) {
+			pinOrSnap(node);
 		}
+		for (let pass = 0; pass < REDUCED_MOTION_PASSES; pass++) {
+			resolveCollisions(nodes);
+			for (const node of nodes) {
+				if (!node.isSeed) {
+					node.x += node.vx;
+					node.y += node.vy;
+				}
+				node.vx = 0;
+				node.vy = 0;
+			}
+		}
+		invalidateGridCache();
+		return;
 	}
 
-	// ── Integrate: pin seed, dampen + clamp others ────────────────────────────
+	// Ease toward the rank and family target.
+	for (const node of nodes) {
+		if (node.isSeed) continue;
+		const [tx, ty] = targetPoint(node);
+		node.vx += (tx - node.x) * SPRING;
+		node.vy += (ty - node.y) * SPRING;
+	}
+
+	resolveCollisions(nodes);
+
+	// Integrate: pin seeds, dampen + clamp the rest.
 	for (const node of nodes) {
 		if (node.isSeed) {
-			node.x = node.layoutHint?.x ?? 0;
-			node.y = node.layoutHint?.y ?? 0;
-			node.vx = 0; node.vy = 0;
+			pinOrSnap(node);
 			continue;
 		}
-		if (config.prefersReducedMotion) {
-			node.vx = 0; node.vy = 0;
-		} else {
-			node.vx *= DAMPING;
-			node.vy *= DAMPING;
-			// Velocity clamp: prevent layout-update lurches. Explicit sqrt is
-			// faster than Math.hypot in V8 (Math.hypot pays for overflow handling).
-			const speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
-			if (speed > MAX_SPEED) {
-				node.vx = (node.vx / speed) * MAX_SPEED;
-				node.vy = (node.vy / speed) * MAX_SPEED;
-			}
+		node.vx *= DAMPING;
+		node.vy *= DAMPING;
+		const speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
+		if (speed > MAX_SPEED) {
+			node.vx = (node.vx / speed) * MAX_SPEED;
+			node.vy = (node.vy / speed) * MAX_SPEED;
 		}
 		node.x += node.vx;
 		node.y += node.vy;
 	}
 
-	// Positions moved → invalidate hit-test grid (rebuilt lazily on next use).
+	// Positions moved -> invalidate hit-test grid (rebuilt lazily on next use).
 	invalidateGridCache();
 }
 
-// ─── Hover hit-testing ────────────────────────────────────────────────────────
+// --- Hover hit-testing --------------------------------------------------------
 
 function findNodeLinear(
 	nodes: DiscoverTrackNode[],
@@ -235,7 +328,7 @@ export function findNodeNear(
 	worldY: number,
 	hitRadius = 32
 ): DiscoverTrackNode | null {
-	if (nodes.length < DIRECT_REPULSION_THRESHOLD) {
+	if (nodes.length < 80) {
 		return findNodeLinear(nodes, worldX, worldY, hitRadius);
 	}
 	const cellSize = 80;

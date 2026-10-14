@@ -23,12 +23,12 @@ afterEach(() => {
 });
 
 describe('appearance preferences', () => {
-	it('starts fresh with Futuro, dark surfaces, and Standing Wave without writing defaults', async () => {
+	it('starts fresh with Pure Black, dark surfaces, and no wallpaper without writing defaults', async () => {
 		const values = stubStorage();
 		const stores = await appearance();
-		expect(get(stores.palette)).toBe('futuro');
+		expect(get(stores.palette)).toBe('void');
 		expect(get(stores.surfaceMode)).toBe('dark');
-		expect(get(stores.wallpaper)).toBe('standing-wave');
+		expect(get(stores.wallpaper)).toBe('none');
 		expect(values.size).toBe(0);
 	});
 
@@ -67,9 +67,9 @@ describe('appearance preferences', () => {
 			'noor-wallpaper': 'removed-wallpaper',
 		});
 		const stores = await appearance();
-		expect(get(stores.palette)).toBe('futuro');
+		expect(get(stores.palette)).toBe('void');
 		expect(get(stores.surfaceMode)).toBe('dark');
-		expect(get(stores.wallpaper)).toBe('standing-wave');
+		expect(get(stores.wallpaper)).toBe('none');
 	});
 
 	it.each(['missing', 'blocked'])('uses the original defaults when storage is %s', async (state) => {
@@ -78,9 +78,9 @@ describe('appearance preferences', () => {
 			setItem: () => { throw new Error('Storage blocked'); },
 		});
 		const stores = await appearance();
-		expect(get(stores.palette)).toBe('futuro');
+		expect(get(stores.palette)).toBe('void');
 		expect(get(stores.surfaceMode)).toBe('dark');
-		expect(get(stores.wallpaper)).toBe('standing-wave');
+		expect(get(stores.wallpaper)).toBe('none');
 		expect(() => stores.setPalette('iris')).not.toThrow();
 		expect(get(stores.palette)).toBe('iris');
 	});

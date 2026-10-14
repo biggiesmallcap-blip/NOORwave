@@ -88,7 +88,7 @@
 		position: fixed;
 		z-index: 200;
 		width: 260px;
-		background: rgba(12, 12, 24, 0.96);
+		background: var(--bg-surface-strong);
 		backdrop-filter: var(--blur-overlay);
 		-webkit-backdrop-filter: var(--blur-overlay);
 		border: 1px solid var(--panel-border);
@@ -98,17 +98,17 @@
 		flex-direction: column;
 		gap: 8px;
 		pointer-events: none;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+		box-shadow: var(--panel-shadow);
 	}
 	.card-title {
 		font-weight: var(--font-weight-semibold);
 		font-size: var(--font-size-sm);
-		color: rgba(255, 255, 255, 0.95);
+		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.card-artist { font-size: var(--font-size-xs); color: rgba(255, 255, 255, 0.5); }
+	.card-artist { font-size: var(--font-size-xs); color: var(--text-tertiary); }
 
 	.card-chips {
 		display: flex;
@@ -118,26 +118,26 @@
 	.chip {
 		padding: 2px 7px;
 		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.07);
-		color: rgba(255, 255, 255, 0.7);
+		background: var(--bg-hover);
+		color: var(--text-secondary);
 		font-size: var(--font-size-2xs);
 		font-variant-numeric: tabular-nums;
 	}
 	.chip.energy {
 		background: hsla(calc(240deg - var(--e, 0.5) * 200deg), 60%, 40%, 0.3);
-		color: hsla(calc(240deg - var(--e, 0.5) * 200deg), 80%, 80%, 1);
+		color: var(--text-primary);
 	}
 
 	.card-reason { display: flex; flex-direction: column; gap: 2px; }
 	.reason-badge {
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-semibold);
-		color: rgba(124, 128, 255, 0.9);
+		color: var(--accent-strong);
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 	}
-	.reason-copy { font-size: var(--font-size-xs); color: rgba(255, 255, 255, 0.4); line-height: var(--line-height-normal); }
-	.reason-why { font-size: var(--font-size-xs); color: rgba(200, 202, 255, 0.9); line-height: var(--line-height-normal); }
+	.reason-copy { font-size: var(--font-size-xs); color: var(--text-tertiary); line-height: var(--line-height-normal); }
+	.reason-why { font-size: var(--font-size-xs); color: var(--accent-strong); line-height: var(--line-height-normal); }
 
 	.card-meta {
 		display: flex;
@@ -149,10 +149,10 @@
 		border-radius: 4px;
 		font-size: var(--font-size-2xs);
 	}
-	.source-tag { background: rgba(100,120,220,0.15); color: rgba(160,170,255,0.8); }
-	.seed-tag { background: rgba(80,80,200,0.2); color: rgba(180,180,255,0.9); }
-	.cold-tag { background: rgba(60,60,80,0.3); color: rgba(160,160,180,0.6); }
-	.genre-tag { background: rgba(80,180,100,0.1); color: rgba(120,200,140,0.8); }
+	.source-tag { background: var(--accent-soft); color: var(--accent-strong); }
+	.seed-tag { background: var(--accent-line); color: var(--accent-strong); }
+	.cold-tag { background: var(--bg-surface); color: var(--text-tertiary); }
+	.genre-tag { background: color-mix(in srgb, var(--state-success) 14%, transparent); color: var(--state-success); }
 
 	.card-conf {
 		display: flex;
@@ -163,7 +163,7 @@
 		flex: 1;
 		height: 3px;
 		border-radius: 999px;
-		background: rgba(255,255,255,0.08);
+		background: var(--bg-hover);
 		position: relative;
 		overflow: hidden;
 	}
@@ -172,8 +172,8 @@
 		position: absolute;
 		left: 0; top: 0; bottom: 0;
 		width: calc(var(--c, 0.5) * 100%);
-		background: rgba(124, 128, 255, 0.7);
+		background: var(--accent);
 		border-radius: 999px;
 	}
-	.conf-label { font-size: var(--font-size-2xs); color: rgba(255,255,255,0.35); white-space: nowrap; }
+	.conf-label { font-size: var(--font-size-2xs); color: var(--text-tertiary); white-space: nowrap; }
 </style>

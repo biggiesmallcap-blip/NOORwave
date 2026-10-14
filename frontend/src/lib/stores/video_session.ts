@@ -1,6 +1,9 @@
 import { derived, get, writable } from 'svelte/store';
 import { api } from '$lib/api/client';
 import type { TidalSearchVideo, TidalVideoMixItem } from '$lib/api/client';
+import type { ExploreMode, VideoChannel } from '$lib/api/video_explore_types';
+import { tuneStart } from '$lib/video/onair/clock';
+import { tuneMode } from '$lib/video/onair/tune_mode';
 
 export type VideoSessionItem = TidalSearchVideo | TidalVideoMixItem;
 export type VideoSessionSource = 'none' | 'direct' | 'search' | 'mix';
@@ -31,6 +34,9 @@ export interface VideoSessionState {
 	/** Last reported playback position, kept so returning to /videos resumes
 	 *  the picture in sync with the audio that never stopped. */
 	positionMs: number;
+	/** Where the current video's first load starts, in seconds. A channel
+	 *  tune-in lands mid-video at the scheduled offset; everything else is 0. */
+	startAtS: number;
 }
 
 /** Browse context the route hands to the controller when it starts a video:
@@ -44,10 +50,19 @@ export interface VideoPlayContext {
 	resetRadio?: boolean;
 	/** Library radio keeps the supplied opening queue and refills from the
 	 * listener's taste and recently played artists instead of one fixed artist. */
-	radioScope?: 'artist' | 'library' | 'station';
+	radioScope?: 'artist' | 'library' | 'station' | 'channel';
 	/** Station mode: refills come from this station instead of artist radio. */
 	stationId?: string;
 	stationNonce?: string;
+	/** Channel mode (On Air): refills come from the channel's next endpoint. */
+	channelId?: string;
+	channelNonce?: string;
+	/** The tuned channel, for the stage's bug and the dial's "on air" mark. */
+	channel?: VideoChannel;
+	/** More of this same queue, asked for as it runs low and when it ends
+	 *  (the liked wall, while its background scan is still finding matches).
+	 *  May return everything; only what is not queued or played yet is kept. */
+	extend?: () => Promise<VideoSessionItem[]>;
 }
 
 export interface PreloadedVideoStream {
@@ -88,10 +103,16 @@ const initialState: VideoSessionState = {
 	streamExpiresAt: null,
 	playing: false,
 	positionMs: 0,
+	startAtS: 0,
 };
 
-function findCurrentIndex(queue: VideoSessionItem[], current: VideoSessionItem | null): number {
+/** Where `current` sits in `queue`. A schedule may play a video twice
+ *  ([A, B, C, B, C]: Spotlight cycles an artist's songs), so a known
+ *  position wins: `at` while it still holds `current`, else the first
+ *  occurrence. */
+function findCurrentIndex(queue: VideoSessionItem[], current: VideoSessionItem | null, at = -1): number {
 	if (!current) return -1;
+	if (at >= 0 && queue[at]?.tidal_id === current.tidal_id) return at;
 	return queue.findIndex((item) => item.tidal_id === current.tidal_id);
 }
 
@@ -109,10 +130,16 @@ function radioStartQueue(item: VideoSessionItem): VideoSessionItem[] {
 
 const session = writable<VideoSessionState>(initialState);
 
-function update(patch: Partial<VideoSessionState>) {
+/** Bumped by every tune, pick and Stop: an answer that arrives after a
+ *  newer command is stale. */
+let playCommand = 0;
+
+/** Patch the session. The cursor stays where it was while that still holds
+ *  the current video, or moves to `at` (a step through the queue). */
+function update(patch: Partial<VideoSessionState>, at?: number) {
 	session.update((state) => {
 		const next = { ...state, ...patch };
-		next.currentIndex = findCurrentIndex(next.queue, next.current);
+		next.currentIndex = findCurrentIndex(next.queue, next.current, at ?? state.currentIndex);
 		next.active = next.current !== null;
 		return next;
 	});
@@ -123,6 +150,7 @@ export const videoSession = {
 	/** Refresh the autoplay queue + source attribution without touching the
 	 *  currently-playing video (called as the route's search results change). */
 	setContext(ctx: { queue: VideoSessionItem[]; source: VideoSessionSource; sourceLabel: string | null }) {
+		setExtender(null, ctx.queue);
 		update({ queue: ctx.queue, source: ctx.source, sourceLabel: ctx.sourceLabel });
 	},
 	setAutoplay(autoplay: boolean) {
@@ -143,6 +171,7 @@ export const videoSession = {
 		clearStation();
 		persistAutoplayPreference(true);
 		const queue = radioStartQueue(state.current);
+		setExtender(null, queue);
 		update({ queue, continuous: true, autoplay: true, radioIssue: null,
 			radioSearching: false, radioDiscoveryMessage: null, radioHits: [],
 			radioSeedArtistId: state.current.artist_id ?? null, radioSeedArtistName: state.current.artist_name ?? null,
@@ -174,9 +203,10 @@ export const videoSession = {
 			? `You've seen everything in ${radioStationTitle}. Pick another station to keep going.`
 			: 'Radio could not find another video. Start radio to try again.';
 		clearStation();
-		persistAutoplayPreference(false);
+		// Autoplay stays as the listener set it: radio running dry is not a
+		// reason for the next queue to stop after one video.
 		update({ continuous: false, radioSeedArtistId: null, radioSeedArtistName: null,
-			autoplay: false, playing: false, radioSearching: false, sourceLabel: 'Video queue',
+			playing: false, radioSearching: false, sourceLabel: 'Video queue',
 			radioIssue: issue });
 	},
 	setPlaying(playing: boolean) {
@@ -217,7 +247,7 @@ export function playVideoNext(item: VideoSessionItem): boolean {
 	if (state.current?.tidal_id === item.tidal_id) return false;
 	const queued = state.queue.find(video => video.tidal_id === item.tidal_id);
 	const queue = queueWithCurrent(state).filter(video => video.tidal_id !== item.tidal_id);
-	queue.splice(findCurrentIndex(queue, state.current) + 1, 0, queued ?? item);
+	queue.splice(findCurrentIndex(queue, state.current, state.currentIndex) + 1, 0, queued ?? item);
 	update({ queue, ...(state.source === 'none' ? { source: 'direct', sourceLabel: 'Video queue' } : {}) });
 	return true;
 }
@@ -258,16 +288,54 @@ let radioSeedVideoId: number | null = null;
 let radioStationId: string | null = null;
 let radioStationTitle: string | null = null;
 let radioStationNonce = '';
+let radioChannelId: string | null = null;
+let radioChannelNonce = '';
+/** The session's "more / less like this" presses on a channel, by artist.
+ *  They ride along with every channel refill until the session ends. */
+let tasteMore: number[] = [];
+let tasteLess: number[] = [];
+const TASTE_CAP = 64;
+
+// A plain queue's own way to grow (VideoPlayContext.extend), what it has
+// already queued, and a pause after a pass that found nothing new. The
+// generation moves whenever another queue (or radio) replaces this one, so
+// an end-of-queue step that waited on the source can tell it was replaced.
+let queueGeneration = 0;
+let queueExtender: (() => Promise<VideoSessionItem[]>) | null = null;
+let extendSeenIds = new Set<number>();
+let extendSeenSongs = new Set<string>();
+let extendPending: Promise<number> | null = null;
+let extendQuietUntil = 0;
+const EXTEND_QUIET_MS = 60_000;
+
+function setExtender(extend: (() => Promise<VideoSessionItem[]>) | null, queue: VideoSessionItem[]) {
+	queueGeneration += 1;
+	queueExtender = extend;
+	extendSeenIds = new Set(queue.map((video) => video.tidal_id));
+	extendSeenSongs = new Set(queue.map(videoSongKey));
+	extendPending = null;
+	extendQuietUntil = 0;
+}
 
 const onAirStation = writable<string | null>(null);
 /** The station whose refills feed the current session, for "On air" marks. */
 export const videoStationOnAir = { subscribe: onAirStation.subscribe };
 
+const onAirChannel = writable<VideoChannel | null>(null);
+/** The On Air channel feeding the current session, or null. Like stations,
+ *  a channel is only on air while the session is still continuous: a shelf
+ *  or a single video picked after tuning takes the set off the channel. */
+export const videoChannelOnAir = derived([session, onAirChannel], ([$session, $channel]) =>
+	$session.active && $session.continuous ? $channel : null);
+
 function clearStation() {
 	radioStationId = null;
 	radioStationTitle = null;
 	radioStationNonce = '';
+	radioChannelId = null;
+	radioChannelNonce = '';
 	onAirStation.set(null);
+	onAirChannel.set(null);
 }
 let lastRefillBuilding = false;
 
@@ -283,6 +351,10 @@ interface WatchRecord {
 	durationMs: number | null;
 	finished: boolean;
 	completed: boolean;
+	/** Where this play started (a channel tune-in joins mid-video). Watched
+	 *  time counts from here, so a zap two seconds after tuning in at 50%
+	 *  still reads as a zap and not as half a video watched. */
+	startMs: number;
 }
 
 let watch: WatchRecord | null = null;
@@ -310,7 +382,7 @@ function finishWatch(completed: boolean) {
  *  timeupdate does not re-render every subscriber. */
 export function noteVideoProgress(positionMs: number, durationMs?: number) {
 	if (!watch || watch.finished || !Number.isFinite(positionMs)) return;
-	watch.watchedMs = Math.max(watch.watchedMs, positionMs);
+	watch.watchedMs = Math.max(watch.watchedMs, positionMs - watch.startMs);
 	if (durationMs && Number.isFinite(durationMs) && durationMs > 0) watch.durationMs = durationMs;
 }
 
@@ -328,10 +400,10 @@ function sourceFor(item: VideoSessionItem, ctx: VideoPlayContext): VideoSessionS
 /** Log a started video so the editorial builder can hold it out of the next few
  *  rotations, then report how much of it was watched. Fire-and-forget: a
  *  dropped write only costs a repeat pick. */
-function recordWatch(item: VideoSessionItem) {
+function recordWatch(item: VideoSessionItem, startMs = 0) {
 	if (watch && watch.videoId !== item.tidal_id) finishWatch(false);
 	const record: WatchRecord = {
-		videoId: item.tidal_id, historyId: null, watchedMs: 0,
+		videoId: item.tidal_id, historyId: null, watchedMs: 0, startMs,
 		durationMs: item.duration_ms ?? null, finished: false, completed: false,
 	};
 	watch = record;
@@ -357,7 +429,13 @@ function recordWatch(item: VideoSessionItem) {
 export async function playVideo(
 	item: VideoSessionItem,
 	ctx: VideoPlayContext,
-	opts: { preloaded?: PreloadedVideoStream | null; step?: boolean } = {}
+	opts: {
+		preloaded?: PreloadedVideoStream | null;
+		step?: boolean;
+		startAtS?: number;
+		/** Its position in the queue, for a step: the queue may hold it twice. */
+		index?: number;
+	} = {}
 ): Promise<boolean> {
 	// Re-selecting the video that is already playing (returning to /videos with
 	// its ?videoId= still in the URL, a stale jump request, clicking its own
@@ -370,14 +448,21 @@ export async function playVideo(
 		radioSeenSongs = [item];
 		radioRefill = null;
 		const station = ctx.radioScope === 'station' ? ctx.stationId ?? null : null;
+		const channel = ctx.radioScope === 'channel' ? ctx.channelId ?? null : null;
 		radioStationId = station;
 		onAirStation.set(station);
-		radioStationTitle = station ? ctx.sourceLabel : null;
+		radioChannelId = channel;
+		radioChannelNonce = channel ? ctx.channelNonce ?? Math.random().toString(36).slice(2) : '';
+		onAirChannel.set(channel ? ctx.channel ?? null : null);
+		radioStationTitle = station ? ctx.sourceLabel : channel ? ctx.channel?.title ?? ctx.sourceLabel : null;
 		radioStationNonce = station ? ctx.stationNonce ?? Math.random().toString(36).slice(2) : '';
 		radioSeedVideoId = !ctx.radioScope || ctx.radioScope === 'artist' ? item.tidal_id : null;
 	}
 	const artistRadio = !ctx.radioScope || ctx.radioScope === 'artist';
 	const queue = ctx.resetRadio && ctx.continuous && artistRadio ? radioStartQueue(item) : ctx.queue;
+	// A new queue (not a step through the current one, which hands back the
+	// session's own array) brings its own way to grow, or none.
+	if (ctx.queue !== state.queue) setExtender(ctx.continuous ? null : ctx.extend ?? null, queue);
 	const seed = artistRadio ? item : null;
 	const radioSeedArtistId = ctx.continuous ? (ctx.resetRadio ? seed?.artist_id ?? null : state.radioSeedArtistId) : null;
 	const radioSeedArtistName = ctx.continuous ? (ctx.resetRadio ? seed?.artist_name ?? null : state.radioSeedArtistName) : null;
@@ -405,6 +490,9 @@ export async function playVideo(
 	}
 
 	if (state.current && state.current.tidal_id !== item.tidal_id) finishWatch(false);
+	// A pick (not a step through the queue) is the newest command: a tune
+	// still waiting for its schedule gives way to it.
+	if (!opts.step) playCommand += 1;
 	const seq = ++streamSeq;
 	// Picking something new always means "show it": the video pages scroll
 	// their stage back into view. Queue steps (autoplay, next, previous) keep
@@ -425,8 +513,9 @@ export async function playVideo(
 		error: null,
 		streamUrl: opts.preloaded?.url ?? null,
 		streamExpiresAt: opts.preloaded?.expiresAt ?? null,
-		positionMs: 0,
-	});
+		startAtS: opts.startAtS && opts.startAtS > 0 ? opts.startAtS : 0,
+		positionMs: opts.startAtS && opts.startAtS > 0 ? Math.round(opts.startAtS * 1000) : 0,
+	}, opts.index);
 
 	try {
 		let url = opts.preloaded?.url ?? null;
@@ -444,7 +533,7 @@ export async function playVideo(
 			radioSeenSongs.push(item);
 			radioSeenSongs = radioSeenSongs.slice(-128);
 		}
-		recordWatch(item);
+		recordWatch(item, opts.startAtS && opts.startAtS > 0 ? opts.startAtS * 1000 : 0);
 		if (ctx.continuous) void refillVideoRadio(Boolean(ctx.resetRadio));
 		return true;
 	} catch (err) {
@@ -469,7 +558,14 @@ export function refillVideoRadio(force = false): Promise<number> {
 	const excluded = state.queue.map((v) => v.tidal_id);
 	const recentArtists = state.queue.slice(Math.max(0, state.currentIndex - 8), state.currentIndex + 1)
 		.map((v) => v.artist_id).filter((id): id is number => id != null);
-	const request: Promise<{ items: VideoSessionItem[]; building: boolean; exhausted: boolean }> = radioStationId
+	const request: Promise<{ items: VideoSessionItem[]; building: boolean; exhausted: boolean }> = radioChannelId
+		? api.getVideoChannelNext(radioChannelId, {
+			exclude_video_ids: [...new Set([...excluded, ...radioSeenIds.slice(-256)])],
+			session_nonce: radioChannelNonce,
+			more_artist_ids: [...tasteMore],
+			less_artist_ids: [...tasteLess],
+		}).then(({ items, exhausted }) => ({ items, building: false, exhausted }))
+		: radioStationId
 		? api.getVideoStationNext(radioStationId, {
 			exclude_video_ids: excluded,
 			recent_video_ids: radioSeenIds.slice(-128),
@@ -542,6 +638,58 @@ export function refillVideoRadio(force = false): Promise<number> {
 	return pending;
 }
 
+/** Grow a plain (non-radio) queue from its own source, keeping only what it
+ *  has not queued yet, in the source's order. Shared by the dock's lookahead
+ *  and the end of the queue; after a pass with nothing new the lookahead
+ *  waits a minute before asking again. */
+export function extendVideoQueue(force = false): Promise<number> {
+	if (extendPending) return extendPending;
+	const extend = queueExtender;
+	const state = get(session);
+	if (!extend || !state.active || state.continuous) return Promise.resolve(0);
+	if (!force && (Date.now() < extendQuietUntil || state.queue.length - state.currentIndex > 5)) return Promise.resolve(0);
+	const pending = extend().then((items) => {
+		const current = get(session);
+		if (queueExtender !== extend || current.continuous || !current.active) return 0;
+		const queued = new Set(current.queue.map((video) => video.tidal_id));
+		const fresh = items.filter((item) => {
+			const key = videoSongKey(item);
+			if (queued.has(item.tidal_id) || extendSeenIds.has(item.tidal_id) || extendSeenSongs.has(key)) return false;
+			extendSeenIds.add(item.tidal_id);
+			extendSeenSongs.add(key);
+			return true;
+		});
+		extendQuietUntil = fresh.length > 0 ? 0 : Date.now() + EXTEND_QUIET_MS;
+		if (fresh.length > 0) update({ queue: [...current.queue, ...fresh] });
+		return fresh.length;
+	}).catch(() => {
+		extendQuietUntil = Date.now() + EXTEND_QUIET_MS;
+		return 0;
+	});
+	extendPending = pending;
+	void pending.finally(() => {
+		if (extendPending === pending) extendPending = null;
+	});
+	return pending;
+}
+
+/** A plain queue that ends while autoplay is on carries on as library radio
+ *  from what it played (its recent artists and their neighbours, then the
+ *  listener's library), instead of going quiet. */
+function carryOnAsRadio(state: VideoSessionState) {
+	radioGeneration += 1;
+	radioRefill = null;
+	radioSeedVideoId = null;
+	clearStation();
+	setExtender(null, []);
+	radioSeenIds = state.queue.map((video) => video.tidal_id).slice(-256);
+	radioSeenSongs = state.queue.slice(-128);
+	update({
+		continuous: true, radioSeedArtistId: null, radioSeedArtistName: null,
+		radioIssue: null, radioHits: [], sourceLabel: 'Video radio',
+	});
+}
+
 /** Start a station: its first batch becomes the queue, refills follow. */
 /** Start a station. `startWith` (a frame picked from its preview) plays
  *  first and the station carries on after it. */
@@ -564,6 +712,132 @@ export async function playVideoStation(
 	});
 }
 
+/** The scheduled video's runtime: the channel's own program length when the
+ *  tune answered with what is on now, else the video's duration. */
+function scheduledDuration(channel: VideoChannel, video: VideoSessionItem): number | null {
+	if (channel.now && channel.now.video.tidal_id === video.tidal_id && channel.now.duration_s > 0) return channel.now.duration_s;
+	return video.duration_ms != null && video.duration_ms > 0 ? video.duration_ms / 1000 : null;
+}
+
+/** "12 Bay Area Rap": how a tuned channel reads in the queue panel. */
+export function channelSourceLabel(channel: Pick<VideoChannel, 'no' | 'title'>): string {
+	return `${String(channel.no).padStart(2, '0')} ${channel.title}`;
+}
+
+/** Tune in to an On Air channel. The channel is on a clock, so this joins
+ *  the scheduled video where the schedule is now (offset_s) rather than at
+ *  0:00 (clock.tuneStart has the edges), unless the listener chose to start
+ *  from the top (tune_mode). The rest of
+ *  the schedule is queued and refills come from the channel. Zaps and holds
+ *  are recorded by the usual watch history. */
+export async function playVideoChannel(id: string, opts: { explore?: ExploreMode } = {}): Promise<boolean> {
+	// The schedule is fetched before playback starts: a later tune, a pick
+	// or Stop while it loads makes this answer stale, and it must not play.
+	const command = ++playCommand;
+	const tune = await api.tuneVideoChannel(id, opts.explore ? { explore: opts.explore } : {});
+	if (command !== playCommand) return false;
+	const scheduled = tune.video;
+	const start = tuneStart(tune.offset_s, scheduledDuration(tune.channel, scheduled), get(tuneMode));
+	const rest = tune.queue.filter((item) => item.tidal_id !== scheduled.tidal_id);
+	const skip = start.skip && rest.length > 0;
+	const queue = skip ? rest : [scheduled, ...rest];
+	const first = queue[0];
+	if (!first) return false;
+	// Nothing after it to skip to: join the tail anyway, it is what is on.
+	const startAtS = skip ? 0 : start.skip ? Math.max(0, tune.offset_s) : start.startAt;
+	return playVideo(first, {
+		queue,
+		source: 'mix',
+		sourceLabel: channelSourceLabel(tune.channel),
+		autoplay: true,
+		continuous: true,
+		resetRadio: true,
+		radioScope: 'channel',
+		channelId: tune.channel.id || id,
+		channelNonce: Math.random().toString(36).slice(2),
+		channel: tune.channel,
+	}, { startAtS, index: 0 });
+}
+
+/** "More / less like this" for an artist while a channel is on air. Both go
+ *  with every later refill; "less" also drops that artist's upcoming picks
+ *  now (the one playing stays). Returns how many upcoming videos it dropped. */
+export function noteChannelTaste(artistId: number, more: boolean): number {
+	tasteMore = tasteMore.filter((id) => id !== artistId);
+	tasteLess = tasteLess.filter((id) => id !== artistId);
+	if (more) tasteMore = [...tasteMore, artistId].slice(-TASTE_CAP);
+	else tasteLess = [...tasteLess, artistId].slice(-TASTE_CAP);
+	if (more) return 0;
+	const state = get(session);
+	const dropped = state.queue.filter((video, index) => index > state.currentIndex && video.artist_id === artistId);
+	if (dropped.length === 0) return 0;
+	// An in-flight refill must not bring them back.
+	radioSeenIds = [...radioSeenIds, ...dropped.map((video) => video.tidal_id)].slice(-256);
+	const droppedIds = new Set(dropped.map((video) => video.tidal_id));
+	update({ queue: state.queue.filter((video) => !droppedIds.has(video.tidal_id)) });
+	return dropped.length;
+}
+
+/** More / Less like this on the channel that is on air (the panel's
+ *  buttons, + and - on the stage). Less drops the artist's upcoming videos
+ *  now; More lines up a neighbour, the artist and another neighbour right
+ *  after the playing video. Both lean this sitting's refills (the artist
+ *  and, a little, its nearest neighbours) and are remembered on the server
+ *  as a small lean that fades within four weeks; the Logbook can undo it.
+ *  Without a channel, or when the server cannot be reached, only the local
+ *  part happens. */
+export async function steerChannel(
+	artistId: number,
+	artistName: string | null,
+	more: boolean,
+): Promise<{ dropped: number; added: number }> {
+	const dropped = noteChannelTaste(artistId, more);
+	const channel = radioChannelId;
+	if (!channel) return { dropped, added: 0 };
+	const generation = radioGeneration;
+	const before = get(session);
+	let items: VideoSessionItem[] = [];
+	try {
+		({ items } = await api.steerVideoChannel(channel, {
+			artist_id: artistId,
+			artist_name: artistName,
+			more,
+			exclude_video_ids: [...new Set([...before.queue.map((v) => v.tidal_id), ...radioSeenIds.slice(-256)])],
+		}));
+	} catch {
+		return { dropped, added: 0 };
+	}
+	if (!more || generation !== radioGeneration || radioChannelId !== channel) return { dropped, added: 0 };
+	const state = get(session);
+	const existing = new Set(state.queue.map((v) => v.tidal_id));
+	const songs = new Set([...state.queue, ...radioSeenSongs].map(videoSongKey));
+	const fresh = items.filter((item) => {
+		const key = videoSongKey(item);
+		if (existing.has(item.tidal_id) || songs.has(key)) return false;
+		songs.add(key);
+		return true;
+	});
+	if (fresh.length === 0) return { dropped, added: 0 };
+	const queue = [...state.queue];
+	queue.splice(state.currentIndex + 1, 0, ...fresh);
+	update({ queue });
+	radioSeenIds = [...radioSeenIds, ...fresh.map((item) => item.tidal_id)].slice(-256);
+	radioSeenSongs = [...radioSeenSongs, ...fresh].slice(-128);
+	return { dropped, added: fresh.length };
+}
+
+/** What a steer did, in a short line for the stage and the panel. */
+export function steerMessage(name: string, more: boolean, result: { dropped: number; added: number }): string {
+	if (more) {
+		return result.added > 0
+			? `More like ${name}: ${result.added} lined up next`
+			: `More like ${name} from here on`;
+	}
+	return result.dropped > 0
+		? `Less like ${name}: ${result.dropped} fewer coming up`
+		: `Less like ${name} from here on`;
+}
+
 /** Re-fetch the current video's stream (expiry / network recovery). */
 export async function refreshVideoStream(): Promise<string> {
 	const current = get(session).current;
@@ -582,7 +856,7 @@ async function refillUntilNext(currentId: number | undefined): Promise<VideoSess
 		await refillVideoRadio(true);
 		const refreshed = get(session);
 		if (!refreshed.continuous || refreshed.current?.tidal_id !== currentId) return 'superseded';
-		const next = refreshed.queue[findCurrentIndex(refreshed.queue, refreshed.current) + 1];
+		const next = refreshed.queue[findCurrentIndex(refreshed.queue, refreshed.current, refreshed.currentIndex) + 1];
 		if (next) return next;
 		if (!lastRefillBuilding || attempt >= radioRetryPolicy.attempts) return null;
 		await new Promise((resolve) => setTimeout(resolve, radioRetryPolicy.delayMs));
@@ -594,22 +868,41 @@ async function refillUntilNext(currentId: number | undefined): Promise<VideoSess
 export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | null } = {}): Promise<boolean> {
 	const state = get(session);
 	if (!state.autoplay) return false;
-	const index = findCurrentIndex(state.queue, state.current);
+	const index = findCurrentIndex(state.queue, state.current, state.currentIndex);
 	if (index < 0) return false;
 	const next = state.queue[index + 1];
 	if (!next) {
-		if (state.continuous) {
-			const replenished = await refillUntilNext(state.current?.tidal_id);
-			// A click may have replaced radio while its request was in flight.
-			if (replenished === 'superseded') return true;
-			const refreshed = get(session);
-			if (!refreshed.autoplay) return true;
-			// No preloaded stream here: it belonged to a video that did not exist yet.
-			if (replenished) return playVideo(replenished, {
-				queue: refreshed.queue, source: refreshed.source,
-				sourceLabel: refreshed.sourceLabel, autoplay: true, continuous: true,
-			}, { step: true });
+		if (!state.continuous) {
+			// A plain queue first asks its own source for more, then carries
+			// on as radio from what it played. The listener can act while the
+			// source answers: everything is read again after the wait.
+			const queueAt = queueGeneration;
+			await extendVideoQueue(true);
+			const settled = get(session);
+			if (settled.current?.tidal_id !== state.current?.tidal_id || !settled.autoplay) return true;
+			// Grown by the source, added to by hand, or replaced by a queue
+			// that goes on past this video: play what is next there.
+			const following = settled.queue[settled.currentIndex + 1];
+			if (following) return playVideo(following, {
+				queue: settled.queue, source: settled.source,
+				sourceLabel: settled.sourceLabel, autoplay: true, continuous: settled.continuous,
+			}, { step: true, index: settled.currentIndex + 1 });
+			if (!settled.continuous) {
+				// A plain queue that replaced this one is not ours to turn into radio.
+				if (queueGeneration !== queueAt) return true;
+				carryOnAsRadio(settled);
+			}
 		}
+		const replenished = await refillUntilNext(state.current?.tidal_id);
+		// A click may have replaced radio while its request was in flight.
+		if (replenished === 'superseded') return true;
+		const refreshed = get(session);
+		if (!refreshed.autoplay) return true;
+		// No preloaded stream here: it belonged to a video that did not exist yet.
+		if (replenished) return playVideo(replenished, {
+			queue: refreshed.queue, source: refreshed.source,
+			sourceLabel: refreshed.sourceLabel, autoplay: true, continuous: true,
+		}, { step: true, index: refreshed.currentIndex + 1 });
 		update({ playing: false });
 		return false;
 	}
@@ -619,7 +912,7 @@ export async function advanceVideo(opts: { preloaded?: PreloadedVideoStream | nu
 		sourceLabel: state.sourceLabel,
 		autoplay: true,
 		continuous: state.continuous,
-	}, { ...opts, step: true });
+	}, { ...opts, step: true, index: index + 1 });
 }
 
 /** Return to a video already played in this session. Keeps the queue context. */
@@ -630,7 +923,7 @@ export async function previousVideo(): Promise<boolean> {
 	return playVideo(previous, {
 		queue: state.queue, source: state.source, sourceLabel: state.sourceLabel,
 		autoplay: state.autoplay, continuous: state.continuous,
-	}, { step: true });
+	}, { step: true, index: state.currentIndex - 1 });
 }
 
 /** Skip to the next queued video regardless of the autoplay preference. */
@@ -647,11 +940,12 @@ export async function nextVideo(): Promise<boolean> {
 	return playVideo(next, {
 		queue: refreshed.queue, source: refreshed.source, sourceLabel: refreshed.sourceLabel,
 		autoplay: refreshed.autoplay, continuous: refreshed.continuous,
-	}, { step: true });
+	}, { step: true, index: refreshed.currentIndex + 1 });
 }
 
 /** Stop the video session entirely and free the dock. */
 export function clearVideoSession() {
+	playCommand += 1;
 	finishWatch(false);
 	watch = null;
 	streamSeq += 1;
@@ -660,7 +954,10 @@ export function clearVideoSession() {
 	radioSeenSongs = [];
 	radioRefill = null;
 	radioSeedVideoId = null;
+	tasteMore = [];
+	tasteLess = [];
 	clearStation();
+	setExtender(null, []);
 	session.set({ ...initialState, autoplay: loadAutoplayPreference() });
 }
 

@@ -1,24 +1,38 @@
 //! Turns relevance and the artist ledger into a ranked job list. Pure.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::Connection;
 
 use super::artist_state::ArtistState;
 use super::graph::Relevance;
+use super::setting::{self, DiscoverySetting};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JobKind {
     Probe,
     Recheck,
-    Page { offset: i64 },
+    Page {
+        offset: i64,
+    },
     Expand,
-    ResolveVideo { video_id: i64 },
-    GenreSearch { genre: String },
+    /// An expand for an artist with videos but no edges: the chart lane.
+    Chart,
+    ResolveVideo {
+        video_id: i64,
+    },
+    GenreSearch {
+        genre: String,
+    },
     HarvestMixes,
-    HarvestEditorial { playlists: bool },
-    ArtistMix { mix_id: String },
+    HarvestEditorial {
+        playlists: bool,
+    },
+    ArtistMix {
+        mix_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,7 +53,7 @@ pub struct Job {
 impl Job {
     pub fn estimated_calls(&self) -> usize {
         match self.kind {
-            JobKind::Expand => 4,
+            JobKind::Expand | JobKind::Chart => 4,
             JobKind::HarvestMixes => 5,
             JobKind::HarvestEditorial { playlists: true } => 11,
             _ => 1,
@@ -53,6 +67,7 @@ pub fn label(kind: &JobKind) -> &'static str {
         JobKind::Recheck => "recheck",
         JobKind::Page { .. } => "page",
         JobKind::Expand => "expand",
+        JobKind::Chart => "chart",
         JobKind::ResolveVideo { .. } => "resolve_video",
         JobKind::GenreSearch { .. } => "genre_search",
         JobKind::HarvestMixes => "harvest_mixes",
@@ -340,6 +355,73 @@ pub fn plan_with_mixes(input: &PlanInput, policy: MixPolicy, limit: usize) -> Ve
     rank(&mut jobs);
     let mut jobs = interleave(jobs);
     jobs.truncate(limit);
+    jobs
+}
+
+/// An artist the map cannot place: videos on file, no edge to anyone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChartCandidate {
+    pub artist_id: i64,
+    pub videos: i64,
+    pub popularity: Option<i32>,
+}
+
+/// The chart lane's pace on the full setting: one expansion (about four
+/// calls) per ten minutes, roughly a twentieth of the idle budget.
+pub const CHART_EVERY_FULL: Duration = Duration::from_secs(600);
+/// Where a chart job joins the plan: after the plan's best work.
+pub const CHART_SLOT: usize = 6;
+const CHART_VALUE: f64 = 0.01;
+
+/// How often the chart lane may spend an expansion: none when discovery is
+/// off, slower in step with the smaller budget when it is limited.
+pub fn chart_interval(setting: DiscoverySetting) -> Option<Duration> {
+    if !setting.background() {
+        return None;
+    }
+    let full = setting::FULL_BUDGET.idle_per_hour as f64;
+    let share = setting.budget().idle_per_hour.max(1) as f64 / full;
+    Some(CHART_EVERY_FULL.mul_f64(1.0 / share.clamp(0.01, 1.0)))
+}
+
+/// The uncharted artist most worth charting: many videos and well known
+/// first, lowest id on ties. A low-value Normal job, so it never outranks
+/// anything the plan wants.
+pub fn chart_job(candidates: &[ChartCandidate]) -> Option<Job> {
+    let score = |c: &ChartCandidate| {
+        (1.0 + c.videos.max(0) as f64).ln()
+            * (0.5 + c.popularity.unwrap_or(0).clamp(0, 100) as f64 / 100.0)
+    };
+    candidates
+        .iter()
+        .filter(|c| c.artist_id > 0)
+        .max_by(|a, b| {
+            score(a)
+                .total_cmp(&score(b))
+                .then(b.artist_id.cmp(&a.artist_id))
+        })
+        .map(|c| Job {
+            artist_id: c.artist_id,
+            kind: JobKind::Chart,
+            class: JobClass::Normal,
+            value: CHART_VALUE * score(c),
+        })
+}
+
+/// Slot a chart job in after the plan's first `CHART_SLOT` jobs (or at the
+/// end of a shorter plan), unless the plan already expands that artist.
+pub fn with_chart(mut jobs: Vec<Job>, chart: Option<Job>) -> Vec<Job> {
+    let Some(chart) = chart else {
+        return jobs;
+    };
+    if jobs
+        .iter()
+        .any(|j| j.artist_id == chart.artist_id && j.kind == JobKind::Expand)
+    {
+        return jobs;
+    }
+    let at = CHART_SLOT.min(jobs.len());
+    jobs.insert(at, chart);
     jobs
 }
 
@@ -679,5 +761,72 @@ mod tests {
             6,
             "an empty new-artist list never blocks liked work"
         );
+    }
+
+    #[test]
+    fn the_chart_lane_picks_the_biggest_uncharted_artist_at_a_slow_pace() {
+        let candidates = [
+            ChartCandidate {
+                artist_id: 7,
+                videos: 3,
+                popularity: Some(20),
+            },
+            ChartCandidate {
+                artist_id: 8,
+                videos: 40,
+                popularity: Some(60),
+            },
+            ChartCandidate {
+                artist_id: 9,
+                videos: 40,
+                popularity: None,
+            },
+        ];
+        let job = chart_job(&candidates).unwrap();
+        assert_eq!((job.artist_id, &job.kind), (8, &JobKind::Chart));
+        assert_eq!(job.class, JobClass::Normal);
+        assert!(job.value < 0.1, "never outranks real work");
+        assert!(chart_job(&[]).is_none());
+
+        assert_eq!(chart_interval(DiscoverySetting::Off), None);
+        let full = chart_interval(DiscoverySetting::Full).unwrap();
+        let limited = chart_interval(DiscoverySetting::Limited).unwrap();
+        assert_eq!(full, CHART_EVERY_FULL);
+        assert!(limited > full * 5, "limited runs proportionally fewer");
+    }
+
+    #[test]
+    fn a_chart_job_joins_after_the_plans_best_work() {
+        let work = |artist_id| Job {
+            artist_id,
+            kind: JobKind::Probe,
+            class: JobClass::Priority,
+            value: 1.0,
+        };
+        let chart = Job {
+            artist_id: 99,
+            kind: JobKind::Chart,
+            class: JobClass::Normal,
+            value: 0.01,
+        };
+        let plan: Vec<Job> = (1..=10).map(work).collect();
+        let merged = with_chart(plan.clone(), Some(chart.clone()));
+        assert_eq!(merged.len(), 11);
+        assert_eq!(merged[CHART_SLOT], chart);
+        assert_eq!(
+            &merged[..CHART_SLOT],
+            &plan[..CHART_SLOT],
+            "roots still win"
+        );
+        let short = with_chart(plan[..2].to_vec(), Some(chart.clone()));
+        assert_eq!(short.last(), Some(&chart));
+        let expanding = vec![Job {
+            artist_id: 99,
+            kind: JobKind::Expand,
+            class: JobClass::Priority,
+            value: 1.0,
+        }];
+        assert_eq!(with_chart(expanding.clone(), Some(chart)), expanding);
+        assert_eq!(with_chart(plan.clone(), None), plan);
     }
 }

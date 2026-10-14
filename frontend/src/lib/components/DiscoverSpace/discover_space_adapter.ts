@@ -40,6 +40,7 @@ function deterministicInitialPosition(
 // ─── Reason normalization (mirrors Rust normalizer) ──────────────────────────
 
 const REASON_MAP: Record<string, DiscoverReason> = {
+	similar: 'similar', metadata_similarity: 'similar', audio_texture: 'similar', embedding: 'similar',
 	harmonic: 'harmonic', harmonic_match: 'harmonic',
 	behavioural: 'behavioral', behavioral: 'behavioral', same_pocket: 'behavioral', taste_mesh: 'behavioral',
 	bpm_match: 'bpm',
@@ -51,9 +52,18 @@ const REASON_MAP: Record<string, DiscoverReason> = {
 	prompt_match: 'external', scene_match: 'external',
 };
 
+// The server sends reasons already normalized; those pass through as-is.
+// Without this, "external", "energy", "artist" and friends fell through
+// REASON_MAP (which only knew raw tags) and the Reason lens painted them grey.
+const CANONICAL_REASONS = new Set<DiscoverReason>([
+	'similar', 'harmonic', 'behavioral', 'bpm', 'artist', 'album', 'genre', 'energy', 'external', 'unknown',
+]);
+
 function normalizeReason(tag?: string): DiscoverReason {
 	if (!tag) return 'unknown';
-	return REASON_MAP[tag.trim()] ?? 'unknown';
+	const t = tag.trim();
+	if (CANONICAL_REASONS.has(t as DiscoverReason)) return t as DiscoverReason;
+	return REASON_MAP[t] ?? 'unknown';
 }
 
 function normalizeReasonTags(tags?: string[]): DiscoverReason[] {
@@ -243,7 +253,8 @@ function adaptNode(
 		y: initY,
 		vx: 0,
 		vy: 0,
-		radius: api.layout?.radius_hint ?? (isSeedNode ? 24 : 5 + score * 18),
+		// Size encodes one variable, confidence; distance from the seed is rank.
+		radius: isSeedNode ? 24 : 7 + clamp01(conf) * 11,
 		layoutHint: api.layout,
 	};
 }

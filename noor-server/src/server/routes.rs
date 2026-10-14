@@ -95,8 +95,13 @@ mod tidal_home_routes;
 mod tidal_library;
 mod tidal_match;
 mod tidal_sync_routes;
+mod video_atlas_looks_routes;
+mod video_atlas_routes;
+mod video_channel_routes;
 mod video_discovery_routes;
+mod video_intel_routes;
 mod video_station_routes;
+mod video_today_routes;
 pub use discovery_routes::{TrainingSpawn, spawn_discovery_training};
 pub use tidal_sync_routes::trigger_auto_sync;
 
@@ -740,6 +745,101 @@ pub fn api_routes(state: SharedState) -> Router {
         .route(
             "/api/videos/stations/{id}/next",
             post(video_station_routes::post_video_station_next),
+        )
+        // Atlas and Air: catalog intelligence, the map, and numbered channels.
+        // All local reads over derived tables; only probes reach the crawler.
+        .route(
+            "/api/videos/census",
+            get(video_intel_routes::get_video_census),
+        )
+        .route(
+            "/api/videos/archive",
+            get(video_intel_routes::get_video_archive),
+        )
+        .route(
+            "/api/videos/songs/{key}/versions",
+            get(video_intel_routes::get_video_song_versions),
+        )
+        .route(
+            "/api/videos/videos/{id}/song",
+            get(video_intel_routes::get_video_song_by_video),
+        )
+        .route(
+            "/api/videos/concerts/{id}",
+            get(video_intel_routes::get_video_concert),
+        )
+        .route(
+            "/api/videos/intel/rebuild",
+            post(video_intel_routes::post_video_intel_rebuild),
+        )
+        .route(
+            "/api/videos/atlas",
+            get(video_atlas_routes::get_video_atlas),
+        )
+        .route(
+            "/api/videos/atlas/names",
+            get(video_atlas_routes::get_video_atlas_names),
+        )
+        .route(
+            "/api/videos/atlas/artists/{id}",
+            get(video_atlas_routes::get_video_atlas_artist),
+        )
+        .route(
+            "/api/videos/atlas/scenes/{id}",
+            get(video_atlas_routes::get_video_atlas_scene),
+        )
+        .route(
+            "/api/videos/atlas/pictures",
+            get(video_atlas_looks_routes::get_video_atlas_pictures),
+        )
+        .route(
+            "/api/videos/atlas/you",
+            get(video_atlas_looks_routes::get_video_atlas_you),
+        )
+        .route(
+            "/api/videos/atlas/probe",
+            post(video_atlas_routes::post_video_atlas_probe),
+        )
+        .route(
+            "/api/videos/atlas/journey",
+            get(video_atlas_routes::get_video_atlas_journey),
+        )
+        .route(
+            "/api/videos/channels",
+            get(video_channel_routes::get_video_channels),
+        )
+        .route(
+            "/api/videos/today",
+            get(video_today_routes::get_video_today),
+        )
+        .route(
+            "/api/videos/channels/{id}/guide",
+            get(video_channel_routes::get_video_channel_guide),
+        )
+        .route(
+            "/api/videos/channels/{id}/tune",
+            post(video_channel_routes::post_video_channel_tune),
+        )
+        .route(
+            "/api/videos/channels/{id}/next",
+            post(video_channel_routes::post_video_channel_next),
+        )
+        .route(
+            "/api/videos/channels/{id}/steer",
+            post(video_channel_routes::post_video_channel_steer),
+        )
+        .route(
+            "/api/videos/steers",
+            get(video_channel_routes::get_video_steers),
+        )
+        .route(
+            "/api/videos/steers/{artist_id}",
+            axum::routing::delete(video_channel_routes::delete_video_steer),
+        )
+        .route(
+            "/api/videos/explore",
+            get(video_channel_routes::get_video_explore)
+                .put(video_channel_routes::put_video_explore),
         )
         // The liked-videos library wall. Pure reads over what the background
         // resolve has found; the TIDAL fan-out is never on a request path.

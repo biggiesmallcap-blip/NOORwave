@@ -42,7 +42,8 @@ describe('TIDAL editorial page routes', () => {
 
 	test('does not replace existing genres or videos workflows', () => {
 		expect(routeSource('genres')).toContain('GenreGalaxy');
-		expect(routeSource('videos')).toContain('GuideRow');
+		// /videos is the On Air dial now; TIDAL editorial never takes its place.
+		expect(routeSource('videos')).toContain('ChannelRow');
 		expect(routeSource('genres')).not.toContain('/tidal/genres');
 		expect(routeSource('videos/editorial')).toContain('embedded');
 	});

@@ -9,6 +9,9 @@
 	import type { EffectivePlayerLayout } from '$lib/stores/playerLayout';
 	import {
 		clearVideoSession,
+		steerChannel,
+		steerMessage,
+		videoChannelOnAir,
 		videoPanelAnchor,
 		videoSession,
 		videoSessionUpcoming,
@@ -34,6 +37,35 @@
 		if (source === 'direct') return 'Direct video';
 		return 'Video session';
 	}
+
+	// On a channel, More and Less like this steer it by the artist on screen
+	// (the same as + and - on the stage; see steerChannel): More lines up the
+	// artist and its nearest neighbours next, Less drops the artist's
+	// upcoming videos. The line under the buttons says what happened for a
+	// few seconds.
+	const STEER_NOTE_MS = 4000;
+	let steerNote = $state<string | null>(null);
+	let steerTimer: ReturnType<typeof setTimeout> | null = null;
+
+	let steering = $state(false);
+
+	async function steer(more: boolean) {
+		const current = $videoSession.current;
+		if (current?.artist_id == null || steering) return;
+		const name = current.artist_name ?? 'this artist';
+		steering = true;
+		try {
+			steerNote = `${steerMessage(name, more, await steerChannel(current.artist_id, current.artist_name ?? null, more))}.`;
+		} finally {
+			steering = false;
+		}
+		if (steerTimer) clearTimeout(steerTimer);
+		steerTimer = setTimeout(() => (steerNote = null), STEER_NOTE_MS);
+	}
+
+	$effect(() => () => {
+		if (steerTimer) clearTimeout(steerTimer);
+	});
 
 	// The panel's artwork slot doubles as a stage: the video dock plays there
 	// while the panel is open (see VideoDock). Cleared when the panel unmounts.
@@ -72,7 +104,8 @@
 			disabled={!$videoSession.active}
 			onclick={() => $videoSession.continuous ? videoSession.stopRadio() : videoSession.startRadio()}
 		>
-			{$videoSession.continuous ? 'Stop radio' : 'Start radio'}
+			<!-- On a channel, stopping its refills is leaving the channel. -->
+			{$videoChannelOnAir ? 'Leave channel' : $videoSession.continuous ? 'Stop radio' : 'Start radio'}
 		</button>
 		<button
 			class="video-panel-chip"
@@ -83,15 +116,35 @@
 		>
 			› {$videoSession.autoplay ? 'On' : 'Autoplay'}
 		</button>
+		{#if $videoChannelOnAir}
+			<!-- The steer pair starts its own line in the side panel. -->
+			<span class="video-panel-break" aria-hidden="true"></span>
+			<button
+				class="video-panel-chip"
+				type="button"
+				title="Line up this artist and its neighbours next (+ on the stage)"
+				disabled={$videoSession.current?.artist_id == null || steering}
+				onclick={() => void steer(true)}
+			>More like this</button>
+			<button
+				class="video-panel-chip"
+				type="button"
+				title="Drop this artist's upcoming videos (- on the stage)"
+				disabled={$videoSession.current?.artist_id == null || steering}
+				onclick={() => void steer(false)}
+			>Less like this</button>
+		{/if}
 	</div>
 	<p class="video-panel-source" aria-live="polite">
-		{$videoSession.radioIssue ?? ($videoSession.continuous
+		{$videoChannelOnAir
+			? (steerNote ?? `On air: ${String($videoChannelOnAir.no).padStart(2, '0')} ${$videoChannelOnAir.title}. More or less like this steers what airs next.`)
+			: $videoSession.radioIssue ?? ($videoSession.continuous
 			? (!$videoSession.autoplay ? 'Radio paused. Turn on autoplay to resume.'
 				: $videoSession.radioSearching ? `Checking ${$videoSession.radioSeedArtistName ?? 'this artist'} and related artists…`
 				: $videoSession.radioDiscoveryMessage ?? 'Radio checks related artists as the queue plays.')
-			: 'Radio adds new videos beyond this queue.')}
+			: $videoSession.autoplay ? 'When this queue ends, radio carries on from it.' : 'Radio adds new videos beyond this queue.')}
 	</p>
-	{#if $videoSession.continuous && $videoSession.radioHits.length > 0}
+	{#if $videoSession.continuous && !$videoChannelOnAir && $videoSession.radioHits.length > 0}
 		<div class="video-radio-hits" aria-label="Recent radio discoveries">
 			{#each $videoSession.radioHits as hit, index (`${hit.artist}-${index}`)}
 				<div class="video-radio-hit"><strong>+{hit.count}</strong><span>{hit.count === 1 ? 'video' : 'videos'} from {hit.artist}</span></div>
@@ -118,7 +171,7 @@
 		<VideoQueueList videos={$videoSessionUpcoming.slice(0, 60)} />
 	{:else}
 		<QueueEmpty title={$videoSession.continuous ? 'Finding more videos…' : 'No videos up next.'}>
-			{$videoSession.continuous ? 'More from this artist and related artists will appear here.' : 'Start radio to keep listening.'}
+			{$videoChannelOnAir ? 'The channel is lining up what airs next.' : $videoSession.continuous ? 'More from this artist and related artists will appear here.' : 'Start radio to keep listening.'}
 		</QueueEmpty>
 	{/if}
 </section>
@@ -256,6 +309,9 @@
 		flex-wrap: wrap;
 		gap: 10px;
 	}
+
+	.video-panel-break { flex-basis: 100%; height: 0; }
+	:global(.app-shell[data-player-layout='bottom']) .video-panel-break { display: none; }
 
 	.video-panel-source { margin: -4px 0 0; line-height: var(--line-height-normal); }
 	.video-radio-hits {

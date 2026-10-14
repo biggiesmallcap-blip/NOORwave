@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, type Snippet } from 'svelte';
 	import { get } from 'svelte/store';
 	import type Hls from 'hls.js';
 	import type { VideoQualityMode } from '$lib/api/client';
@@ -39,6 +39,19 @@
 		saved?: boolean;
 		savePending?: boolean;
 		onToggleSaved?: () => void;
+		/** Seconds into the video where a new source's first load starts (a
+		 *  channel tune-in joins mid-video). Steps and replays start at 0. */
+		startAt?: number;
+		/** A channel is on air and the stage draws its own credits: the
+		 *  player's title strip and "Coming next" pill stand down, and the
+		 *  fullscreen pills make room for the channel bug. */
+		broadcast?: boolean;
+		/** Fullscreen only: drawn before the heart (On Air's channel pill). */
+		fsLead?: Snippet;
+		/** The curtain covers the picture between videos: the heart and
+		 *  Queue step back with the rest of the chrome; the lead (the
+		 *  channel remote) stays, so channels can be flipped through. */
+		veiled?: boolean;
 	};
 
 	let {
@@ -67,6 +80,10 @@
 		saved = false,
 		savePending = false,
 		onToggleSaved,
+		startAt = 0,
+		broadcast = false,
+		fsLead,
+		veiled = false,
 	}: Props = $props();
 
 	let container: HTMLDivElement | null = $state(null);
@@ -233,7 +250,9 @@
 		if (!nextSrc) return;
 
 		if (HlsClass.isSupported()) {
-			const instance = new HlsClass({ enableWorker: true });
+			// startPosition: a mid-video start fetches its own segments first,
+			// not the opening ones it is about to skip.
+			const instance = new HlsClass({ enableWorker: true, startPosition: resumeAt > 0 ? resumeAt : -1 });
 			hls = instance;
 			instance.on(HlsClass.Events.MANIFEST_PARSED, () => {
 				levels = instance.levels
@@ -408,7 +427,7 @@
 			}
 		};
 		document.addEventListener('fullscreenchange', fullscreenListener);
-		await load(src);
+		await load(src, startAt);
 	});
 
 	// Host-driven fullscreen: mirror the host's state.
@@ -420,7 +439,7 @@
 
 	$effect(() => {
 		if (!mounted || retrying || src === currentSrc) return;
-		void load(src);
+		void load(src, startAt);
 	});
 
 	$effect(() => {
@@ -525,13 +544,16 @@
 		<div class="status error" role="alert">{displayError}</div>
 	{/if}
 
-	<div class="top-meta">
-		<strong>{title}</strong>
-		{#if artist}<span>{artist}</span>{/if}
-	</div>
+	{#if !broadcast}
+		<div class="top-meta">
+			<strong>{title}</strong>
+			{#if artist}<span>{artist}</span>{/if}
+		</div>
+	{/if}
 
 	{#if fullscreen}
-		<div class="fs-actions">
+		<div class="fs-actions" class:veiled>
+			{@render fsLead?.()}
 			{#if onToggleSaved}
 				<button type="button" class="fs-pill heart" class:saved onclick={() => onToggleSaved?.()} disabled={savePending}
 					aria-pressed={saved} aria-label={saved ? 'Remove video from likes' : 'Save video to likes'}
@@ -543,7 +565,7 @@
 		{#if queueOpen}<FullscreenVideoQueue onClose={closeQueue} />{/if}
 	{/if}
 
-	{#if autoplayNext && upNextTitle && upNextVisible}
+	{#if autoplayNext && upNextTitle && upNextVisible && !broadcast}
 		<div class="up-next-pill">
 			<span>Coming next</span>
 			<strong>{upNextArtist ? `${upNextArtist} - ${upNextTitle}` : upNextTitle}</strong>
@@ -770,11 +792,17 @@
 		pointer-events: none;
 	}
 
+	.fs-actions.veiled .fs-pill {
+		opacity: 0;
+		pointer-events: none;
+	}
+
 	.chrome-hidden .top-meta {
 		transform: translateY(-10px);
 	}
 
-	.chrome-hidden .controls {
+	.chrome-hidden .controls,
+	.chrome-hidden .fs-actions {
 		transform: translateY(12px);
 	}
 
@@ -846,26 +874,40 @@
 		border-radius: 0;
 	}
 
-	/* Same pills as the autoplay control; the title leaves room for them. */
+	/* Same pills as the autoplay control, stacked just above the right end of
+	   the control bar so every control sits in one corner and the top of the
+	   picture stays clear (the channel bug owns the top right on air). They
+	   come and go with the bar. */
 	.fs-actions {
 		position: absolute;
 		z-index: 3;
-		top: 14px;
-		right: 16px;
+		/* Right edges line up with the fullscreen button: 14px of padding
+		   plus the 6px its 34px button leaves in the bar's last 40px track. */
+		right: 20px;
+		bottom: 60px;
 		display: flex;
 		gap: 8px;
-		transition: opacity var(--motion-base);
+		transition: opacity var(--motion-base), transform var(--motion-base);
 	}
 
+	/* The bar's own pill look (quality, autoplay): a light wash over the
+	   picture, the theme accent once saved. */
 	.fs-pill {
 		height: 34px;
-		padding: 0 12px;
+		padding: 0 14px;
 		border: 1px solid rgba(255, 255, 255, 0.16);
 		border-radius: 999px;
-		background: rgba(12, 12, 16, 0.76);
-		color: rgba(255, 255, 255, 0.92);
+		background: rgba(255, 255, 255, 0.1);
+		color: rgba(255, 255, 255, 0.84);
 		font-size: var(--font-size-xs);
 		font-weight: 800;
+		transition: background var(--motion-fast), color var(--motion-fast), opacity var(--motion-base);
+	}
+
+	.fs-pill:hover:not(:disabled),
+	.fs-pill[aria-expanded='true'] {
+		background: rgba(255, 255, 255, 0.18);
+		color: #fff;
 	}
 
 	.fs-pill.heart {
@@ -888,10 +930,6 @@
 	.fs-pill:focus-visible {
 		outline: 2px solid var(--accent-strong);
 		outline-offset: 2px;
-	}
-
-	.fullscreen .top-meta {
-		padding-right: 154px;
 	}
 
 	@keyframes up-next-drop {

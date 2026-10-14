@@ -1,4 +1,29 @@
 import type {
+	AtlasArtistCard,
+	AtlasNamesResponse,
+	AtlasProbeResponse,
+	AtlasResponse,
+	AtlasJourneyResponse,
+	AtlasPicturesResponse,
+	AtlasYouResponse,
+	JourneyKind,
+	JourneyLength,
+	AtlasSceneCard,
+	ArchiveQuery,
+	ArchiveResponse,
+	ChannelGuideResponse,
+	ChannelNextResponse,
+	ChannelSteerResponse,
+	VideoSteer,
+	ChannelTuneResponse,
+	ExploreMode,
+	SongVersionsResponse,
+	VideoCensus,
+	VideoTodayResponse,
+	VideoChannelsResponse,
+	VideoConcert,
+} from './video_explore_types';
+import type {
 	Track,
 	SpotifyArtistStats,
 	SpotifyTrackStats,
@@ -2434,6 +2459,149 @@ export const api = {
 		return fetchApi<{ items: TidalSearchVideo[]; unfamiliar_video_ids: number[]; building?: boolean }>('/api/videos/radio/next', undefined, {
 			method: 'POST',
 			body: JSON.stringify(body),
+		});
+	},
+
+	// ---- Atlas and Air (contract: ./video_explore_types.ts)
+
+	getVideoCensus(): Promise<VideoCensus> {
+		return fetchApi<VideoCensus>('/api/videos/census');
+	},
+
+	getVideoArchive(query: ArchiveQuery, signal?: AbortSignal): Promise<ArchiveResponse> {
+		const params: Record<string, string> = {};
+		for (const [key, value] of Object.entries(query)) {
+			if (value !== undefined && value !== null && value !== '') params[key] = String(value);
+		}
+		return fetchApi<ArchiveResponse>('/api/videos/archive', params, { signal });
+	},
+
+	getVideoSongVersions(songKey: string): Promise<SongVersionsResponse> {
+		return fetchApi<SongVersionsResponse>(`/api/videos/songs/${encodeURIComponent(songKey)}/versions`);
+	},
+
+	getVideoConcert(id: number): Promise<VideoConcert> {
+		return fetchApi<VideoConcert>(`/api/videos/concerts/${id}`);
+	},
+
+	/** The versions of the song a video belongs to (404 until the catalog
+	 *  build has seen the video). */
+	getVideoSongByVideo(videoId: number): Promise<SongVersionsResponse> {
+		return fetchApi<SongVersionsResponse>(`/api/videos/videos/${videoId}/song`);
+	},
+
+	getVideoAtlas(): Promise<AtlasResponse> {
+		return fetchApi<AtlasResponse>('/api/videos/atlas');
+	},
+
+	getVideoAtlasNames(): Promise<AtlasNamesResponse> {
+		return fetchApi<AtlasNamesResponse>('/api/videos/atlas/names');
+	},
+
+	getVideoAtlasArtist(id: number): Promise<AtlasArtistCard> {
+		return fetchApi<AtlasArtistCard>(`/api/videos/atlas/artists/${id}`);
+	},
+
+	getVideoAtlasScene(id: number): Promise<AtlasSceneCard> {
+		return fetchApi<AtlasSceneCard>(`/api/videos/atlas/scenes/${id}`);
+	},
+
+	probeVideoAtlasArtist(artistId: number): Promise<AtlasProbeResponse> {
+		return fetchApi<AtlasProbeResponse>('/api/videos/atlas/probe', undefined, {
+			method: 'POST',
+			body: JSON.stringify({ artist_id: artistId }),
+		});
+	},
+
+	getVideoAtlasPictures(): Promise<AtlasPicturesResponse> {
+		return fetchApi<AtlasPicturesResponse>('/api/videos/atlas/pictures');
+	},
+
+	getVideoAtlasYou(): Promise<AtlasYouResponse> {
+		return fetchApi<AtlasYouResponse>('/api/videos/atlas/you');
+	},
+
+	/** May name a destination `scene`. */
+	getVideoAtlasJourney(params: {
+		kind: JourneyKind;
+		from: number;
+		scene?: number;
+		to?: number;
+		length?: JourneyLength;
+	}): Promise<AtlasJourneyResponse> {
+		const query: Record<string, string> = { kind: params.kind, from: String(params.from) };
+		if (params.scene != null) query.scene = String(params.scene);
+		if (params.to != null) query.to = String(params.to);
+		if (params.length) query.length = params.length;
+		return fetchApi<AtlasJourneyResponse>('/api/videos/atlas/journey', query);
+	},
+
+	getVideoToday(): Promise<VideoTodayResponse> {
+		return fetchApi<VideoTodayResponse>('/api/videos/today');
+	},
+
+	getVideoChannels(): Promise<VideoChannelsResponse> {
+		return fetchApi<VideoChannelsResponse>('/api/videos/channels');
+	},
+
+	getVideoChannelGuide(id: string, fromS?: number, toS?: number): Promise<ChannelGuideResponse> {
+		const params: Record<string, string> = {};
+		if (fromS !== undefined) params.from_s = String(fromS);
+		if (toS !== undefined) params.to_s = String(toS);
+		return fetchApi<ChannelGuideResponse>(`/api/videos/channels/${encodeURIComponent(id)}/guide`, params);
+	},
+
+	tuneVideoChannel(id: string, body: { explore?: ExploreMode } = {}): Promise<ChannelTuneResponse> {
+		return fetchApi<ChannelTuneResponse>(`/api/videos/channels/${encodeURIComponent(id)}/tune`, undefined, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	},
+
+	/** Refill a tuned channel. `more_artist_ids` / `less_artist_ids` carry the
+	 *  session's +/- presses: double or halve those artists' weight. */
+	getVideoChannelNext(id: string, body: {
+		exclude_video_ids: number[];
+		session_nonce: string;
+		more_artist_ids?: number[];
+		less_artist_ids?: number[];
+	}): Promise<ChannelNextResponse> {
+		return fetchApi<ChannelNextResponse>(`/api/videos/channels/${encodeURIComponent(id)}/next`, undefined, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	},
+
+	/** More / Less like this for the artist on screen. Remembered as a small
+	 *  fading lean; More also answers with what to line up next. */
+	steerVideoChannel(id: string, body: {
+		artist_id: number;
+		artist_name: string | null;
+		more: boolean;
+		exclude_video_ids: number[];
+	}): Promise<ChannelSteerResponse> {
+		return fetchApi<ChannelSteerResponse>(`/api/videos/channels/${encodeURIComponent(id)}/steer`, undefined, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	},
+
+	getVideoSteers(): Promise<{ items: VideoSteer[] }> {
+		return fetchApi<{ items: VideoSteer[] }>('/api/videos/steers');
+	},
+
+	forgetVideoSteer(artistId: number): Promise<{ forgotten: boolean }> {
+		return fetchApi<{ forgotten: boolean }>(`/api/videos/steers/${artistId}`, undefined, { method: 'DELETE' });
+	},
+
+	getVideoExplore(): Promise<{ explore: ExploreMode }> {
+		return fetchApi<{ explore: ExploreMode }>('/api/videos/explore');
+	},
+
+	putVideoExplore(explore: ExploreMode): Promise<{ explore: ExploreMode }> {
+		return fetchApi<{ explore: ExploreMode }>('/api/videos/explore', undefined, {
+			method: 'PUT',
+			body: JSON.stringify({ explore }),
 		});
 	},
 

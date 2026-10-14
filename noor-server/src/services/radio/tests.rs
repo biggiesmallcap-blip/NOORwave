@@ -1033,3 +1033,35 @@ fn radio_blend_serde_roundtrip() {
         assert_eq!(blend, back);
     }
 }
+
+#[test]
+fn cold_seed_draws_from_artist_sound_and_genre_in_turn() {
+    let db = Database::open(":memory:").expect("in-memory db");
+    db.run_migrations().expect("run migrations");
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "INSERT INTO artists (id, name) VALUES (1, 'Seed Artist'), (2, 'Other'), (3, 'Third');
+             INSERT INTO tracks (id, title, artist_id, play_count) VALUES
+                 (1, 'Brand New', 1, 0), (2, 'Older Hit', 1, 9), (3, 'Deep Cut', 1, 1),
+                 (4, 'Same Scene', 2, 5), (5, 'Near Sound', 3, 0), (6, 'Far Sound', 3, 0);
+             INSERT OR IGNORE INTO genres (name, slug) VALUES ('Trip-Hop', 'trip-hop');
+             INSERT INTO track_genres (track_id, genre_id)
+                 SELECT 2, id FROM genres WHERE name = 'Trip-Hop'
+                 UNION ALL SELECT 4, id FROM genres WHERE name = 'Trip-Hop';
+             INSERT INTO audio_dsp_features (track_id, energy, danceability, bpm) VALUES
+                 (1, 0.5, 0.5, 100.0), (5, 0.52, 0.5, 101.0), (6, 0.95, 0.9, 170.0);",
+        )?;
+        Ok(())
+    })
+    .expect("seed");
+
+    let picks = cold_seed_library_candidates(&db, 1, 4, &[3]);
+    let ids: Vec<i64> = picks.iter().map(|c| c.track_id).collect();
+    // Round robin: best same-artist row, nearest sound, then genre (borrowed
+    // from the artist, since the seed itself is untagged). 3 is excluded.
+    assert_eq!(ids, vec![2, 5, 4, 6]);
+    assert_eq!(picks[0].primary_reason.as_deref(), Some("artist_affinity"));
+    assert_eq!(picks[1].primary_reason.as_deref(), Some("energy_match"));
+    assert_eq!(picks[2].primary_reason.as_deref(), Some("genre_affinity"));
+    assert!(picks.iter().all(|c| c.is_in_library && c.track_id != 1));
+}

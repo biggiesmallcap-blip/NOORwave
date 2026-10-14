@@ -145,6 +145,23 @@ pub fn fill_in_background(path: &str) {
     });
 }
 
+/// Saves pictures a page is about to show, in the background, when they are
+/// not on disk yet: a picture TIDAL has not served lately takes up to a
+/// second at 640, one on disk a millisecond. In order, so the first given
+/// are the first saved.
+pub fn warm(urls: &[(String, u32)]) {
+    if cfg!(test) || !enabled() {
+        return;
+    }
+    for (url, size) in urls {
+        if let Some(path) = tidal_path_at_size(url, *size)
+            && !file_for(&path).exists()
+        {
+            fill_in_background(&path);
+        }
+    }
+}
+
 /// One background save: waits for a download slot, then skips the download
 /// if the cache was turned off while it waited.
 async fn fill_one(

@@ -17,6 +17,14 @@
 	import { formatTrackDuration } from '$lib/utils/format';
 	import { playVideo } from '$lib/stores/video_session';
 	import { videoSectionQuery } from '$lib/video/section';
+	import {
+		filterLikedWall,
+		likedFace,
+		likedQueueItem,
+		likedWallExtender,
+		shuffled,
+		type LikedWallLens,
+	} from '$lib/video/liked_wall';
 
 	// While the background resolve is still working, re-fetch so the wall fills
 	// in without a manual reload. Same cadence as the editorial set build.
@@ -43,11 +51,8 @@
 	/** Which card's version list is open. One at a time. */
 	let openVersions = $state<string | null>(null);
 
-	/** The video that represents a song on the wall: the best match, longest cut
-	 *  among equals. Server-sorted, so this is just the head. */
-	function face(video: LikedVideo): LikedVideoVersion {
-		return video.versions[0];
-	}
+	/** The video that represents a song on the wall (lib/video/liked_wall.ts). */
+	const face = likedFace;
 
 	/** The release year, when TIDAL gave us one. Most of the time a version's
 	 *  title already says what it is ("Live at Austin City Limits, 2012"); this
@@ -56,22 +61,7 @@
 		return version.release_year ? String(version.release_year) : '';
 	}
 
-	/** Lift a version into the shape the video queue already speaks, so Play all
-	 *  and Shuffle need no new playback code. */
-	function toQueueItem(video: LikedVideo, version: LikedVideoVersion): TidalSearchVideo {
-		return {
-			tidal_id: version.tidal_video_id,
-			title: version.video_title,
-			duration_ms: version.duration_ms,
-			artist_id: video.artist_tidal_id,
-			artist_name: video.artist_name,
-			album_tidal_id: null,
-			artwork_url: version.artwork_url,
-			quality: null,
-			explicit: null,
-			type: 'video',
-		};
-	}
+	const toQueueItem = likedQueueItem;
 
 	async function load() {
 		try {
@@ -176,35 +166,8 @@
 		)
 	);
 
-	let filtered = $derived.by(() => {
-		const needle = query.trim().toLowerCase();
-		let rows = videos;
-		if (needle) {
-			rows = rows.filter(
-				(v) =>
-					v.track_title.toLowerCase().includes(needle) ||
-					(v.artist_name ?? '').toLowerCase().includes(needle) ||
-					v.versions.some((ver) => ver.video_title.toLowerCase().includes(needle))
-			);
-		}
-		if (activeGenre) rows = rows.filter((v) => v.genre === activeGenre);
-		// A card with no album year drops out while a year is ticked: 62% of
-		// likes carry one, and an "Unknown" bucket would be a bigger pill than
-		// most real years.
-		if (activeYear != null) rows = rows.filter((v) => v.album_year === activeYear);
-
-		const sorted = [...rows];
-		if (sort === 'title') {
-			sorted.sort(
-				(a, b) =>
-					a.track_title.localeCompare(b.track_title) ||
-					(a.artist_name ?? '').localeCompare(b.artist_name ?? '')
-			);
-		} else {
-			sorted.sort((a, b) => (b.liked_at ?? '').localeCompare(a.liked_at ?? ''));
-		}
-		return sorted;
-	});
+	let lens = $derived<LikedWallLens>({ query, genre: activeGenre, year: activeYear, sort });
+	let filtered = $derived(filterLikedWall(videos, lens));
 	let shownSaved = $derived(savedVideos.filter((video) => {
 		const needle = query.trim().toLowerCase();
 		return !needle || video.title.toLowerCase().includes(needle) || (video.artist_name ?? '').toLowerCase().includes(needle);
@@ -260,12 +223,22 @@
 	let sourceLabel = $derived(activeGenre ? `Liked ${activeGenre} videos` : 'Liked videos');
 
 	/** Everything on screen, in view order: what Play all, Shuffle and a single
-	 *  card click all queue from. */
-	async function start(queue: TidalSearchVideo[], index: number) {
+	 *  card click all queue from. While the scan is still finding matches the
+	 *  queue keeps asking the wall for the new ones (same lens), so Play all
+	 *  is not stuck with what had been found at the moment of the click. Play
+	 *  all and Shuffle mean "play through": they turn autoplay on. */
+	async function start(queue: TidalSearchVideo[], index: number, opts: { playThrough?: boolean; shuffle?: boolean } = {}) {
 		if (queue.length === 0) return;
+		const growing = running || scanPending;
 		// 'search' is what the videos page uses for any browsable list with a
 		// queue behind it, as opposed to a mix or a single direct pick.
-		await playVideo(queue[index], { queue, source: 'search', sourceLabel });
+		await playVideo(queue[index], {
+			queue,
+			source: 'search',
+			sourceLabel,
+			...(opts.playThrough ? { autoplay: true } : {}),
+			...(growing ? { extend: likedWallExtender(lens, Boolean(opts.shuffle)) } : {}),
+		});
 	}
 
 	/** One video per song, not every version: queueing six cuts of the same song
@@ -280,7 +253,7 @@
 	}
 
 	async function playAll() {
-		await playFrom(0);
+		await start(wallQueue(), 0, { playThrough: true });
 	}
 
 	/** Play one specific version, with the rest of the wall queued behind it. */
@@ -294,12 +267,7 @@
 	}
 
 	async function shuffle() {
-		const queue = wallQueue();
-		for (let i = queue.length - 1; i > 0; i--) {
-			const j = Math.floor(Math.random() * (i + 1));
-			[queue[i], queue[j]] = [queue[j], queue[i]];
-		}
-		await start(queue, 0);
+		await start(shuffled(wallQueue()), 0, { playThrough: true, shuffle: true });
 	}
 
 	onMount(() => {
