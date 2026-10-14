@@ -167,7 +167,9 @@
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		background: rgba(0, 0, 0, 0.5);
+		/* Frosted, in the theme colours: a wallpaper reads through the page
+		   scrim, and these panels sit on top of it. */
+		background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--panel-border);
@@ -185,14 +187,14 @@
 		border-radius: 999px;
 		border: none;
 		background: transparent;
-		color: rgba(255, 255, 255, 0.7);
+		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-medium);
 		cursor: pointer;
 		white-space: nowrap;
 	}
 	.toggle-btn:hover {
-		color: rgba(255, 255, 255, 0.95);
+		color: var(--text-primary);
 	}
 	.coherence-wrap {
 		display: flex;
@@ -203,17 +205,17 @@
 	}
 	.coherence-label {
 		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.45);
+		color: var(--text-tertiary);
 		white-space: nowrap;
 	}
 	.coherence-slider {
 		flex: 1;
 		min-width: 60px;
-		accent-color: rgba(124, 128, 255, 0.9);
+		accent-color: var(--accent);
 	}
 	.drop-note {
 		font-size: var(--font-size-xs);
-		color: rgba(255, 220, 120, 0.8);
+		color: var(--state-warning);
 		white-space: nowrap;
 	}
 	.filter-grid {
@@ -227,7 +229,7 @@
 		align-items: center;
 		gap: 6px;
 		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.65);
+		color: var(--text-secondary);
 	}
 	.range-pair {
 		display: flex;
@@ -238,8 +240,8 @@
 		padding: 3px 6px;
 		border-radius: 6px;
 		border: 1px solid var(--panel-border);
-		background: rgba(255, 255, 255, 0.06);
-		color: rgba(255, 255, 255, 0.9);
+		background: var(--bg-surface);
+		color: var(--text-primary);
 		font-size: var(--font-size-xs);
 	}
 	.check {
@@ -247,11 +249,11 @@
 		align-items: center;
 		gap: 6px;
 		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.65);
+		color: var(--text-secondary);
 		cursor: pointer;
 	}
 	.hint {
-		color: rgba(255, 255, 255, 0.35);
+		color: var(--text-tertiary);
 	}
 	.era-hint {
 		flex-basis: 100%;
@@ -262,11 +264,11 @@
 		border-radius: 999px;
 		border: 1px solid var(--panel-border);
 		background: transparent;
-		color: rgba(255, 255, 255, 0.6);
+		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 		cursor: pointer;
 	}
 	.clear-btn:hover {
-		color: rgba(255, 255, 255, 0.9);
+		color: var(--text-primary);
 	}
 </style>

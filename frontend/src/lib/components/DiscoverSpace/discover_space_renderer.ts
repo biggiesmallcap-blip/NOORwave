@@ -198,13 +198,14 @@ const particles = Array.from({ length: PARTICLE_COUNT }, () => ({
 }));
 let particleT = 0;
 
-export function drawBackground(ctx: CanvasRenderingContext2D, w: number, h: number, prefersReducedMotion: boolean): void {
-	ctx.fillStyle = '#0a0a14';
+/** `ground` is the palette's dark stage colour; the vignette deepens it toward black at the rim. */
+export function drawBackground(ctx: CanvasRenderingContext2D, w: number, h: number, prefersReducedMotion: boolean, ground = ''): void {
+	ctx.fillStyle = ground || '#0a0a14';
 	ctx.fillRect(0, 0, w, h);
 
 	const grad = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.7);
-	grad.addColorStop(0, 'rgba(20,15,50,0.0)');
-	grad.addColorStop(1, 'rgba(5,5,15,0.6)');
+	grad.addColorStop(0, 'rgba(0,0,0,0)');
+	grad.addColorStop(1, 'rgba(0,0,0,0.45)');
 	ctx.fillStyle = grad;
 	ctx.fillRect(0, 0, w, h);
 

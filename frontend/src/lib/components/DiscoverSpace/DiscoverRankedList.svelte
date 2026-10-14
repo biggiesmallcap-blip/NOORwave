@@ -205,7 +205,9 @@
 		flex-direction: column;
 		width: 300px;
 		max-height: 100%;
-		background: rgba(0, 0, 0, 0.5);
+		/* Frosted, in the theme colours: a wallpaper reads through the page
+		   scrim, and these panels sit on top of it. */
+		background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--panel-border);
@@ -228,7 +230,7 @@
 	.collapse-btn {
 		border: none;
 		background: transparent;
-		color: rgba(255, 255, 255, 0.6);
+		color: var(--text-secondary);
 		cursor: pointer;
 		font-size: var(--font-size-sm);
 		padding: 2px 4px;
@@ -237,7 +239,7 @@
 		flex: 1;
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-medium);
-		color: rgba(255, 255, 255, 0.85);
+		color: var(--text-primary);
 		white-space: nowrap;
 	}
 	.list-actions {
@@ -249,14 +251,14 @@
 		border-radius: 999px;
 		border: 1px solid var(--panel-border);
 		background: transparent;
-		color: rgba(255, 255, 255, 0.7);
+		color: var(--text-secondary);
 		font-size: var(--font-size-xs);
 		cursor: pointer;
 		white-space: nowrap;
 	}
 	.action-btn.primary {
-		background: rgba(124, 128, 255, 0.25);
-		color: rgba(255, 255, 255, 0.95);
+		background: var(--accent-line);
+		color: var(--text-primary);
 	}
 	.action-btn:disabled {
 		opacity: 0.4;
@@ -278,7 +280,7 @@
 	}
 	.row:hover,
 	.row:focus-visible {
-		background: rgba(255, 255, 255, 0.06);
+		background: var(--bg-surface);
 		outline: none;
 	}
 	.row.suppressed {
@@ -305,14 +307,14 @@
 	}
 	.row-title {
 		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.9);
+		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 	.row-artist {
 		font-size: var(--font-size-2xs);
-		color: rgba(255, 255, 255, 0.5);
+		color: var(--text-tertiary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -327,8 +329,8 @@
 		font-size: var(--font-size-2xs);
 		padding: 0 6px;
 		border-radius: 999px;
-		background: rgba(124, 128, 255, 0.18);
-		color: rgba(200, 202, 255, 0.9);
+		background: var(--accent-line);
+		color: var(--accent-strong);
 		white-space: nowrap;
 	}
 	.score-bar {
@@ -336,13 +338,13 @@
 		height: 3px;
 		min-width: 24px;
 		border-radius: 2px;
-		background: rgba(255, 255, 255, 0.08);
+		background: var(--bg-hover);
 		overflow: hidden;
 	}
 	.score-fill {
 		height: 100%;
 		border-radius: 2px;
-		background: rgba(124, 128, 255, 0.7);
+		background: var(--accent);
 	}
 	.row-actions {
 		display: flex;
@@ -355,7 +357,7 @@
 		border-radius: 6px;
 		border: none;
 		background: transparent;
-		color: rgba(255, 255, 255, 0.45);
+		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 		cursor: pointer;
 		display: flex;
@@ -363,14 +365,14 @@
 		justify-content: center;
 	}
 	.mini-btn:hover:not(:disabled) {
-		background: rgba(255, 255, 255, 0.08);
-		color: rgba(255, 255, 255, 0.9);
+		background: var(--bg-hover);
+		color: var(--text-primary);
 	}
 	.mini-btn.like:hover:not(:disabled) {
-		color: rgba(255, 130, 170, 0.95);
+		color: var(--state-favorite);
 	}
 	.mini-btn.skip:hover:not(:disabled) {
-		color: rgba(255, 180, 120, 0.95);
+		color: var(--state-warning);
 	}
 	.mini-btn:disabled {
 		opacity: 0.4;
@@ -380,6 +382,6 @@
 		padding: 16px;
 		text-align: center;
 		font-size: var(--font-size-xs);
-		color: rgba(255, 255, 255, 0.35);
+		color: var(--text-tertiary);
 	}
 </style>

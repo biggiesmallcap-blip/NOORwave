@@ -122,10 +122,9 @@
 		width: 28px;
 		height: 28px;
 		border-radius: 50%;
-		border: 1px solid rgba(255, 255, 255, 0.12);
-		background: rgba(10, 10, 30, 0.82);
-		backdrop-filter: blur(6px);
-		color: rgba(255, 255, 255, 0.7);
+		border: 1px solid var(--border-muted);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		cursor: pointer;
@@ -135,9 +134,9 @@
 		transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 	}
 	.help-btn:hover {
-		background: rgba(124, 128, 255, 0.18);
-		color: #fff;
-		border-color: rgba(124, 128, 255, 0.5);
+		background: var(--accent-soft);
+		color: var(--text-primary);
+		border-color: var(--accent-line);
 	}
 
 	.help-backdrop {
@@ -157,11 +156,11 @@
 		display: flex;
 		flex-direction: column;
 		border-radius: var(--radius-md);
-		background: rgba(14, 14, 26, 0.96);
-		border: 1px solid rgba(124, 128, 255, 0.25);
-		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+		background: var(--bg-surface-strong);
+		border: 1px solid var(--panel-border);
+		box-shadow: var(--panel-shadow);
 		z-index: 101;
-		color: rgba(255, 255, 255, 0.85);
+		color: var(--text-primary);
 	}
 
 	.panel-head {
@@ -176,18 +175,18 @@
 		margin: 0;
 		font-size: var(--font-size-md);
 		font-weight: var(--font-weight-semibold);
-		color: rgba(255, 255, 255, 0.95);
+		color: var(--text-primary);
 	}
 	.close-btn {
 		background: transparent;
 		border: none;
-		color: rgba(255, 255, 255, 0.5);
+		color: var(--text-tertiary);
 		font-size: var(--font-size-xl);
 		line-height: 1;
 		cursor: pointer;
 		padding: 0 6px;
 	}
-	.close-btn:hover { color: #fff; }
+	.close-btn:hover { color: var(--text-primary); }
 
 	.panel-body {
 		overflow-y: auto;
@@ -201,7 +200,7 @@
 		margin: 0;
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-semibold);
-		color: rgba(124, 128, 255, 0.95);
+		color: var(--accent-strong);
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 	}
@@ -209,7 +208,7 @@
 		margin: 0;
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-normal);
-		color: rgba(255, 255, 255, 0.75);
+		color: var(--text-secondary);
 	}
 	.panel-body ul {
 		margin: 0;
@@ -219,26 +218,26 @@
 		gap: 4px;
 		font-size: var(--font-size-sm);
 		line-height: var(--line-height-normal);
-		color: rgba(255, 255, 255, 0.72);
+		color: var(--text-secondary);
 	}
-	.panel-body strong { color: rgba(255, 255, 255, 0.92); font-weight: var(--font-weight-semibold); }
-	.panel-body em { color: rgba(255, 255, 255, 0.55); font-style: normal; }
+	.panel-body strong { color: var(--text-primary); font-weight: var(--font-weight-semibold); }
+	.panel-body em { color: var(--text-secondary); font-style: normal; }
 	.panel-body code {
 		font-family: var(--font-mono);
 		font-size: var(--font-size-xs);
 		padding: 1px 5px;
 		border-radius: 4px;
-		background: rgba(255, 255, 255, 0.06);
-		color: rgba(180, 200, 255, 0.85);
+		background: var(--bg-surface);
+		color: var(--accent-strong);
 	}
 	.hint {
 		margin-top: 4px;
 		padding: 8px 10px;
 		border-radius: 8px;
-		background: rgba(124, 128, 255, 0.08);
-		border: 1px solid rgba(124, 128, 255, 0.18);
+		background: var(--accent-soft);
+		border: 1px solid var(--accent-line);
 		font-size: var(--font-size-xs) !important;
-		color: rgba(200, 200, 255, 0.75) !important;
+		color: var(--accent-strong) !important;
 	}
 
 	ul.reasons { padding-left: 0; list-style: none; }

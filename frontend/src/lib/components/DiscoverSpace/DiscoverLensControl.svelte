@@ -104,7 +104,7 @@
 	.lens-control {
 		display: flex;
 		gap: 4px;
-		background: rgba(0, 0, 0, 0.5);
+		background: color-mix(in srgb, var(--bg-base) 72%, transparent);
 		backdrop-filter: var(--blur-base);
 		-webkit-backdrop-filter: var(--blur-base);
 		border: 1px solid var(--panel-border);
@@ -116,18 +116,18 @@
 		border-radius: 999px;
 		border: none;
 		background: transparent;
-		color: rgba(255, 255, 255, 0.5);
+		color: var(--text-tertiary);
 		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-medium);
 		cursor: pointer;
 		transition: background var(--motion-fast), color var(--motion-fast);
 	}
 	.lens-btn:hover {
-		color: rgba(255, 255, 255, 0.85);
+		color: var(--text-primary);
 	}
 	.lens-btn.active {
-		background: rgba(124, 128, 255, 0.25);
-		color: rgba(255, 255, 255, 0.95);
+		background: var(--accent-line);
+		color: var(--text-primary);
 	}
 	.legend-toggle {
 		padding: 4px 8px;
@@ -136,7 +136,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
-		background: rgba(10, 10, 20, 0.85);
+		background: color-mix(in srgb, var(--bg-surface-strong) 90%, transparent);
 		backdrop-filter: var(--blur-overlay);
 		-webkit-backdrop-filter: var(--blur-overlay);
 		border: 1px solid var(--panel-border);
@@ -147,9 +147,9 @@
 		font-size: var(--font-size-xs);
 	}
 	.legend-section { display: flex; flex-direction: column; gap: 4px; }
-	.legend-heading { color: rgba(255,255,255,0.4); text-transform: uppercase; letter-spacing: 0.08em; font-size: var(--font-size-2xs); margin-bottom: 2px; }
+	.legend-heading { color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.08em; font-size: var(--font-size-2xs); margin-bottom: 2px; }
 	.legend-heading.sub { font-size: var(--font-size-2xs); margin-top: 4px; }
-	.legend-row { display: flex; align-items: center; gap: 6px; color: rgba(255,255,255,0.65); }
+	.legend-row { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
 	.swatch {
 		width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
 		background: rgba(120,120,140,0.5);

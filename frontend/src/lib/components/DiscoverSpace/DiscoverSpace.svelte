@@ -56,6 +56,18 @@
 	// cancelled on unmount instead of running their closures past teardown.
 	let auxRafId = 0;
 	let alive = true;
+	// The stage ground follows the palette (--bg-base of the dark scope the page
+	// puts around the canvas). Re-read twice a second; it only changes when the
+	// palette does, and a per-frame style read is wasted work.
+	let stageGround = '';
+	let stageGroundAt = 0;
+	function readStageGround(now: number): string {
+		if (canvas && now - stageGroundAt > 500) {
+			stageGround = getComputedStyle(canvas).getPropertyValue('--bg-base').trim();
+			stageGroundAt = now;
+		}
+		return stageGround;
+	}
 
 	// Camera
 	let camera: Camera = { x: 0, y: 0, zoom: 0.7 };
@@ -293,7 +305,7 @@
 		}
 
 		// ── Draw ──────────────────────────────────────────────────────────────
-		drawBackground(ctx, w, h, prefersReducedMotion);
+		drawBackground(ctx, w, h, prefersReducedMotion, readStageGround(performance.now()));
 		drawVisitedRegions(ctx, regions, camera, w, h);
 		// Orbit rings behind everything — visual guide for distance tiers
 		if (seedNode || seedNodes.length > 0) drawOrbitRings(ctx, camera, w, h);
@@ -506,8 +518,8 @@
 		position: absolute;
 		top: 8px;
 		right: 8px;
-		background: rgba(0, 0, 0, 0.7);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: color-mix(in srgb, var(--bg-surface-strong) 88%, transparent);
+		border: 1px solid var(--border-muted);
 		border-radius: 6px;
 		padding: 8px 12px;
 		display: flex;
@@ -515,7 +527,7 @@
 		gap: 2px;
 		font-size: var(--font-size-xs);
 		font-family: var(--font-mono);
-		color: rgba(200, 200, 220, 0.8);
+		color: var(--text-primary);
 		pointer-events: none;
 		z-index: 100;
 	}
