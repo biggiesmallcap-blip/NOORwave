@@ -214,3 +214,13 @@ describe('palette catalogue', () => {
 		expect(PALETTES.filter((p) => p.family === 'material').map((p) => p.id)).toEqual(['clay', 'void']);
 	});
 });
+
+describe('Pure ground in app.css', () => {
+	it('keeps the flat Pure body above the general :root body gradient', async () => {
+		const { readFileSync } = await import('node:fs');
+		const css = readFileSync(new URL('../../../app.css', import.meta.url), 'utf8');
+		// (0,2,1) beats `:root body` (0,1,1) wherever it appears, responsive copy included.
+		expect(css).toContain(':root[data-palette="void"] body {');
+		expect(css).not.toMatch(/^\[data-palette="void"\] body \{/m);
+	});
+});

@@ -134,3 +134,54 @@ describe('reasons from the server', () => {
 		expect(nodes.map((n) => n.primaryReason)).toEqual(reasons);
 	});
 });
+
+describe('layout origin and reduced motion (review of #371)', () => {
+	const settle = (nodes: DiscoverTrackNode[], reduced: boolean, ticks: number) => {
+		for (let i = 0; i < ticks; i++) applyForces(nodes, [], { genreLensActive: false, prefersReducedMotion: reduced });
+	};
+	const twenty = () => [
+		node(1, { isSeed: true, layoutHint: { x: 80, y: 0 } }),
+		...Array.from({ length: 20 }, (_, i) => node(i + 2, { score: 1 - i * 0.04, radius: 12 })),
+	];
+	const fromSeed = (seed: DiscoverTrackNode, n: DiscoverTrackNode) => Math.hypot(n.x - seed.x, n.y - seed.y);
+
+	it('centres the seed, the rank targets and the rings on one origin', () => {
+		const nodes = twenty();
+		assignLayoutTargets(nodes, true);
+		settle(nodes, false, 400);
+		const seed = nodes[0]!;
+		expect(seed.x).toBe(0);
+		expect(seed.y).toBe(0);
+		const stars = nodes.slice(1).toSorted((a, b) => a.rank! - b.rank!);
+		for (const n of stars) expect(Math.abs(fromSeed(seed, n) - n.targetR!)).toBeLessThan(16);
+		// Rank order survives on distance wherever targets are 2+ ranks apart.
+		for (let i = 0; i < stars.length; i++) {
+			for (let j = i + 2; j < stars.length; j++) {
+				expect(fromSeed(seed, stars[i]!)).toBeLessThan(fromSeed(seed, stars[j]!));
+			}
+		}
+	});
+
+	it('finishes a rerank in one reduced-motion call', () => {
+		const nodes = twenty();
+		assignLayoutTargets(nodes, true);
+		settle(nodes, true, 1);
+		// Reverse the order, as a run of Like/Skip could.
+		nodes.slice(1).forEach((n, i) => { n.rerankScore = i; });
+		assignLayoutTargets(nodes, true);
+		settle(nodes, true, 1); // the canvas settles right after this call
+		const seed = nodes[0]!;
+		for (const n of nodes.slice(1)) expect(Math.abs(fromSeed(seed, n) - n.targetR!)).toBeLessThan(16);
+	});
+
+	it('keeps blend seeds spread around the shared origin', () => {
+		const nodes = [
+			node(1, { isSeed: true, layoutHint: { x: 100, y: 0 } }),
+			node(2, { isSeed: true, layoutHint: { x: -60, y: 0 } }),
+			node(3, { score: 0.5 }),
+		];
+		assignLayoutTargets(nodes, true);
+		expect(nodes[0]!.x + nodes[1]!.x).toBeCloseTo(0);
+		expect(nodes[0]!.x - nodes[1]!.x).toBeCloseTo(160);
+	});
+});

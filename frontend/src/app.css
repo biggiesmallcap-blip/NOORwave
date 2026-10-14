@@ -349,6 +349,10 @@
 	--signal-text: rgba(255, 255, 255, 0.66);
 	--playing: #33ffee;
 	--playing-soft: rgba(51, 255, 238, 0.08);
+	--ground-top: #000;
+	--ground-bottom: #000;
+	--ground-glow-a: rgba(0, 0, 0, 0);
+	--ground-glow-b: rgba(0, 0, 0, 0);
 }
 
 /* Pure in light mode: a soft neutral white rather than paper-bright #fff,
@@ -402,8 +406,9 @@
 	--ground-glow-b: rgba(0, 0, 0, 0);
 }
 
-/* Pure is a flat ground in both modes. */
-[data-palette="void"] body {
+/* Pure is a flat ground in both modes. :root raises this above the general
+ * `:root body` gradient (and its responsive copy), which come later. */
+:root[data-palette="void"] body {
 	background: var(--bg-base);
 }
 

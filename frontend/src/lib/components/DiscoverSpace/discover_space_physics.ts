@@ -30,6 +30,8 @@ const MAX_SPEED = 6;        // world units per tick
 const COLLIDE_PAD = 6;      // world units kept clear between node edges
 const SECTOR_GAP = 0.06;    // radians between family sectors
 const GOLDEN = 0.6180339887;
+// Reduced motion lays out in one call; this many overlap passes settle it.
+const REDUCED_MOTION_PASSES = 40;
 
 // Below this many nodes collisions are checked pairwise; above, via a grid.
 const DIRECT_COLLISION_THRESHOLD = 160;
@@ -45,6 +47,7 @@ export function displayScore(node: DiscoverTrackNode): number {
  * (a new space appears laid out, instead of flying in from server hints).
  */
 export function assignLayoutTargets(nodes: DiscoverTrackNode[], place: boolean): void {
+	pinSeeds(nodes);
 	const stars = nodes.filter((n) => !n.isSeed);
 	if (stars.length === 0) return;
 
@@ -95,8 +98,44 @@ export function assignLayoutTargets(nodes: DiscoverTrackNode[], place: boolean):
 	}
 }
 
+/**
+ * Seeds sit on the shared origin that the rank targets and rings use. The
+ * server's layout hint puts a lone seed at (80, 0), which made "closer ranks
+ * higher" false; a lone seed now pins to (0, 0). Blend seeds keep their
+ * relative spread, recentered so their centroid is the origin.
+ */
+function pinSeeds(nodes: DiscoverTrackNode[]): void {
+	const seeds = nodes.filter((n) => n.isSeed);
+	if (seeds.length === 0) return;
+	const hint = (n: DiscoverTrackNode): [number, number] =>
+		seeds.length > 1 ? [n.layoutHint?.x ?? 0, n.layoutHint?.y ?? 0] : [0, 0];
+	const cx = seeds.reduce((sum, n) => sum + hint(n)[0], 0) / seeds.length;
+	const cy = seeds.reduce((sum, n) => sum + hint(n)[1], 0) / seeds.length;
+	for (const seed of seeds) {
+		const [hx, hy] = hint(seed);
+		const x = hx - cx;
+		const y = hy - cy;
+		seed.targetR = Math.hypot(x, y);
+		seed.targetAngle = Math.atan2(y, x);
+		seed.x = x;
+		seed.y = y;
+		seed.vx = 0;
+		seed.vy = 0;
+		seed.placed = true;
+	}
+}
+
+/** Put a node exactly on its target (seeds: their pinned origin point). */
+function pinOrSnap(node: DiscoverTrackNode): void {
+	const [tx, ty] = targetPoint(node);
+	node.x = tx;
+	node.y = ty;
+	node.vx = 0;
+	node.vy = 0;
+}
+
 function targetPoint(node: DiscoverTrackNode): [number, number] {
-	const r = node.targetR ?? R_FAR;
+	const r = node.targetR ?? (node.isSeed ? 0 : R_FAR);
 	const a = node.targetAngle ?? 0;
 	return [Math.cos(a) * r, Math.sin(a) * r];
 }
@@ -211,6 +250,27 @@ export function applyForces(
 ): void {
 	if (nodes.length === 0) return;
 
+	if (config.prefersReducedMotion) {
+		// The caller settles after this one call, so finish the layout here:
+		// snap to the targets, then a bounded relaxation for overlaps.
+		for (const node of nodes) {
+			pinOrSnap(node);
+		}
+		for (let pass = 0; pass < REDUCED_MOTION_PASSES; pass++) {
+			resolveCollisions(nodes);
+			for (const node of nodes) {
+				if (!node.isSeed) {
+					node.x += node.vx;
+					node.y += node.vy;
+				}
+				node.vx = 0;
+				node.vy = 0;
+			}
+		}
+		invalidateGridCache();
+		return;
+	}
+
 	// Ease toward the rank and family target.
 	for (const node of nodes) {
 		if (node.isSeed) continue;
@@ -224,17 +284,7 @@ export function applyForces(
 	// Integrate: pin seeds, dampen + clamp the rest.
 	for (const node of nodes) {
 		if (node.isSeed) {
-			node.x = node.layoutHint?.x ?? 0;
-			node.y = node.layoutHint?.y ?? 0;
-			node.vx = 0; node.vy = 0;
-			continue;
-		}
-		if (config.prefersReducedMotion) {
-			// Jump to the target; collisions still apply on the next tick.
-			const [tx, ty] = targetPoint(node);
-			node.x += (tx - node.x) * 0.5 + node.vx * 0.5;
-			node.y += (ty - node.y) * 0.5 + node.vy * 0.5;
-			node.vx = 0; node.vy = 0;
+			pinOrSnap(node);
 			continue;
 		}
 		node.vx *= DAMPING;
