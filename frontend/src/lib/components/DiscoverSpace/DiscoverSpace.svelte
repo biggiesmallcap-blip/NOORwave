@@ -2,7 +2,7 @@
 	import { prefersReducedMotion as reduceMotionNow } from '$lib/stores/motion';
 	import { onMount, onDestroy } from 'svelte';
 	import { discoverSpaceStore } from './discover_space_store';
-	import { applyForces, kineticEnergy, findNodeNear } from './discover_space_physics';
+	import { applyForces, assignLayoutTargets, kineticEnergy, findNodeNear } from './discover_space_physics';
 	import {
 		worldToCanvas,
 		drawBackground,
@@ -21,6 +21,7 @@
 	} from './discover_space_renderer';
 	import type { DiscoverTrackNode, Camera } from './discover_space_types';
 	import { addVisitedRegion } from './discover_space_store';
+	import { openNodeMenu } from './discover_space_menu';
 
 	interface Props {
 		currentTrackId: number | null;
@@ -128,7 +129,7 @@
 
 	// Physics settling — stops mutating node positions once kinetic energy drops
 	let simulationSettled = false;
-	let lastNodeCount = 0;
+	let lastNodesRef: DiscoverTrackNode[] | null = null;
 	// Force graphs can reach a dynamic equilibrium that never drops under the
 	// energy threshold (measured ~0.02 sustained on a 92-node graph), which
 	// left the sim jittering at full rate forever. Every settle gets a deadline.
@@ -298,9 +299,11 @@
 		const route = state.radioRoute;
 		const regions = state.visitedRegions;
 
-		// Restart physics when node set changes (new load, search, route nodes)
-		if (nodes.length !== lastNodeCount) {
-			lastNodeCount = nodes.length;
+		// New nodes or new scores (a rerank keeps ids but re-sorts): re-target
+		// the rank/family layout and let the simulation ease nodes into place.
+		if (nodes !== lastNodesRef) {
+			lastNodesRef = nodes;
+			assignLayoutTargets(nodes, true);
 			simulationSettled = false;
 			settleBy = nowMs + SETTLE_DEADLINE_MS;
 		}
@@ -451,6 +454,12 @@
 		isPanning = false;
 	}
 
+	function onContextMenu(e: MouseEvent) {
+		const world = canvasToWorld(e.clientX, e.clientY);
+		const hit = findNodeNear($discoverSpaceStore.nodes, world.x, world.y);
+		if (hit) openNodeMenu(e, hit);
+	}
+
 	function onWheel(e: WheelEvent) {
 		if (e.ctrlKey || e.metaKey) return; // yield to global UI-zoom handler
 		lastPointerAt = performance.now();
@@ -522,6 +531,7 @@
 	onpointerdown={onPointerDown}
 	onpointermove={onPointerMove}
 	onpointerup={onPointerUp}
+	oncontextmenu={onContextMenu}
 	onwheel={onWheel}
 ></canvas>
 

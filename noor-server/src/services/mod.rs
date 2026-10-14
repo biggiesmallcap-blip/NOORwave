@@ -1,3 +1,4 @@
+pub mod artist_genres;
 pub mod artwork_cache;
 pub mod audio_analysis;
 pub mod auto_enrich;

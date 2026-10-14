@@ -13,7 +13,10 @@ use std::collections::{HashMap, HashSet};
 pub fn normalize_reason(tag: &str) -> &'static str {
     match tag.trim() {
         // The metadata proxy ("metadata_similarity", formerly "audio_texture")
-        // is not harmonic evidence; it falls through to "unknown".
+        // is not harmonic evidence. It is the listening model saying "these sit
+        // close together", which is most of the neighbor table, so it gets its
+        // own category instead of reading as "unknown" on most of the map.
+        "metadata_similarity" | "audio_texture" | "embedding" | "embedding_similarity" => "similar",
         "harmonic" | "harmonic_match" => "harmonic",
         "behavioural" | "behavioral" | "same_pocket" | "taste_mesh" => "behavioral",
         "bpm_match" => "bpm",
@@ -29,6 +32,17 @@ pub fn normalize_reason(tag: &str) -> &'static str {
         | "discogs_style"
         | "prompt_match"
         | "scene_match" => "external",
+        _ => "unknown",
+    }
+}
+
+/// Reason for a candidate whose source gave none: library and Engine rows
+/// come from the similarity model, Last.fm and TIDAL rows are external
+/// matches. Anything else stays "unknown".
+pub fn fallback_reason_for_source(source: &str) -> &'static str {
+    match normalize_source(source) {
+        "library" | "engine" => "similar",
+        "lastfm" | "external" => "external",
         _ => "unknown",
     }
 }
@@ -125,7 +139,7 @@ pub struct PruneNode {
     pub track_id: i64,
     pub score: f64, // final normalized display relevance (0..1)
     pub is_seed: bool,
-    pub primary_reason: String,
+    pub in_degree: usize, // within current candidate set, seed edges excluded
     pub in_degree_pctile: f64, // within current candidate set (0..1)
 }
 
@@ -147,9 +161,14 @@ pub struct PruneConfig {
     pub max_seed_edges: usize,
     pub min_edge_weight: f64,
     pub min_edge_confidence: f64,
-    /// Hub suppression: drop node when in_degree_pctile > this AND score < hub_score_threshold.
+    /// Hub suppression: drop node when in_degree >= hub_min_in_degree AND
+    /// in_degree_pctile > this AND score < hub_score_threshold.
     pub hub_in_degree_pctile_threshold: f64,
     pub hub_score_threshold: f64,
+    /// A hub is something many other candidates point at. Below this many
+    /// in-edges nothing is a hub, however the percentiles fall (a sparse map
+    /// where every candidate has one edge must not read as all hubs).
+    pub hub_min_in_degree: usize,
 }
 
 impl Default for PruneConfig {
@@ -163,6 +182,7 @@ impl Default for PruneConfig {
             min_edge_confidence: 0.20,
             hub_in_degree_pctile_threshold: 0.95,
             hub_score_threshold: 0.85,
+            hub_min_in_degree: 3,
         }
     }
 }
@@ -203,12 +223,11 @@ pub struct PruneResult {
 ///   2. Drop low-confidence edges (min_edge_confidence), count separately.
 ///   3. Cap edges per non-seed node to max_edges_per_node (keep highest weight * confidence).
 ///   4. Cap seed edges to max_seed_edges.
-///   5. Hub suppression: drop nodes where in_degree_pctile > threshold AND score < hub_score_threshold.
+///   5. Hub suppression: drop nodes with at least hub_min_in_degree in-edges whose
+///      in_degree_pctile > threshold AND score < hub_score_threshold.
 ///   6. Truncate nodes to hard_max_nodes (keep by score DESC, always keep seed).
 ///   7. Remove dangling edges (both endpoints must survive).
-///   8. Ensure reason diversity: when ≥ 3 reason categories exist in raw set, keep nodes
-///      representing at least 3 in the surviving set (promote top node per missing reason).
-///   9. Final edge cap at hard_max_edges (keep by weight * confidence DESC).
+///   8. Final edge cap at hard_max_edges (keep by weight * confidence DESC).
 pub fn prune_graph(
     mut nodes: Vec<PruneNode>,
     mut edges: Vec<PruneEdge>,
@@ -267,7 +286,8 @@ pub fn prune_graph(
             if n.is_seed {
                 return true;
             }
-            !(n.in_degree_pctile > config.hub_in_degree_pctile_threshold
+            !(n.in_degree >= config.hub_min_in_degree
+                && n.in_degree_pctile > config.hub_in_degree_pctile_threshold
                 && n.score < config.hub_score_threshold)
         });
         before - nodes.len()
@@ -294,27 +314,7 @@ pub fn prune_graph(
         surviving_ids.contains(&e.from_track_id) && surviving_ids.contains(&e.to_track_id)
     });
 
-    // ── Step 8: reason diversity guarantee ───────────────────────────────────
-    // Count distinct reasons in *raw* (pre-prune) node set. If ≥ 3, ensure the
-    // surviving set covers at least 3 distinct reasons.
-    {
-        let raw_reasons: HashSet<&str> = nodes.iter().map(|n| n.primary_reason.as_str()).collect();
-
-        if raw_reasons.len() >= 3 {
-            let surviving_reasons: HashSet<&str> =
-                nodes.iter().map(|n| n.primary_reason.as_str()).collect();
-
-            if surviving_reasons.len() < 3 {
-                // Already filtered too aggressively — this shouldn't happen with default config,
-                // but if it does, just accept the result rather than reintroducing pruned nodes
-                // (we don't have access to the original full list here).
-                // The caller can detect this via diagnostics.
-                let _ = surviving_reasons; // no-op
-            }
-        }
-    }
-
-    // ── Step 9: final edge hard cap ──────────────────────────────────────────
+    // -- Step 8: final edge hard cap ------------------------------------------
     if edges.len() > config.hard_max_edges {
         edges.sort_by(|a, b| {
             let va = a.weight * a.confidence;
@@ -340,7 +340,10 @@ pub fn prune_graph(
 }
 
 /// Compute within-result-set in-degree for each node and normalize to 0..1
-/// within the set. Returns a map from track_id → (in_degree, percentile).
+/// within the set. Returns a map from track_id -> (in_degree, percentile).
+///
+/// The percentile is a mid-rank: ties share the middle of their block, so a
+/// set where everyone has the same in-degree sits at 0.5, not at 1.0.
 pub fn compute_in_degree_stats(
     track_ids: &[i64],
     edges: &[PruneEdge],
@@ -361,8 +364,13 @@ pub fn compute_in_degree_stats(
     in_degrees
         .into_iter()
         .map(|(id, deg)| {
-            let rank = sorted_degrees.partition_point(|&d| d <= deg) as f64;
-            let pctile = if n > 1.0 { rank / n } else { 0.5 };
+            let below = sorted_degrees.partition_point(|&d| d < deg) as f64;
+            let tied = sorted_degrees.partition_point(|&d| d <= deg) as f64 - below;
+            let pctile = if n > 1.0 {
+                (below + tied / 2.0) / n
+            } else {
+                0.5
+            };
             (id, (deg, pctile.clamp(0.0, 1.0)))
         })
         .collect()
@@ -379,8 +387,8 @@ mod tests {
     #[test]
     fn reason_known_tags_map_correctly() {
         assert_eq!(normalize_reason("harmonic_match"), "harmonic");
-        assert_eq!(normalize_reason("audio_texture"), "unknown");
-        assert_eq!(normalize_reason("metadata_similarity"), "unknown");
+        assert_eq!(normalize_reason("audio_texture"), "similar");
+        assert_eq!(normalize_reason("metadata_similarity"), "similar");
         assert_eq!(normalize_reason("behavioural"), "behavioral");
         assert_eq!(normalize_reason("behavioral"), "behavioral");
         assert_eq!(normalize_reason("same_pocket"), "behavioral");
@@ -508,7 +516,7 @@ mod tests {
             track_id: id,
             score,
             is_seed,
-            primary_reason: "behavioral".to_string(),
+            in_degree: 0,
             in_degree_pctile: 0.5,
         }
     }
@@ -558,6 +566,7 @@ mod tests {
     #[test]
     fn pruner_hub_suppression_drops_hub() {
         let mut hub = make_node(99, 0.4, false);
+        hub.in_degree = 5;
         hub.in_degree_pctile = 0.97; // above 0.95 threshold
         // score 0.4 < 0.85 → should be dropped
         let nodes = vec![make_node(1, 1.0, true), hub];
@@ -570,6 +579,7 @@ mod tests {
     #[test]
     fn pruner_hub_suppression_keeps_high_score_hub() {
         let mut hub = make_node(99, 0.9, false);
+        hub.in_degree = 5;
         hub.in_degree_pctile = 0.97; // above 0.95 threshold
         // score 0.9 > 0.85 → should survive
         let nodes = vec![make_node(1, 1.0, true), hub];
@@ -594,6 +604,68 @@ mod tests {
         };
         let result = prune_graph(nodes, edges, 99, &config);
         assert_eq!(result.pruned_edge_count, 7);
+    }
+
+    #[test]
+    fn pruner_keeps_a_sparse_star_map() {
+        // A seed with no trained neighbors: every candidate has one edge, so
+        // every in-degree ties. Nothing here is a hub (regression: 21 of 26
+        // candidates used to be suppressed, leaving a four-star map).
+        let mut nodes = vec![make_node(1, 1.0, true)];
+        let mut edges = Vec::new();
+        for id in 2..28 {
+            nodes.push(make_node(id, 0.3 + (id as f64) * 0.01, false));
+            edges.push(make_edge(1, id, 0.6));
+        }
+        let ids: Vec<i64> = nodes.iter().map(|n| n.track_id).collect();
+        let stats = compute_in_degree_stats(&ids, &edges);
+        for n in nodes.iter_mut() {
+            let (deg, pctile) = stats[&n.track_id];
+            n.in_degree = deg;
+            n.in_degree_pctile = pctile;
+        }
+        let result = prune_graph(nodes, edges, 1, &PruneConfig::for_coherence(0.5));
+        assert_eq!(result.hub_suppressed_count, 0);
+        assert_eq!(result.node_ids.len(), 27);
+    }
+
+    #[test]
+    fn pruner_ignores_hub_percentile_without_enough_in_edges() {
+        let mut lonely = make_node(99, 0.2, false);
+        lonely.in_degree = 2;
+        lonely.in_degree_pctile = 0.99;
+        let result = prune_graph(
+            vec![make_node(1, 1.0, true), lonely],
+            vec![],
+            1,
+            &PruneConfig::default(),
+        );
+        assert!(result.node_ids.contains(&99));
+    }
+
+    #[test]
+    fn in_degree_stats_ties_share_the_middle() {
+        let edges = vec![
+            make_edge(9, 1, 0.8),
+            make_edge(9, 2, 0.8),
+            make_edge(9, 3, 0.8),
+        ];
+        let stats = compute_in_degree_stats(&[1, 2, 3], &edges);
+        for id in [1, 2, 3] {
+            assert!(
+                (stats[&id].1 - 0.5).abs() < 1e-9,
+                "tied nodes sit at the median"
+            );
+        }
+    }
+
+    #[test]
+    fn similarity_and_untagged_sources_get_real_reasons() {
+        assert_eq!(normalize_reason("metadata_similarity"), "similar");
+        assert_eq!(fallback_reason_for_source("tidal"), "similar");
+        assert_eq!(fallback_reason_for_source("lastfm"), "external");
+        assert_eq!(fallback_reason_for_source("external"), "external");
+        assert_eq!(fallback_reason_for_source("mixed"), "unknown");
     }
 
     #[test]

@@ -7,6 +7,7 @@
 	import ArtworkImage from '$lib/components/ui/ArtworkImage.svelte';
 	import { canPlayTrack, getPlayableLabel, type PlayableTrack } from '$lib/player/playable';
 	import { showToast } from '$lib/stores/toast';
+	import { openNodeMenu } from './discover_space_menu';
 
 	interface Props {
 		node: DiscoverTrackNode | null;
@@ -247,7 +248,7 @@
 	aria-label="Track details"
 >
 	{#if node}
-		<div class="panel-header">
+		<div class="panel-header" role="group" aria-label="{node.title} by {node.artist}" oncontextmenu={(e) => node && openNodeMenu(e, node)}>
 			<ArtworkImage
 				className="artwork"
 				src={node.artworkUrl}
@@ -363,7 +364,7 @@
 		</p>
 	{:else if seedNode}
 		<!-- Idle: the anchor the map grows from -->
-		<div class="panel-idle">
+		<div class="panel-idle" role="group" aria-label="Anchor: {seedNode.title}" oncontextmenu={(e) => seedNode && openNodeMenu(e, seedNode)}>
 			<ArtworkImage
 				className="idle-artwork"
 				src={seedNode.artworkUrl}

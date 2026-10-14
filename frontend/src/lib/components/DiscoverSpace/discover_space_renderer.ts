@@ -10,23 +10,28 @@ import type {
 	VisitedRegion,
 	Camera,
 } from './discover_space_types';
+import { nodeFamily, UNKNOWN_FILL } from './discover_space_genre';
+import { RANK_RINGS } from './discover_space_physics';
 
 // ─── Design constants ─────────────────────────────────────────────────────────
 
-const EDGE_COLORS: Record<string, string> = {
+// Reason colours (Reason lens and edges). Exported so the lens legend and the
+// help sheet show exactly what the canvas draws.
+export const EDGE_COLORS: Record<string, string> = {
+	similar:    '#5fd4d4',
 	harmonic:   '#b4a0ff',
 	behavioral: '#64b4ff',
 	bpm:        '#ffdc50',
 	artist:     '#ffa050',
 	album:      '#ffa050',
 	genre:      '#50dc78',
-	energy:     '#50dc78',
-	external:   '#7864dc',
+	energy:     '#ff6f91',
+	external:   '#8a74f0',
 	unknown:    '#787888',
 };
 
 // Distinct source ring colors — visible against both artwork and star fills
-const SOURCE_RING: Record<string, string> = {
+export const SOURCE_RING: Record<string, string> = {
 	library: '#40c8a8',  // teal
 	lastfm:  '#c060e8',  // purple
 	engine:  '#4090e0',  // blue
@@ -34,71 +39,22 @@ const SOURCE_RING: Record<string, string> = {
 	mixed:   '#e09040',  // amber
 };
 
-const NEBULA_RGB: Record<string, [number, number, number]> = {
-	ambient:     [40,  80, 200],
-	pop:         [240, 80, 160],
-	punk:        [255, 40,  80],
-	rock:        [150, 50, 220],
-	alternative: [100,100, 240],
-	indie:       [40, 180, 160],
-	metal:       [160, 20,  20],
-	electronic:  [120, 50, 220],
-	dance:       [100, 40, 200],
-	house:       [100, 50, 200],
-	techno:      [80,  40, 180],
-	'hip-hop':   [200,140,  30],
-	rap:         [200,140,  30],
-	jazz:        [180,140,  40],
-	soul:        [200,120,  40],
-	country:     [180,140,  60],
-	folk:        [140,160,  80],
-	classical:   [160,160, 220],
-	experimental:[120,180, 220],
-};
-
-function nebulaRgb(genre: string): [number, number, number] {
-	const g = genre.toLowerCase();
-	for (const [key, rgb] of Object.entries(NEBULA_RGB)) {
-		if (g.includes(key)) return rgb;
-	}
-	return [80, 80, 120];
-}
-
-function energyColor(energy: number): string {
+export function energyColor(energy: number): string {
 	const e = Math.max(0, Math.min(1, energy));
 	const h = 240 - e * 200;
 	return `hsl(${h},${60 + e * 30}%,${45 + e * 15}%)`;
 }
 
-function genreFamilyColor(genre: string): string {
-	const g = genre.toLowerCase();
-	if (g.includes('hip-hop') || g.includes('hip hop') || g.includes('hiphop') || g.includes('rap')) return 'hsl(38,75%,55%)';
-	if (g.includes('pop punk') || g.includes('poppunk'))  return 'hsl(20,85%,60%)';
-	if (g.includes('punk'))        return 'hsl(350,85%,55%)';
-	if (g.includes('metal'))       return 'hsl(0,70%,40%)';
-	if (g.includes('rock'))        return 'hsl(270,65%,55%)';
-	if (g.includes('alternative') || g.includes('alt-')) return 'hsl(240,60%,60%)';
-	if (g.includes('indie'))       return 'hsl(175,55%,50%)';
-	if (g.includes('electronic') || g.includes('edm') || g.includes('techno') || g.includes('house') || g.includes('trance')) return 'hsl(270,70%,55%)';
-	if (g.includes('dance'))       return 'hsl(260,65%,55%)';
-	if (g.includes('ambient'))     return 'hsl(220,70%,55%)';
-	if (g.includes('pop'))         return 'hsl(330,75%,65%)';
-	if (g.includes('jazz'))        return 'hsl(44,65%,52%)';
-	if (g.includes('soul') || g.includes('r&b') || g.includes('rnb')) return 'hsl(30,70%,55%)';
-	if (g.includes('country') || g.includes('folk')) return 'hsl(45,55%,50%)';
-	if (g.includes('classical') || g.includes('orchestral')) return 'hsl(230,40%,65%)';
-	if (g.includes('experimental') || g.includes('avant')) return 'hsl(190,50%,60%)';
-	return 'hsl(240,25%,50%)';
-}
-
-function nodeColor(node: DiscoverTrackNode, lens: DiscoverLens): string {
+// Missing data is drawn neutral grey, never as a made-up mid value: an
+// unanalyzed track used to render as "medium energy" green.
+export function nodeColor(node: DiscoverTrackNode, lens: DiscoverLens): string {
 	switch (lens) {
-		case 'energy':     return energyColor(node.energy ?? 0.5);
+		case 'energy':     return node.energy == null ? UNKNOWN_FILL : energyColor(node.energy);
 		case 'reason':     return EDGE_COLORS[node.primaryReason] ?? EDGE_COLORS.unknown!;
 		case 'confidence': return `hsl(220,${30 + node.confidence * 50}%,${30 + node.confidence * 30}%)`;
 		case 'source':     return SOURCE_RING[node.source] ?? SOURCE_RING.mixed!;
-		case 'genre':      return genreFamilyColor(node.genres[0] ?? node.topGenre ?? '');
-		default:           return energyColor(node.energy ?? 0.5);
+		case 'genre':      return nodeFamily(node)?.color ?? UNKNOWN_FILL;
+		default:           return node.energy == null ? UNKNOWN_FILL : energyColor(node.energy);
 	}
 }
 
@@ -234,22 +190,26 @@ export function drawBackground(ctx: CanvasRenderingContext2D, w: number, h: numb
 export function drawOrbitRings(ctx: CanvasRenderingContext2D, camera: Camera, cw: number, ch: number): void {
 	const sx = cw / 2 + (0 - camera.x) * camera.zoom;
 	const sy = ch / 2 + (0 - camera.y) * camera.zoom;
-	const rings = [
-		{ r: 190, alpha: 0.09 },
-		{ r: 350, alpha: 0.06 },
-		{ r: 540, alpha: 0.04 },
-	];
+	// Distance from the seed is rank, so the rings are rank quartiles.
 	ctx.save();
-	ctx.strokeStyle = 'rgba(124,128,255,1)';
+	ctx.strokeStyle = 'rgba(160,170,220,1)';
 	ctx.lineWidth = 0.8;
 	ctx.setLineDash([6, 14]);
-	for (const ring of rings) {
-		ctx.globalAlpha = ring.alpha;
+	RANK_RINGS.forEach((ring, i) => {
+		ctx.globalAlpha = 0.12 - i * 0.025;
 		ctx.beginPath();
 		ctx.arc(sx, sy, ring.r * camera.zoom, 0, Math.PI * 2);
 		ctx.stroke();
-	}
+	});
 	ctx.setLineDash([]);
+	if (camera.zoom >= 0.45) {
+		ctx.globalAlpha = 0.5;
+		ctx.fillStyle = 'rgba(190,196,230,1)';
+		ctx.font = '10px system-ui, sans-serif';
+		ctx.textAlign = 'center';
+		ctx.textBaseline = 'bottom';
+		for (const ring of RANK_RINGS) ctx.fillText(ring.label, sx, sy - ring.r * camera.zoom - 3);
+	}
 	ctx.restore();
 }
 
@@ -326,7 +286,9 @@ function buildNebulaClusters(nodes: DiscoverTrackNode[]): NebulaCluster[] {
 	const groups = new Map<string, { sx: number; sy: number; count: number; maxD2: number; cxApprox: number; cyApprox: number }>();
 	// First pass: centroids
 	for (const node of nodes) {
-		const key = node.genres[0] ?? node.topGenre ?? 'unknown';
+		if (node.isSeed) continue;
+		const key = nodeFamily(node)?.key;
+		if (!key) continue;
 		const e = groups.get(key);
 		if (e) { e.sx += node.x; e.sy += node.y; e.count += 1; }
 		else groups.set(key, { sx: node.x, sy: node.y, count: 1, maxD2: 0, cxApprox: 0, cyApprox: 0 });
@@ -337,17 +299,18 @@ function buildNebulaClusters(nodes: DiscoverTrackNode[]): NebulaCluster[] {
 	}
 	// Second pass: radius
 	for (const node of nodes) {
-		const key = node.genres[0] ?? node.topGenre ?? 'unknown';
+		if (node.isSeed) continue;
+		const key = nodeFamily(node)?.key;
+		if (!key) continue;
 		const e = groups.get(key)!;
 		const dx = node.x - e.cxApprox;
 		const dy = node.y - e.cyApprox;
-		const d2 = dx * dx + dy * dy;
-		if (d2 > e.maxD2) e.maxD2 = d2;
+		e.maxD2 += dx * dx + dy * dy; // summed; mean taken below
 	}
 	const out: NebulaCluster[] = [];
 	for (const [genre, e] of groups) {
 		if (e.count < 2) continue;
-		const r = Math.max(80, Math.sqrt(e.maxD2) * 1.3);
+		const r = Math.min(240, Math.max(80, Math.sqrt(e.maxD2 / e.count) * 1.6));
 		out.push({ genre, cx: e.cxApprox, cy: e.cyApprox, r, count: e.count });
 	}
 	return out;
@@ -377,7 +340,8 @@ export function drawGenreNebulae(
 		const sy = ch / 2 + (cluster.cy - camera.y) * camera.zoom;
 		const sr = cluster.r * camera.zoom;
 
-		const [nr, ng, nb] = nebulaRgb(cluster.genre);
+		const family = nodeFamily({ genres: [cluster.genre], topGenre: undefined });
+		const [nr, ng, nb] = family?.rgb ?? [80, 80, 120];
 		const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr);
 		grad.addColorStop(0,   `rgba(${nr},${ng},${nb},${baseOpacity})`);
 		grad.addColorStop(0.5, `rgba(${nr},${ng},${nb},${baseOpacity * 0.45})`);
@@ -393,7 +357,7 @@ export function drawGenreNebulae(
 			ctx.font = `${Math.max(9, Math.min(13, 10 * camera.zoom))}px system-ui, sans-serif`;
 			ctx.textAlign = 'center';
 			ctx.textBaseline = 'middle';
-			ctx.fillText(cluster.genre, sx, sy);
+			ctx.fillText(family?.label ?? cluster.genre, sx, sy);
 			ctx.restore();
 		}
 	}
@@ -468,6 +432,13 @@ export function drawEdges(
 				thickness = 0.3 + edge.weight * 1.2;
 			}
 
+			// Every external gets one synthesized seed edge; it says "Last.fm
+			// matched this", not how it relates to the rest, so it stays faint.
+			const synthetic = edge.reason === 'external' && edge.fromTrackId === seedTrackId;
+			if (synthetic && !isHighlighted) {
+				baseAlpha *= 0.3;
+				thickness *= 0.6;
+			}
 			const alpha = baseAlpha * (0.35 + edge.confidence * 0.65) * Math.min(1, zoom * 1.4);
 
 			ctx.save();
@@ -541,8 +512,7 @@ function drawSingleNode(
 ): void {
 	const sx = cw / 2 + (node.x - camera.x) * camera.zoom;
 	const sy = ch / 2 + (node.y - camera.y) * camera.zoom;
-	const roleScale = node.role === 'external_candidate' ? 1.1 : node.role === 'library_guide' ? 0.86 : 1;
-	const r = Math.max(4, node.radius * roleScale * camera.zoom);
+	const r = Math.max(4, node.radius * camera.zoom);
 	const isHovered  = node.trackId === hoveredTrackId;
 	const isSelected = node.trackId === selectedTrackId;
 	const roleOpacity = node.role === 'library_guide' ? 0.62 : node.playability === 'pending' ? 0.78 : 1;
@@ -573,8 +543,9 @@ function drawSingleNode(
 		const artAlpha = (node.isColdStart ? 0.60 : 0.92) * fo;
 		drawArtworkFill(ctx, img, sx, sy, ar, artAlpha);
 
-		// Source ring (outside clip, over artwork)
-		const ringCol = SOURCE_RING[node.source] ?? SOURCE_RING.mixed!;
+		// Lens ring (outside clip, over artwork): the cover hides the fill, so
+		// the ring carries the active lens's colour.
+		const ringCol = nodeColor(node, lens);
 		const ringW = Math.max(1.2, 2.0 * Math.min(1, camera.zoom));
 		const ringAlpha = (node.isColdStart ? 0.45 : 0.80) * fo;
 		ctx.globalAlpha = ringAlpha;
@@ -587,7 +558,9 @@ function drawSingleNode(
 	} else {
 		// ── Star fallback rendering path ───────────────────────────────
 		const col = nodeColor(node, lens);
-		const coreAlpha = (node.isColdStart ? 0.55 : 0.90) * fo;
+		// Cold starts stay a little dimmer (and shimmer), but the lens hue must
+		// still read: at 0.55 under the highlight they all looked grey.
+		const coreAlpha = (node.isColdStart ? 0.78 : 0.92) * fo;
 
 		// Cold-start shimmer ring
 		if (node.isColdStart && !prefersReducedMotion) {
@@ -608,22 +581,15 @@ function drawSingleNode(
 
 		// Specular highlight
 		const specGrad = ctx.createRadialGradient(sx - r * 0.25, sy - r * 0.3, 0, sx, sy, r);
-		specGrad.addColorStop(0, 'rgba(255,255,255,0.70)');
-		specGrad.addColorStop(0.45, 'rgba(255,255,255,0.12)');
+		specGrad.addColorStop(0, 'rgba(255,255,255,0.42)');
+		specGrad.addColorStop(0.45, 'rgba(255,255,255,0.08)');
 		specGrad.addColorStop(1, 'rgba(0,0,0,0)');
 		ctx.fillStyle = specGrad;
 		ctx.beginPath();
 		ctx.arc(sx, sy, r, 0, Math.PI * 2);
 		ctx.fill();
-
-		// Thin source ring
-		const ringCol = SOURCE_RING[node.source] ?? SOURCE_RING.mixed!;
-		ctx.globalAlpha = (node.isColdStart ? 0.35 : 0.55) * fo;
-		ctx.strokeStyle = ringCol;
-		ctx.lineWidth = Math.max(0.5, 1.0 * camera.zoom);
-		ctx.beginPath();
-		ctx.arc(sx, sy, r + Math.max(1, 1.5 * camera.zoom), 0, Math.PI * 2);
-		ctx.stroke();
+		// No source ring here: the fill is the lens colour, and a second colour
+		// channel on every star read as a second legend. The Source lens shows source.
 	}
 
 	// ── Status rings (same for both paths) ────────────────────────────────────
@@ -823,46 +789,63 @@ export function drawLabels(
 	zoom: number
 ): void {
 	const isHighZoom = zoom >= 1.15;
-	const isMidZoom  = zoom >= 0.70;
-	const scoreThreshold = isHighZoom ? 0.65 : 0.82;
-	const maxLen = isHighZoom ? 28 : 18;
-	const baseFontSize = Math.max(9, Math.min(13, 11 * zoom));
+	const isMidZoom  = zoom >= 0.55;
+	// Ranked labels on top of the always-on ones (seed, playing, hover, select).
+	const rankedBudget = isHighZoom ? 36 : isMidZoom ? 16 : 0;
+	const maxLen = isHighZoom ? 28 : 20;
+	const fontSize = Math.max(10, Math.min(13, 11 * zoom));
+
+	const isPriority = (node: DiscoverTrackNode) =>
+		node.isSeed || node.isPlaying || node.inPlaylistBuilder
+		|| node.trackId === hoveredTrackId || node.trackId === selectedTrackId;
+	// Priority first, then by rank (0 = best), so the best matches win space.
+	const candidates = nodes
+		.filter((node) => isPriority(node) || node.rank !== undefined)
+		.toSorted((a, b) => {
+			const pa = isPriority(a) ? 0 : 1;
+			const pb = isPriority(b) ? 0 : 1;
+			return pa - pb || (a.rank ?? 1) - (b.rank ?? 1);
+		});
 
 	ctx.save();
 	ctx.textAlign = 'center';
 	ctx.textBaseline = 'top';
-	ctx.font = `${baseFontSize}px system-ui, sans-serif`;
+	ctx.font = `${fontSize}px system-ui, sans-serif`;
 
-	for (const node of nodes) {
-		const isPriority = node.isSeed || node.isPlaying
-			|| node.trackId === hoveredTrackId
-			|| node.trackId === selectedTrackId;
-
-		const showLabel = isPriority
-			|| (isMidZoom && node.score > scoreThreshold)
-			|| node.inPlaylistBuilder;
-
-		if (!showLabel) continue;
+	// Greedy placement: a label that would overlap one already drawn is
+	// skipped (priority labels always draw), so text never stacks.
+	const placed: { x0: number; y0: number; x1: number; y1: number }[] = [];
+	let ranked = 0;
+	for (const node of candidates) {
+		const priority = isPriority(node);
+		if (!priority && ranked >= rankedBudget) break;
 
 		const sx = cw / 2 + (node.x - camera.x) * camera.zoom;
 		const sy = ch / 2 + (node.y - camera.y) * camera.zoom;
+		if (sx < -80 || sx > cw + 80 || sy < -40 || sy > ch + 40) continue;
 		const r = Math.max(4, node.radius * zoom);
 		const raw = node.title;
-		const label = raw.length > maxLen ? raw.slice(0, maxLen - 1) + '…' : raw;
+		const label = raw.length > maxLen ? raw.slice(0, maxLen - 1).trimEnd() + '...' : raw;
+		const w = ctx.measureText(label).width;
+		const box = { x0: sx - w / 2 - 3, y0: sy + r + 3, x1: sx + w / 2 + 3, y1: sy + r + 5 + fontSize };
+		const collides = placed.some((p) => box.x0 < p.x1 && box.x1 > p.x0 && box.y0 < p.y1 && box.y1 > p.y0);
+		if (collides && !priority) continue;
+		placed.push(box);
+		if (!priority) ranked++;
 
-		ctx.shadowColor = 'rgba(0,0,0,0.88)';
+		ctx.shadowColor = 'rgba(0,0,0,0.9)';
 		ctx.shadowBlur = 4;
 		ctx.fillStyle = node.isSeed           ? 'rgba(255,255,255,0.98)'
-			: node.isPlaying                   ? 'rgba(220,200,255,0.95)'
-			: node.trackId === selectedTrackId ? 'rgba(255,255,255,0.90)'
-			: 'rgba(200,200,225,0.72)';
+			: node.isPlaying                   ? 'rgba(225,210,255,0.96)'
+			: node.trackId === selectedTrackId ? 'rgba(255,255,255,0.94)'
+			: 'rgba(214,216,236,0.86)';
 		ctx.fillText(label, sx, sy + r + 4);
 
 		if (isHighZoom && (node.trackId === hoveredTrackId || node.trackId === selectedTrackId)) {
-			ctx.fillStyle = 'rgba(160,160,190,0.58)';
-			ctx.font = `${baseFontSize - 1}px system-ui, sans-serif`;
-			ctx.fillText(node.artist, sx, sy + r + 4 + baseFontSize + 2);
-			ctx.font = `${baseFontSize}px system-ui, sans-serif`;
+			ctx.fillStyle = 'rgba(176,178,206,0.75)';
+			ctx.font = `${fontSize - 1}px system-ui, sans-serif`;
+			ctx.fillText(node.artist, sx, sy + r + 4 + fontSize + 2);
+			ctx.font = `${fontSize}px system-ui, sans-serif`;
 		}
 	}
 

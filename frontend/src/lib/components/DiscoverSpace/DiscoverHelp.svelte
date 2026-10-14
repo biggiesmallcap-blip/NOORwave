@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { EDGE_COLORS } from './discover_space_renderer';
 	import { portal } from '$lib/actions/portal';
 	let open = $state(false);
 
@@ -38,79 +39,78 @@
 			<section>
 				<h3>What you're looking at</h3>
 				<p>
-					The map plots up to <strong>100 tracks</strong> in orbit around a
-					seed — the song you're playing or a track you've locked. Edges
-					are connections; brighter, shorter edges mean stronger ties.
-					Click any node for actions, drag to pan, scroll to zoom.
+					Up to <strong>100 tracks</strong> around an anchor: the song you're
+					playing, or one you've locked. Hover a star to inspect it, click it for
+					actions, right-click for the usual menu. Drag to pan, scroll to zoom,
+					<em>Fit</em> frames the whole space again.
 				</p>
 			</section>
 
 			<section>
-				<h3>Modes (top-left)</h3>
+				<h3>Reading the map</h3>
 				<ul>
-					<li><strong>Near Orbit</strong> — familiar territory, high confidence neighbors.</li>
-					<li><strong>Open Current</strong> — balanced mix of known and adjacent.</li>
-					<li><strong>Deep Signal</strong> — adventurous, more cold discoveries.</li>
+					<li><strong>Distance</strong> is rank: the closer a star sits to the anchor, the higher it ranks. It is the same order as the results list, and the dotted rings mark the top 25%, 50% and 75%.</li>
+					<li><strong>Direction</strong> is genre family: each family gets its own slice of the circle. Tracks with no genre yet share the last slice.</li>
+					<li><strong>Size</strong> is confidence: bigger stars rest on more evidence.</li>
+					<li><strong>Color</strong> follows the lens you pick. Grey always means "no data for this lens yet", never a guess.</li>
 				</ul>
+			</section>
+
+			<section>
+				<h3>Familiar to Adventurous</h3>
+				<p>
+					The slider on the map trades closeness for discovery. Familiar keeps to
+					well-supported neighbors; Adventurous reaches further and lets more cold
+					discoveries in. Filters narrow by tempo, energy, era, key and what you
+					already own.
+				</p>
 			</section>
 
 			<section>
 				<h3>Lenses</h3>
 				<ul>
-					<li><strong>Energy</strong> — blue is calm, orange is intense.</li>
-					<li><strong>Reason</strong> — color shows <em>why</em> a track connects.</li>
-					<li><strong>Confidence</strong> — bright = well-supported, dim = cold start.</li>
-					<li><strong>Source</strong> — ring color shows where the track came from.</li>
-					<li><strong>Genre</strong> — sonic territories grouped by genre family.</li>
+					<li><strong>Energy</strong>: blue is calm, orange is intense.</li>
+					<li><strong>Reason</strong>: why a track connects (below).</li>
+					<li><strong>Confidence</strong>: bright is well supported, dim is a cold start.</li>
+					<li><strong>Source</strong>: your library, Last.fm, or the discovery engine.</li>
+					<li><strong>Genre</strong>: the genre family, matching the direction.</li>
 				</ul>
 			</section>
 
 			<section>
 				<h3>Why tracks connect</h3>
 				<ul class="reasons">
-					<li><span class="dot harmonic"></span><strong>Harmonic</strong> — compatible key / tonal color.</li>
-					<li><span class="dot behavioral"></span><strong>Behavioral</strong> — listeners who play one play the other.</li>
-					<li><span class="dot bpm"></span><strong>Tempo</strong> — similar BPM.</li>
-					<li><span class="dot artist"></span><strong>Artist / Album</strong> — same artist or release lineage.</li>
-					<li><span class="dot genre"></span><strong>Genre / Energy</strong> — same family or intensity profile.</li>
-					<li><span class="dot external"></span><strong>External</strong> — Last.fm, Discogs, scene graphs.</li>
+					<li><span class="dot" style:background={EDGE_COLORS.similar}></span><strong>Sounds similar</strong>: your listening model places them close together.</li>
+					<li><span class="dot" style:background={EDGE_COLORS.behavioral}></span><strong>Listening pattern</strong>: listeners who play one play the other.</li>
+					<li><span class="dot" style:background={EDGE_COLORS.harmonic}></span><strong>Harmonic</strong>: compatible key or tonal color.</li>
+					<li><span class="dot" style:background={EDGE_COLORS.bpm}></span><strong>Tempo</strong>: a similar BPM.</li>
+					<li><span class="dot" style:background={EDGE_COLORS.artist}></span><strong>Artist / Album</strong>: the same artist or release.</li>
+					<li><span class="dot" style:background={EDGE_COLORS.genre}></span><strong>Genre</strong>: the same genre family.</li>
+					<li><span class="dot" style:background={EDGE_COLORS.energy}></span><strong>Energy</strong>: a similar intensity.</li>
+					<li><span class="dot" style:background={EDGE_COLORS.external}></span><strong>External</strong>: matched by Last.fm or TIDAL. Their link to the anchor is drawn faintly, since it only says "matched", not how.</li>
 				</ul>
 			</section>
 
 			<section>
-				<h3>Limits</h3>
-				<ul>
-					<li>Each map shows at most <strong>100 nodes</strong> per seed — the graph pruner keeps the strongest edges and drops hairball noise.</li>
-					<li>Per-source scores are normalized when a source returns ≥ 5 candidates; smaller sets use raw scores.</li>
-					<li>Per-reason hit-rates need ≥ 20 impressions before they count — until then they show as <em>insufficient data</em>.</li>
-					<li>Search jump (<em>Jump to…</em>) re-seeds the space around the prompt; it doesn't filter the existing map.</li>
-				</ul>
-			</section>
-
-			<section>
-				<h3>Why a song won't seed</h3>
-				<ul>
-					<li><strong>No embedding</strong> — the track was added after the model trained, or the audio failed analysis. The neighbor refresher will pick it up on the next pass.</li>
-					<li><strong>No neighbors yet</strong> — newly imported tracks have no <code>track_neighbors</code> rows; play it once and the per-seed refresh kicks in.</li>
-					<li><strong>Seed not found</strong> — track was deleted, hidden, or its id no longer resolves (rare, usually after a library rescan).</li>
-					<li><strong>No model</strong> — if no embedding model has finished training, the engine has nothing to compare against.</li>
-				</ul>
+				<h3>New tracks</h3>
+				<p>
+					A track added since the listening model last trained has no neighbors of
+					its own yet. Until it does, its map borrows from its artist, its genre and
+					the tracks that sound closest to it, alongside Last.fm.
+				</p>
 				<p class="hint">
-					When auto-refresh runs, you'll see a progress pill in the top-right
-					(loading embeddings → computing similarity → saving connections).
-					The map reloads automatically when it finishes.
+					While neighbors refresh you'll see a progress pill at the bottom left of
+					the map. It reloads automatically when it finishes.
 				</p>
 			</section>
 
 			<section>
-				<h3>Tips &amp; tricks</h3>
+				<h3>Tips</h3>
 				<ul>
-					<li><strong>Lock the seed</strong> to keep the map fixed while you play through tracks — otherwise it follows what's playing.</li>
-					<li><strong>Right-click anything</strong> — every node, row, and inline link has the universal context menu.</li>
-					<li><strong>Hold a connection</strong> by hovering an edge — the tooltip explains which signals fired.</li>
-					<li><strong>Cold (dim) nodes</strong> are the discovery edge — they're the most likely to surprise you.</li>
-					<li><strong>Automix + Discover</strong> seeds the queue from this same graph; turn on <em>Learning</em> to feed your skips/likes back into the next refresh.</li>
-					<li><strong>Use the training strip</strong> at the bottom to trigger a manual recompute after a big import or lots of new plays.</li>
+					<li><strong>Lock the seed</strong> to keep the map while you play through tracks; otherwise it follows what's playing.</li>
+					<li><strong>Branch here</strong> re-centers the map on a star and remembers the path, so you can walk back.</li>
+					<li><strong>More like this / less like this</strong> in the results list re-rank the map for this session; stars move to their new rank.</li>
+					<li><strong>Jump to</strong> re-seeds the space from a description instead of a track.</li>
 				</ul>
 			</section>
 		</div>
@@ -222,14 +222,6 @@
 	}
 	.panel-body strong { color: var(--text-primary); font-weight: var(--font-weight-semibold); }
 	.panel-body em { color: var(--text-secondary); font-style: normal; }
-	.panel-body code {
-		font-family: var(--font-mono);
-		font-size: var(--font-size-xs);
-		padding: 1px 5px;
-		border-radius: 4px;
-		background: var(--bg-surface);
-		color: var(--accent-strong);
-	}
 	.hint {
 		margin-top: 4px;
 		padding: 8px 10px;
@@ -245,12 +237,5 @@
 	.dot {
 		width: 9px; height: 9px; border-radius: 50%;
 		flex-shrink: 0;
-		box-shadow: 0 0 6px currentColor;
 	}
-	.dot.harmonic   { background: rgba(180,160,255,0.9); color: rgba(180,160,255,0.5); }
-	.dot.behavioral { background: rgba(100,180,255,0.9); color: rgba(100,180,255,0.5); }
-	.dot.bpm        { background: rgba(255,220,80,0.9);  color: rgba(255,220,80,0.5);  }
-	.dot.artist     { background: rgba(255,160,80,0.9);  color: rgba(255,160,80,0.5);  }
-	.dot.genre      { background: rgba(80,220,120,0.9);  color: rgba(80,220,120,0.5);  }
-	.dot.external   { background: rgba(120,100,220,0.9); color: rgba(120,100,220,0.5); }
 </style>

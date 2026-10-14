@@ -1,32 +1,32 @@
 <script lang="ts">
 	import { discoverSpaceStore, setLens } from './discover_space_store';
-	import { LENS_LABELS, REASON_LABELS } from './discover_space_story';
+	import { LENS_LABELS, REASON_LABELS, SOURCE_LABELS } from './discover_space_story';
+	import { EDGE_COLORS, SOURCE_RING, energyColor } from './discover_space_renderer';
+	import { nodeFamily, UNKNOWN_FILL, type GenreFamily } from './discover_space_genre';
 	import type { DiscoverLens, DiscoverReason } from './discover_space_types';
 
 	const lenses: DiscoverLens[] = ['energy', 'reason', 'confidence', 'source', 'genre'];
 
 	// The legend lives inside the lens control (one overlay instead of two);
-	// its content follows the active lens.
+	// its key follows the active lens and uses the renderer's own colours.
 	let showLegend = $state(false);
 
-	const reasonColors: Record<DiscoverReason, string> = {
-		harmonic: 'rgba(180,160,255,0.8)',
-		behavioral: 'rgba(100,180,255,0.8)',
-		bpm: 'rgba(255,220,80,0.8)',
-		artist: 'rgba(255,160,80,0.8)',
-		album: 'rgba(255,160,80,0.8)',
-		genre: 'rgba(80,220,120,0.8)',
-		energy: 'rgba(80,220,120,0.8)',
-		external: 'rgba(120,100,220,0.8)',
-		unknown: 'rgba(120,120,140,0.5)',
-	};
+	const reasonOrder: DiscoverReason[] = ['similar', 'behavioral', 'harmonic', 'bpm', 'artist', 'genre', 'energy', 'external', 'unknown'];
+	const sourceOrder = ['library', 'lastfm', 'engine', 'external'] as const;
+	const energyGradient = `linear-gradient(90deg, ${energyColor(0)}, ${energyColor(0.5)}, ${energyColor(1)})`;
 
-	const sourceColors = {
-		library: '#6080e0',
-		lastfm: '#e04060',
-		engine: '#60c080',
-		mixed: '#a080c0',
-	};
+	// Genre key: only the families on the map right now, biggest first.
+	let families = $derived.by(() => {
+		const counts = new Map<string, { family: GenreFamily; n: number }>();
+		for (const node of $discoverSpaceStore.nodes) {
+			const family = nodeFamily(node);
+			if (!family) continue;
+			const entry = counts.get(family.key);
+			if (entry) entry.n++;
+			else counts.set(family.key, { family, n: 1 });
+		}
+		return [...counts.values()].sort((a, b) => b.n - a.n).slice(0, 8).map((e) => e.family);
+	});
 </script>
 
 <div class="lens-wrap">
@@ -56,38 +56,49 @@
 	{#if showLegend}
 		<div class="legend-body">
 			<div class="legend-section">
-				<div class="legend-heading">Lens: {LENS_LABELS[$discoverSpaceStore.lens]}</div>
+				<div class="legend-heading">Reading the map</div>
+				<div class="legend-row"><span class="glyph">&#8226;&#8594;</span><span>Closer to the anchor = ranked higher</span></div>
+				<div class="legend-row"><span class="glyph">&#9675;</span><span>Bigger = more confident</span></div>
+				<div class="legend-row"><span class="glyph">&#8635;</span><span>Direction = genre family</span></div>
+			</div>
 
-				{#if $discoverSpaceStore.lens === 'reason' || $discoverSpaceStore.lens === 'energy'}
-					<div class="legend-heading sub">Edge color = connection type</div>
-					{#each (Object.keys(reasonColors) as DiscoverReason[]) as reason}
+			<div class="legend-section">
+				<div class="legend-heading">Color: {LENS_LABELS[$discoverSpaceStore.lens]}</div>
+				{#if $discoverSpaceStore.lens === 'energy'}
+					<div class="scale" style:background={energyGradient}></div>
+					<div class="scale-labels"><span>Calm</span><span>Intense</span></div>
+					<div class="legend-row"><span class="swatch" style:background={UNKNOWN_FILL}></span><span>No audio analysis yet</span></div>
+				{:else if $discoverSpaceStore.lens === 'reason'}
+					{#each reasonOrder as reason}
 						<div class="legend-row">
-							<span class="swatch" style:background={reasonColors[reason]}></span>
+							<span class="swatch" style:background={EDGE_COLORS[reason]}></span>
 							<span>{REASON_LABELS[reason]}</span>
 						</div>
 					{/each}
-				{/if}
-
-				{#if $discoverSpaceStore.lens === 'source'}
-					<div class="legend-heading sub">Node ring = source</div>
-					{#each Object.entries(sourceColors) as [src, col]}
+				{:else if $discoverSpaceStore.lens === 'source'}
+					{#each sourceOrder as src}
 						<div class="legend-row">
-							<span class="swatch" style:background={col}></span>
-							<span>{src}</span>
+							<span class="swatch" style:background={SOURCE_RING[src]}></span>
+							<span>{SOURCE_LABELS[src]}</span>
 						</div>
 					{/each}
-				{/if}
-
-				{#if $discoverSpaceStore.lens === 'confidence'}
-					<div class="legend-heading sub">Opacity = confidence</div>
-					<div class="legend-row"><span class="swatch bright"></span><span>High confidence</span></div>
+				{:else if $discoverSpaceStore.lens === 'confidence'}
+					<div class="legend-row"><span class="swatch bright"></span><span>Well supported</span></div>
 					<div class="legend-row"><span class="swatch dim"></span><span>Cold start</span></div>
+				{:else}
+					{#each families as family (family.key)}
+						<div class="legend-row">
+							<span class="swatch" style:background={family.color}></span>
+							<span>{family.label}</span>
+						</div>
+					{/each}
+					<div class="legend-row"><span class="swatch" style:background={UNKNOWN_FILL}></span><span>No genre yet</span></div>
 				{/if}
 			</div>
 
 			<div class="legend-section">
-				<div class="legend-heading">Nodes</div>
-				<div class="legend-row"><span class="swatch seed"></span><span>Seed (Anchor Star)</span></div>
+				<div class="legend-heading">Stars</div>
+				<div class="legend-row"><span class="swatch seed"></span><span>Anchor</span></div>
 				<div class="legend-row"><span class="swatch playing"></span><span>Playing</span></div>
 				<div class="legend-row"><span class="swatch playlist"></span><span>In playlist</span></div>
 			</div>
@@ -96,7 +107,10 @@
 </div>
 
 <style>
+	/* The legend drops over the stage instead of growing the toolbar, so the
+	   filter bar beside it stays at the top. */
 	.lens-wrap {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
@@ -137,6 +151,10 @@
 	}
 	.legend-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
 	.legend-body {
+		position: absolute;
+		top: calc(100% + 6px);
+		left: 0;
+		z-index: 12;
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
@@ -146,14 +164,16 @@
 		border: 1px solid var(--panel-border);
 		border-radius: var(--radius-sm);
 		padding: 8px 12px;
-		min-width: 160px;
-		max-width: 200px;
+		min-width: 190px;
+		max-width: 230px;
 		font-size: var(--font-size-xs);
 	}
 	.legend-section { display: flex; flex-direction: column; gap: 4px; }
 	.legend-heading { color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.08em; font-size: var(--font-size-2xs); margin-bottom: 2px; }
-	.legend-heading.sub { font-size: var(--font-size-2xs); margin-top: 4px; }
 	.legend-row { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+	.glyph { width: 14px; flex-shrink: 0; text-align: center; color: var(--text-tertiary); }
+	.scale { height: 8px; border-radius: 999px; }
+	.scale-labels { display: flex; justify-content: space-between; color: var(--text-tertiary); font-size: var(--font-size-2xs); }
 	.swatch {
 		width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
 		background: rgba(120,120,140,0.5);

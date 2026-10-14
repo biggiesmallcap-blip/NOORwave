@@ -381,7 +381,7 @@
 					</div>
 				</div>
 			{:else if $discoverSpaceStore.nodes.length > 0 && !selectedNode}
-				<p class="canvas-hint">Hover a star to inspect it. Click one to open it.</p>
+				<p class="canvas-hint">Closer to the anchor ranks higher. Hover a star to inspect it.</p>
 			{/if}
 
 			<div class="canvas-overlay bottom-center">

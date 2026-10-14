@@ -8,6 +8,7 @@
 		branchHere,
 	} from './discover_space_store';
 	import type { DiscoverTrackNode } from './discover_space_types';
+	import { openNodeMenu } from './discover_space_menu';
 
 	interface Props {
 		onSelectNode?: (node: DiscoverTrackNode) => void;
@@ -68,8 +69,12 @@
 			.slice(0, 2);
 	}
 
+	// Relative to the best row: shaped scores can run above 1, and an absolute
+	// clamp painted most of the top of the list as a full bar.
+	let topScore = $derived(rows.reduce((best, n) => Math.max(best, sortScore(n)), 0));
 	function barWidth(node: DiscoverTrackNode): number {
-		return Math.round(Math.min(1, Math.max(0, sortScore(node))) * 100);
+		if (topScore <= 0) return 0;
+		return Math.round(Math.max(0, sortScore(node) / topScore) * 100);
 	}
 
 	function isSuppressed(node: DiscoverTrackNode): boolean {
@@ -124,6 +129,7 @@
 					role="button"
 					tabindex="0"
 					onclick={() => onSelectNode?.(node)}
+					oncontextmenu={(e) => openNodeMenu(e, node)}
 					onkeydown={(e) => handleRowKeydown(e, node)}
 				>
 					<div class="row-art">
@@ -246,6 +252,8 @@
 	.ranked-list.collapsed .collapse-btn svg { transform: rotate(-90deg); }
 	.list-title {
 		flex: 1;
+		min-width: 0;
+		white-space: nowrap;
 		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		color: var(--text-primary);
