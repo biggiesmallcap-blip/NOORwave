@@ -55,7 +55,9 @@ export const VALID: WallpaperId[] = ['none', 'aurora', 'chrome', 'grid', 'nebula
                                'pattern-shards', 'pattern-vector'];
 
 // Original fresh-install appearance; valid saved choices always take priority.
-const DEFAULT: WallpaperId = 'standing-wave';
+// Off by default: Pure Black is a flat ground. Onboarding forces the
+// standing wave as its own backdrop (+layout.svelte activeWallpaper).
+const DEFAULT: WallpaperId = 'none';
 
 function clampSetting(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, Math.round(value)));

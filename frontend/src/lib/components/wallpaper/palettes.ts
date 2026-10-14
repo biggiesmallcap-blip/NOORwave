@@ -607,7 +607,9 @@ export const PALETTES: Palette[] = [
 	}
 ];
 
-export const DEFAULT_PALETTE: PaletteId = 'futuro';
+// Fresh installs start on Pure Black (dark, no wallpaper). Onboarding still
+// shows the Futuro standing-wave brand backdrop; its picker preselects this.
+export const DEFAULT_PALETTE: PaletteId = 'void';
 
 export function paletteById(id: PaletteId): Palette {
 	return PALETTES.find((p) => p.id === id) ?? PALETTES[0];
