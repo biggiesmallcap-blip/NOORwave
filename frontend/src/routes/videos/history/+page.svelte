@@ -3,6 +3,7 @@
 	import { api, type TidalSearchVideo, type VideoHistoryEntry } from '$lib/api/client';
 	import VideoCard from '$lib/components/video/VideoCard.svelte';
 	import EmptyState from '$lib/components/ui/EmptyState.svelte';
+	import InlineConfirm from '$lib/components/ui/InlineConfirm.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import { playVideo } from '$lib/stores/video_session';
 	import { showToast } from '$lib/stores/toast';
@@ -61,7 +62,6 @@
 
 	async function clearAll() {
 		if (clearing || entries.length === 0) return;
-		if (!confirm('Clear your whole watch history? Recently watched picks can then come back on the shelves.')) return;
 		clearing = true;
 		try {
 			const result = await api.clearVideoHistory();
@@ -95,7 +95,13 @@
 				<h2>History</h2>
 				<p>{countLine}, newest first, with how far you got.</p>
 			</div>
-			<button type="button" class="clear" disabled={clearing} onclick={() => void clearAll()}>Clear history</button>
+			<InlineConfirm
+				label="Clear history"
+				question={entries.length >= HISTORY_LIMIT ? 'Clear your whole watch history?' : `Clear all ${entries.length} ${entries.length === 1 ? 'video' : 'videos'}?`}
+				confirmLabel="Clear"
+				busy={clearing}
+				onconfirm={() => void clearAll()}
+			/>
 		</header>
 		{#each days as day (day.key)}
 			<section class="day" aria-label={day.label}>
@@ -164,29 +170,6 @@
 		margin: 0;
 		color: var(--text-tertiary);
 		font-size: var(--font-size-sm);
-	}
-
-	.clear {
-		height: 30px;
-		padding: 0 12px;
-		border: 0;
-		border-radius: 999px;
-		background: none;
-		color: var(--text-tertiary);
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-semibold);
-		cursor: pointer;
-		transition: background var(--motion-fast), color var(--motion-fast);
-	}
-
-	.clear:hover:not(:disabled) {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-
-	.clear:focus-visible {
-		outline: 2px solid var(--accent-strong);
-		outline-offset: 2px;
 	}
 
 	/* A day: its name over a hairline, then its cards. */
