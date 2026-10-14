@@ -673,6 +673,27 @@
 		transform: scale(1.04);
 		animation: curtain-drift 6s ease-out both;
 	}
+	/* Film grain over the still, so it reads as picture, not a frozen
+	   thumbnail: a seamless tile blended softly, jittering a few times a
+	   second like a projector. */
+	.curtain::after {
+		content: '';
+		position: absolute;
+		inset: -32px;
+		background: url('/textures/film-grain.webp') repeat;
+		background-size: 627px 627px;
+		mix-blend-mode: overlay;
+		opacity: 0.6;
+		pointer-events: none;
+		animation: grain 0.9s steps(1) infinite;
+	}
+	@keyframes grain {
+		0% { transform: translate(0, 0); }
+		20% { transform: translate(-13px, 9px); }
+		40% { transform: translate(11px, -17px); }
+		60% { transform: translate(-7px, 21px); }
+		80% { transform: translate(19px, -5px); }
+	}
 	@keyframes curtain-in {
 		from { opacity: 0; }
 		to { opacity: 1; }
@@ -698,6 +719,7 @@
 	/* Reduced motion: no dip, no slides; things simply appear. */
 	@media (prefers-reduced-motion: reduce) {
 		.dip { display: none; }
+		.curtain::after { animation: none; }
 		.lt-rule,
 		.lt-kicker,
 		.lt-artist,
@@ -709,6 +731,7 @@
 		.note { animation: none; }
 	}
 	:global(:root[data-motion='reduce']) .dip { display: none; }
+	:global(:root[data-motion='reduce']) .curtain::after { animation: none; }
 	:global(:root[data-motion='reduce']) :is(.lt-rule, .lt-kicker, .lt-artist, .lt-song, .lt-meta, .lt-why, .flip-card, .note) {
 		animation: none;
 	}
